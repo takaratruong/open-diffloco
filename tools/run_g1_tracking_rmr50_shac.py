@@ -2,6 +2,7 @@
 
 import argparse
 from contextlib import nullcontext
+import math
 from pathlib import Path
 
 from src.algorithms.shac.algorithm import train
@@ -29,6 +30,7 @@ def build_train_kwargs(
     source_actor_policy=None,
     residual_action_scale: float = 0.0,
     differentiate_source_feedback: bool = True,
+    body_mass_scale: float = 1.0,
 ) -> dict:
     if validated_task and unbounded_actions:
         raise ValueError(
@@ -42,6 +44,8 @@ def build_train_kwargs(
         raise ValueError(
             "source_actor_policy requires a positive residual_action_scale"
         )
+    if not math.isfinite(body_mass_scale) or body_mass_scale <= 0.0:
+        raise ValueError("body_mass_scale must be positive and finite")
     kwargs = build_100hz_train_kwargs(
         steps=steps,
         num_envs=num_envs,
@@ -74,6 +78,7 @@ def build_train_kwargs(
             "source_actor_policy": source_actor_policy,
             "residual_action_scale": residual_action_scale,
             "differentiate_source_feedback": differentiate_source_feedback,
+            "mass_range": (body_mass_scale, body_mass_scale),
         }
     )
     return kwargs
@@ -109,6 +114,7 @@ def main() -> None:
     parser.add_argument("--validated-task", action="store_true")
     parser.add_argument("--source-policy-checkpoint", type=Path)
     parser.add_argument("--residual-action-scale", type=float, default=0.1)
+    parser.add_argument("--body-mass-scale", type=float, default=1.0)
     parser.add_argument(
         "--stop-gradient-source-feedback",
         action="store_true",
@@ -149,6 +155,7 @@ def main() -> None:
                 differentiate_source_feedback=(
                     not args.stop_gradient_source_feedback
                 ),
+                body_mass_scale=args.body_mass_scale,
             )
         )
 

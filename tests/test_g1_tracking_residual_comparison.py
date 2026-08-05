@@ -4,6 +4,29 @@ import numpy as np
 
 
 class G1TrackingResidualComparisonTest(unittest.TestCase):
+    def test_comparison_cli_accepts_a_fixed_body_mass_scale(self):
+        from tools.compare_g1_tracking_residual import build_parser
+
+        args = build_parser().parse_args(
+            [
+                "--checkpoint",
+                "/tmp/residual.pkl",
+                "--rmr-policy-checkpoint",
+                "/tmp/source.pt",
+                "--output",
+                "/tmp/comparison.json",
+                "--phases",
+                "0",
+                "30",
+                "60",
+                "90",
+                "--body-mass-scale",
+                "1.15",
+            ]
+        )
+
+        self.assertEqual(args.body_mass_scale, 1.15)
+
     def test_rollout_summary_reduces_each_registered_metric(self):
         from tools.compare_g1_tracking_residual import summarize_records
 

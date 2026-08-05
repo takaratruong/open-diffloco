@@ -94,6 +94,33 @@ class G1TrackingRunnerTest(unittest.TestCase):
             "g1_tracking_rmr_50hz_validated",
         )
 
+    def test_native_rmr_runner_transports_a_fixed_body_mass_scale(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        kwargs = build_train_kwargs(
+            steps=65_536,
+            num_envs=256,
+            seed=3,
+            checkpoint_interval=16_384,
+            validated_task=True,
+            body_mass_scale=1.15,
+        )
+
+        self.assertEqual(kwargs["mass_range"], (1.15, 1.15))
+
+    def test_native_rmr_runner_rejects_nonpositive_body_mass_scale(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        with self.assertRaisesRegex(ValueError, "body_mass_scale"):
+            build_train_kwargs(
+                steps=65_536,
+                num_envs=256,
+                seed=3,
+                checkpoint_interval=16_384,
+                validated_task=True,
+                body_mass_scale=0.0,
+            )
+
     def test_native_rmr_runner_can_train_a_bounded_source_policy_residual(self):
         from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
 

@@ -37,13 +37,17 @@ def make_evaluation_env(
     *,
     solver_iterations: int | None = None,
     solver_ls_iterations: int | None = None,
+    body_mass_scale: float = 1.0,
 ) -> G1TrackingEnv:
     """Build an exact-termination task on the requested control timebase."""
     if variant not in EVALUATION_ENV_VARIANTS:
         raise ValueError(f"unsupported evaluation environment: {variant}")
     if (solver_iterations is None) != (solver_ls_iterations is None):
         raise ValueError("both solver iteration budgets must be provided")
-    kwargs = {"actor_history_len": 1}
+    kwargs = {
+        "actor_history_len": 1,
+        "mass_range": (body_mass_scale, body_mass_scale),
+    }
     if solver_iterations is not None:
         kwargs.update(
             solver_iterations=solver_iterations,
@@ -151,8 +155,8 @@ def _render_pair(
     )
 
 
-def main() -> None:
-    configure_jax()
+def build_parser() -> argparse.ArgumentParser:
+    """Builds the replay-free evaluation CLI."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--rmr-action-tape", type=Path)
@@ -166,11 +170,18 @@ def main() -> None:
     parser.add_argument("--residual-action-scale", type=float, default=0.0)
     parser.add_argument("--solver-iterations", type=int)
     parser.add_argument("--solver-ls-iterations", type=int)
+    parser.add_argument("--body-mass-scale", type=float, default=1.0)
     parser.add_argument(
         "--env-variant",
         choices=EVALUATION_ENV_VARIANTS,
         default="g1_tracking",
     )
+    return parser
+
+
+def main() -> None:
+    configure_jax()
+    parser = build_parser()
     args = parser.parse_args()
     if not 0.0 <= args.action_gain <= 1.0:
         parser.error("--action-gain must be between 0 and 1")
@@ -180,6 +191,7 @@ def main() -> None:
         args.env_variant,
         solver_iterations=args.solver_iterations,
         solver_ls_iterations=args.solver_ls_iterations,
+        body_mass_scale=args.body_mass_scale,
     )
     controller_sources = (
         args.checkpoint,
@@ -345,6 +357,7 @@ def main() -> None:
         "jax_enable_x64": bool(jax.config.x64_enabled),
         "solver_iterations": int(env.mj_model.opt.iterations),
         "solver_ls_iterations": int(env.mj_model.opt.ls_iterations),
+        "body_mass_scale": env.body_mass_scale,
         "controller": (
             "rmr_action_tape"
             if action_tape is not None

@@ -94,8 +94,8 @@ def aggregate(results: list[dict], controller: str) -> dict:
     }
 
 
-def main() -> None:
-    configure_jax()
+def build_parser() -> argparse.ArgumentParser:
+    """Builds the paired source/residual comparison CLI."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--rmr-policy-checkpoint", type=Path, required=True)
@@ -106,12 +106,20 @@ def main() -> None:
     parser.add_argument("--residual-action-scale", type=float, default=0.1)
     parser.add_argument("--solver-iterations", type=int, default=4)
     parser.add_argument("--solver-ls-iterations", type=int, default=5)
+    parser.add_argument("--body-mass-scale", type=float, default=1.0)
+    return parser
+
+
+def main() -> None:
+    configure_jax()
+    parser = build_parser()
     args = parser.parse_args()
 
     env = make_evaluation_env(
         "g1_tracking_rmr_50hz_validated",
         solver_iterations=args.solver_iterations,
         solver_ls_iterations=args.solver_ls_iterations,
+        body_mass_scale=args.body_mass_scale,
     )
     if any(phase < 0 or phase >= env.reference.qpos.shape[0] for phase in args.phases):
         parser.error("every phase must index the registered reference")
@@ -175,6 +183,7 @@ def main() -> None:
         "max_steps": args.max_steps,
         "solver_iterations": args.solver_iterations,
         "solver_ls_iterations": args.solver_ls_iterations,
+        "body_mass_scale": env.body_mass_scale,
         "source_checkpoint": str(args.rmr_policy_checkpoint.resolve()),
         "residual_checkpoint": str(args.checkpoint.resolve()),
         "residual_action_scale": args.residual_action_scale,
