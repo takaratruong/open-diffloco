@@ -63,10 +63,12 @@ class ShacInitializationTest(unittest.TestCase):
             traces.append(True)
             return {"value": state["value"] + 1.0}
 
-        state = commit_tree_to_local_device(
-            {"value": jnp.ones(2, dtype=jnp.float64)}
-        )
+        weak_value = jnp.asarray(0.0)[None]
+        self.assertTrue(weak_value.weak_type)
+
+        state = commit_tree_to_local_device({"value": weak_value})
         self.assertTrue(state["value"].committed)
+        self.assertFalse(state["value"].weak_type)
 
         warmup_state = update(state)
         jax.block_until_ready(warmup_state["value"])

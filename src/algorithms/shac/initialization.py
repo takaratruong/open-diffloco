@@ -20,7 +20,14 @@ def canonicalize_step_dtype(step):
 
 
 def commit_tree_to_local_device(tree):
-    """Commits JIT inputs before warm-up so later calls reuse its signature."""
+    """Strongly types and commits JIT inputs before warm-up."""
+
+    def strong_type(value):
+        if isinstance(value, jax.Array) and value.weak_type:
+            return jp.asarray(value, dtype=value.dtype)
+        return value
+
+    tree = jax.tree_util.tree_map(strong_type, tree)
     return jax.device_put(tree, jax.local_devices()[0])
 
 
