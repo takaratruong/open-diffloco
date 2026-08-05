@@ -77,6 +77,19 @@ class HumanoidEnvironmentContractTest(unittest.TestCase):
         self.assertAlmostEqual(env.target_height, 0.88)
         self.assertAlmostEqual(env.termination_height, 0.528)
 
+    def test_visualizer_falls_back_to_a_torso_tracking_camera(self):
+        from src.envs.humanoid.environment import HumanoidEnv
+        from src.visualization.go2 import _make_env_render_camera
+
+        env = HumanoidEnv(
+            xml_path="src/envs/humanoid/models/humanoid_mjx.xml",
+        )
+        camera = _make_env_render_camera(env)
+        self.assertIsInstance(camera, mujoco.MjvCamera)
+        self.assertEqual(camera.type, mujoco.mjtCamera.mjCAMERA_TRACKING)
+        self.assertEqual(camera.trackbodyid, env.torso_body_id)
+        self.assertLessEqual(camera.distance, 3.0)
+
 
 class HumanoidCliContractTest(unittest.TestCase):
     def test_humanoid_config_selects_frozen_upstream_defaults(self):

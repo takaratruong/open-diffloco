@@ -223,6 +223,29 @@ def _override_cmd(env_state, new_cmd):
     return env_state.replace(obs=history.reshape(-1), info=new_info)
 
 
+def _make_render_camera(model, torso_body_id):
+    """Use the upstream camera when present, otherwise track the robot torso."""
+    track_camera_id = mujoco.mj_name2id(
+        model, mujoco.mjtObj.mjOBJ_CAMERA, "track"
+    )
+    if track_camera_id >= 0:
+        return "track"
+
+    camera = mujoco.MjvCamera()
+    mujoco.mjv_defaultCamera(camera)
+    camera.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+    camera.trackbodyid = int(torso_body_id)
+    camera.distance = 2.5
+    camera.azimuth = 135.0
+    camera.elevation = -20.0
+    return camera
+
+
+def _make_env_render_camera(env):
+    """Resolve a render camera from the environment's public torso contract."""
+    return _make_render_camera(env.mj_model, env.torso_body_id)
+
+
 def visualize_interactive(policy_path: str, speed: float = 1.0, terrain: str = None):
     """Open the interactive MuJoCo viewer."""
     print(f"Loading policy from {policy_path}")
@@ -464,6 +487,7 @@ def visualize(
     mj_model = env.mj_model
     mj_data = mujoco.MjData(mj_model)
     renderer = mujoco.Renderer(mj_model, height=480, width=640)
+    render_camera = _make_env_render_camera(env)
 
     actor = Actor(env.action_dim)
     norm = Normalizer(env.actor_frame_obs_dim)
@@ -572,7 +596,7 @@ def visualize(
         mj_data.qpos[:] = np.array(env_state.data.qpos)
         mj_data.qvel[:] = np.array(env_state.data.qvel)
         mujoco.mj_forward(mj_model, mj_data)
-        renderer.update_scene(mj_data, camera="track")
+        renderer.update_scene(mj_data, camera=render_camera)
 
         try:
             scn = renderer.scene
