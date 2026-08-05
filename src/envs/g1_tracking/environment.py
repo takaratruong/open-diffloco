@@ -104,10 +104,19 @@ class G1TrackingEnv:
         reference_path: str = DEFAULT_REFERENCE_PATH,
         controller_path: str = DEFAULT_CONTROLLER_PATH,
         actor_history_len: int = 1,
+        physics_substeps: int = 5,
+        reference_stride: int = 1,
+        reward_scale: float = 1.0,
         **_unused_go2_options,
     ):
         if actor_history_len < 1:
             raise ValueError("actor_history_len must be at least one")
+        if physics_substeps < 1:
+            raise ValueError("physics_substeps must be at least one")
+        if reference_stride < 1:
+            raise ValueError("reference_stride must be at least one")
+        if reward_scale <= 0.0:
+            raise ValueError("reward_scale must be positive")
 
         self.xml_path = str(Path(xml_path))
         self.reference_path = str(Path(reference_path))
@@ -173,7 +182,9 @@ class G1TrackingEnv:
             np.where(joint_limited, soft_upper, np.inf)
         )
 
-        self.n_frames = 5
+        self.n_frames = physics_substeps
+        self.reference_stride = reference_stride
+        self.reward_scale = reward_scale
         self.dt = float(self.mj_model.opt.timestep * self.n_frames)
         self.action_dim = 29
         self.actor_history_len = actor_history_len
@@ -482,7 +493,9 @@ class G1TrackingEnv:
             | (distal_z_error > 0.4)
             | nan_failure
         ).astype(jp.float64)
-        clip_end = (phase >= self.reference_length - 1).astype(jp.float64)
+        clip_end = (
+            phase >= self.reference_length - self.reference_stride
+        ).astype(jp.float64)
         return jp.maximum(terminal, clip_end), terminal
 
     @functools.partial(jax.checkpoint, static_argnums=(0,))
@@ -510,7 +523,8 @@ class G1TrackingEnv:
             physics_step, state.data, None, length=self.n_frames
         )
         next_phase = jp.minimum(
-            state.info["phase"] + 1, self.reference_length - 1
+            state.info["phase"] + self.reference_stride,
+            self.reference_length - 1,
         )
         pre_reset_info = {
             **state.info,
@@ -535,7 +549,7 @@ class G1TrackingEnv:
                 soft_joint_upper=self.soft_joint_upper,
             )
         )
-        reward = reward + regularization_reward
+        reward = self.reward_scale * (reward + regularization_reward)
         components = {**components, **regularization_components}
         done, terminal = self._termination(
             data, pre_reset_info, body_pos, body_quat
@@ -685,3 +699,16 @@ class G1TrackingEnv:
         frames = obs.reshape(*obs.shape[:-1], self.actor_history_len, -1)
         normalized = normalizer.normalize(norm_state, frames)
         return normalized.reshape(*obs.shape[:-1], self.actor_obs_dim)
+
+
+class G1TrackingRMR50HzEnv(G1TrackingEnv):
+    """RMR task at its native 50 Hz control and reward-manager timebase."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(
+            *args,
+            physics_substeps=10,
+            reference_stride=2,
+            reward_scale=0.02,
+            **kwargs,
+        )

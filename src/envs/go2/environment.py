@@ -15,6 +15,7 @@ VARIANTS = {
     "highspeed_nokinref": "src.envs.go2.variants.highspeed_nokinref.environment",
     "humanoid_blind_linvel_nokinref": "src.envs.humanoid.environment",
     "g1_tracking": "src.envs.g1_tracking.environment",
+    "g1_tracking_rmr_50hz": "src.envs.g1_tracking.environment",
 }
 
 
@@ -32,6 +33,8 @@ def get_go2_env_class(variant: str = DEFAULT_VARIANT):
         return module.HumanoidEnv
     if variant == "g1_tracking":
         return module.G1TrackingEnv
+    if variant == "g1_tracking_rmr_50hz":
+        return module.G1TrackingRMR50HzEnv
     return module.Go2Env
 
 

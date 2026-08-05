@@ -170,5 +170,45 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         self.assertEqual(float(terminal), 0.0)
 
 
+class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from src.envs.g1_tracking.environment import G1TrackingRMR50HzEnv
+
+        cls.env = G1TrackingRMR50HzEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+        )
+
+    def test_control_reference_and_reward_timebase_match_rmr(self):
+        env = self.env
+        self.assertEqual(env.n_frames, 10)
+        self.assertEqual(env.reference_stride, 2)
+        self.assertAlmostEqual(env.dt, 0.02)
+        self.assertAlmostEqual(env.reward_scale, 0.02)
+
+        state = env.reset_at_phase(
+            jax.random.PRNGKey(23), jnp.array(0.0), jnp.array(0)
+        )
+        raw_reward, _ = env._tracking_reward(state.data, state.info)
+        self.assertAlmostEqual(
+            float(raw_reward * env.reward_scale), 0.1, places=6
+        )
+
+        next_state = env.step(state, jnp.zeros(env.action_dim))
+        self.assertEqual(int(next_state.info["phase"]), 2)
+
+    def test_factory_selects_50hz_rmr_environment(self):
+        from src.envs.g1_tracking.environment import G1TrackingRMR50HzEnv
+        from src.envs.go2.environment import get_go2_env_class
+
+        self.assertIs(
+            get_go2_env_class("g1_tracking_rmr_50hz"),
+            G1TrackingRMR50HzEnv,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

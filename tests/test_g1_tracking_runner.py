@@ -29,6 +29,23 @@ class G1TrackingRunnerTest(unittest.TestCase):
         self.assertEqual(kwargs["push_velocity_range"], (0.0, 0.0))
         self.assertFalse(kwargs["terrain"])
 
+    def test_native_rmr_runner_matches_50hz_rollout_timebase(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        kwargs = build_train_kwargs(
+            steps=196608,
+            num_envs=32,
+            seed=3,
+            checkpoint_interval=49152,
+        )
+        self.assertEqual(kwargs["env_variant"], "g1_tracking_rmr_50hz")
+        self.assertEqual(kwargs["unroll_length"], 24)
+        self.assertEqual(kwargs["gamma"], 0.99)
+        self.assertEqual(kwargs["gae_lambda"], 0.95)
+        self.assertEqual(kwargs["max_episode_length"], 60)
+        self.assertEqual(kwargs["total_steps"], 196608)
+        self.assertEqual(kwargs["checkpoint_interval"], 49152)
+
 
 if __name__ == "__main__":
     unittest.main()
