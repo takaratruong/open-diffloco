@@ -454,12 +454,15 @@ class G1TrackingEnv:
         anchor_z_error = jp.abs(
             self.body_pos_reference[phase, 0, 2] - body_pos[0, 2]
         )
+        anchor_xy_error = jp.linalg.norm(
+            self.body_pos_reference[phase, 0, :2] - body_pos[0, :2]
+        )
         world_down = jp.array([0.0, 0.0, -1.0])
         target_down = _quat_apply(
             _quat_inv(self.body_quat_reference[phase, 0]), world_down
         )
         actual_down = _quat_apply(_quat_inv(body_quat[0]), world_down)
-        gravity_error = jp.linalg.norm(target_down - actual_down)
+        gravity_z_error = jp.abs(target_down[2] - actual_down[2])
         distal_z_error = jp.max(
             jp.abs(
                 self.body_pos_reference[
@@ -474,8 +477,9 @@ class G1TrackingEnv:
         )
         terminal = (
             (anchor_z_error > 0.25)
-            | (gravity_error > 0.8)
-            | (distal_z_error > 0.25)
+            | (anchor_xy_error > 1.3)
+            | (gravity_z_error > 0.8)
+            | (distal_z_error > 0.4)
             | nan_failure
         ).astype(jp.float64)
         clip_end = (phase >= self.reference_length - 1).astype(jp.float64)

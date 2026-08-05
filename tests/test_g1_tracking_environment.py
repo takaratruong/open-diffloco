@@ -124,6 +124,51 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         self.assertTrue(np.isfinite(np.asarray(next_state.data.qpos)).all())
         self.assertTrue(np.isfinite(float(next_state.reward)))
 
+    def test_termination_thresholds_match_upstream_rmr(self):
+        from src.envs.g1_tracking.environment import _quat_mul
+
+        env = self.env
+        state = env.reset_at_phase(
+            jax.random.PRNGKey(19), jnp.array(0.0), jnp.array(0)
+        )
+        body_pos, body_quat, _, _ = env._body_state(state.data)
+        distal_slot = env.distal_body_slots[0]
+
+        within_distal_limit = body_pos.at[distal_slot, 2].add(0.3)
+        _, terminal = env._termination(
+            state.data, state.info, within_distal_limit, body_quat
+        )
+        self.assertEqual(float(terminal), 0.0)
+
+        beyond_distal_limit = body_pos.at[distal_slot, 2].add(0.41)
+        _, terminal = env._termination(
+            state.data, state.info, beyond_distal_limit, body_quat
+        )
+        self.assertEqual(float(terminal), 1.0)
+
+        within_xy_limit = body_pos.at[0, 0].add(1.2)
+        _, terminal = env._termination(
+            state.data, state.info, within_xy_limit, body_quat
+        )
+        self.assertEqual(float(terminal), 0.0)
+
+        beyond_xy_limit = body_pos.at[0, 0].add(1.31)
+        _, terminal = env._termination(
+            state.data, state.info, beyond_xy_limit, body_quat
+        )
+        self.assertEqual(float(terminal), 1.0)
+
+        one_radian_roll = jnp.array(
+            [jnp.cos(0.5), jnp.sin(0.5), 0.0, 0.0]
+        )
+        moderate_tilt = body_quat.at[0].set(
+            _quat_mul(body_quat[0], one_radian_roll)
+        )
+        _, terminal = env._termination(
+            state.data, state.info, body_pos, moderate_tilt
+        )
+        self.assertEqual(float(terminal), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
