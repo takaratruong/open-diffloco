@@ -78,6 +78,22 @@ class G1TrackingRunnerTest(unittest.TestCase):
             kwargs["env_variant"], "g1_tracking_rmr_50hz_unbounded"
         )
 
+    def test_native_rmr_runner_can_select_validated_task_authority(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        kwargs = build_train_kwargs(
+            steps=65_536,
+            num_envs=256,
+            seed=3,
+            checkpoint_interval=16_384,
+            validated_task=True,
+        )
+
+        self.assertEqual(
+            kwargs["env_variant"],
+            "g1_tracking_rmr_50hz_source_step_robust",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

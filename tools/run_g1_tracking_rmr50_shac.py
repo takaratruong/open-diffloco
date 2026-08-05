@@ -21,7 +21,12 @@ def build_train_kwargs(
     actor_bootstrap_scale: float = 1.0,
     unroll_length: int = 24,
     unbounded_actions: bool = False,
+    validated_task: bool = False,
 ) -> dict:
+    if validated_task and unbounded_actions:
+        raise ValueError(
+            "validated_task already includes unbounded source actions"
+        )
     kwargs = build_100hz_train_kwargs(
         steps=steps,
         num_envs=num_envs,
@@ -43,9 +48,13 @@ def build_train_kwargs(
             "gae_lambda": 0.95,
             "max_episode_length": 60,
             "env_variant": (
-                "g1_tracking_rmr_50hz_unbounded"
-                if unbounded_actions
-                else "g1_tracking_rmr_50hz"
+                "g1_tracking_rmr_50hz_source_step_robust"
+                if validated_task
+                else (
+                    "g1_tracking_rmr_50hz_unbounded"
+                    if unbounded_actions
+                    else "g1_tracking_rmr_50hz"
+                )
             ),
         }
     )
@@ -64,6 +73,7 @@ def main() -> None:
     parser.add_argument("--actor-bootstrap-scale", type=float, default=1.0)
     parser.add_argument("--unroll-length", type=int, default=24)
     parser.add_argument("--unbounded-actions", action="store_true")
+    parser.add_argument("--validated-task", action="store_true")
     args = parser.parse_args()
 
     configure_jax()
@@ -79,6 +89,7 @@ def main() -> None:
             actor_bootstrap_scale=args.actor_bootstrap_scale,
             unroll_length=args.unroll_length,
             unbounded_actions=args.unbounded_actions,
+            validated_task=args.validated_task,
         )
     )
 

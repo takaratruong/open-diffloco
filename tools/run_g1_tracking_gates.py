@@ -10,20 +10,30 @@ import jax.numpy as jnp
 import numpy as np
 
 from src.envs.g1_tracking.environment import G1TrackingEnv
+from src.envs.go2.environment import get_go2_env_class
+
+
+def make_gate_env(env_variant: str) -> G1TrackingEnv:
+    """Construct a named G1 task for semantic and gradient gates."""
+    if not env_variant.startswith("g1_tracking"):
+        raise ValueError("gradient gate requires a G1 tracking environment")
+    return get_go2_env_class(env_variant)(actor_history_len=1)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--env-variant", default="g1_tracking")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    env = G1TrackingEnv(actor_history_len=1)
+    env = make_gate_env(args.env_variant)
     state = env.reset(jax.random.PRNGKey(args.seed), jnp.array(0.0))
     reset_reward, reset_components = env._tracking_reward(state.data, state.info)
     semantic = {
         "seed": args.seed,
+        "env_variant": args.env_variant,
         "phase": int(state.info["phase"]),
         "reference_reward": float(reset_reward),
         "reference_components": {
@@ -35,6 +45,8 @@ def main() -> None:
         "physics_dt": float(env.mj_model.opt.timestep),
         "control_dt": env.dt,
         "physics_substeps": env.n_frames,
+        "solver_iterations": int(env.mj_model.opt.iterations),
+        "solver_ls_iterations": int(env.mj_model.opt.ls_iterations),
         "reference_frames": env.reference_length,
         "finite_reset_qpos": bool(jnp.isfinite(state.data.qpos).all()),
         "finite_reset_qvel": bool(jnp.isfinite(state.data.qvel).all()),
