@@ -18,6 +18,10 @@ REFERENCE = Path(
 CONTROLLER = Path(
     "/home/ubuntu/projects/diffsim2real/outputs/rmr_torques_iter4999.npz"
 )
+MJLAB_MODEL = Path(
+    "/home/ubuntu/references/mjlab/src/mjlab/asset_zoo/robots/"
+    "unitree_g1/xmls/g1.xml"
+)
 
 
 class G1TrackingEnvironmentTest(unittest.TestCase):
@@ -249,6 +253,31 @@ class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
             state.obs[:29],
             unbounded.reference.qpos[0, 7:][model_to_actor],
         )
+
+    def test_mjlab_variant_matches_source_physics_and_solver_timebase(self):
+        from src.envs.g1_tracking.environment import (
+            G1TrackingRMR50HzMjlabEnv,
+        )
+        from src.envs.go2.environment import get_go2_env_class
+
+        env = G1TrackingRMR50HzMjlabEnv(
+            xml_path=str(MJLAB_MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+        )
+
+        self.assertIs(
+            get_go2_env_class("g1_tracking_rmr_50hz_mjlab"),
+            G1TrackingRMR50HzMjlabEnv,
+        )
+        self.assertEqual(env.n_frames, 4)
+        self.assertAlmostEqual(env.mj_model.opt.timestep, 0.005)
+        self.assertAlmostEqual(env.dt, 0.02)
+        self.assertEqual(env.mj_model.opt.iterations, 10)
+        self.assertEqual(env.mj_model.opt.ls_iterations, 20)
+        self.assertEqual(env.mj_model.ngeom, 68)
+        self.assertFalse(env.squash_actor_actions)
 
 
 if __name__ == "__main__":

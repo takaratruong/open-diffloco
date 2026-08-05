@@ -32,6 +32,10 @@ DEFAULT_REFERENCE_PATH = (
 DEFAULT_CONTROLLER_PATH = (
     "/home/ubuntu/projects/diffsim2real/outputs/rmr_torques_iter4999.npz"
 )
+DEFAULT_MJLAB_MODEL_PATH = (
+    "/home/ubuntu/references/mjlab/src/mjlab/asset_zoo/robots/"
+    "unitree_g1/xmls/g1.xml"
+)
 
 
 def _quat_inv(q: jax.Array) -> jax.Array:
@@ -109,6 +113,9 @@ class G1TrackingEnv:
         reward_scale: float = 1.0,
         clip_actions: bool = True,
         actor_joint_order: str = "model",
+        physics_timestep: float | None = None,
+        solver_iterations: int = 1,
+        solver_ls_iterations: int = 5,
         **_unused_go2_options,
     ):
         if actor_history_len < 1:
@@ -121,6 +128,10 @@ class G1TrackingEnv:
             raise ValueError("reward_scale must be positive")
         if actor_joint_order not in ("model", "source"):
             raise ValueError("actor_joint_order must be 'model' or 'source'")
+        if physics_timestep is not None and physics_timestep <= 0.0:
+            raise ValueError("physics_timestep must be positive")
+        if solver_iterations < 1 or solver_ls_iterations < 1:
+            raise ValueError("solver iteration counts must be positive")
 
         self.xml_path = str(Path(xml_path))
         self.reference_path = str(Path(reference_path))
@@ -135,8 +146,10 @@ class G1TrackingEnv:
         # The working Open-DiffLoco path uses a fixed, fully differentiable
         # solver budget. Preserve the G1 2 ms physics step and advance five
         # substeps per 100 Hz reference frame.
-        self.mj_model.opt.iterations = 1
-        self.mj_model.opt.ls_iterations = 5
+        if physics_timestep is not None:
+            self.mj_model.opt.timestep = physics_timestep
+        self.mj_model.opt.iterations = solver_iterations
+        self.mj_model.opt.ls_iterations = solver_ls_iterations
         self.mj_model.geom_margin[:] = 0.0
         self.mjx_model = mjx.put_model(self.mj_model)
 
@@ -748,5 +761,35 @@ class G1TrackingRMR50HzUnboundedEnv(G1TrackingRMR50HzEnv):
             *args,
             clip_actions=False,
             actor_joint_order="source",
+            **kwargs,
+        )
+
+
+class G1TrackingRMR50HzMjlabEnv(G1TrackingEnv):
+    """Source-order RMR task on MJLab's validated MuJoCo plant settings."""
+
+    def __init__(self, *args, **kwargs):
+        for option in (
+            "physics_substeps",
+            "reference_stride",
+            "reward_scale",
+            "clip_actions",
+            "actor_joint_order",
+            "physics_timestep",
+            "solver_iterations",
+            "solver_ls_iterations",
+        ):
+            kwargs.pop(option, None)
+        kwargs.setdefault("xml_path", DEFAULT_MJLAB_MODEL_PATH)
+        super().__init__(
+            *args,
+            physics_substeps=4,
+            reference_stride=2,
+            reward_scale=0.02,
+            clip_actions=False,
+            actor_joint_order="source",
+            physics_timestep=0.005,
+            solver_iterations=10,
+            solver_ls_iterations=20,
             **kwargs,
         )
