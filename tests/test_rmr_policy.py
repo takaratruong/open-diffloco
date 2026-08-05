@@ -113,6 +113,18 @@ def test_source_row_normalizer_preserves_unbatched_action_shape():
     np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-5)
 
 
+def test_float64_sim_observation_runs_at_source_float32_precision():
+    model, normalizer, obs_dim, _ = _state_dicts()
+    policy = rmr_policy_from_state_dict(model, normalizer)
+    obs = np.random.default_rng(11).standard_normal((obs_dim,)).astype(np.float64)
+
+    got = np.asarray(apply_rmr_policy(policy, obs))
+    expected = _numpy_forward(model, normalizer, obs.astype(np.float32))
+
+    assert got.dtype == np.float32
+    np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-5)
+
+
 def test_zero_residual_preserves_source_action():
     model, normalizer, obs_dim, act_dim = _state_dicts()
     policy = rmr_policy_from_state_dict(model, normalizer)

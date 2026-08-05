@@ -146,7 +146,10 @@ def apply_rmr_policy(policy: RmrPolicy, observations: Any) -> jnp.ndarray:
     final linear output layer. A single observation returns a 1-D action; a
     leading batch dimension is preserved.
     """
-    x = jnp.asarray(observations)
+    # The source RSL-RL actor is a float32 network even when the simulator
+    # state is float64. Preserve that boundary to avoid changing its actions
+    # and promoting the large frozen network inside the differentiated graph.
+    x = jnp.asarray(observations, dtype=policy.mean.dtype)
     x = (x - policy.mean) / (policy.std + 1e-8)
 
     last = len(policy.weights) - 1
