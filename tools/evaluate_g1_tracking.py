@@ -13,6 +13,26 @@ import numpy as np
 from src.core.data_structures import Normalizer
 from src.core.networks import Actor
 from src.envs.g1_tracking.environment import G1TrackingEnv
+from src.envs.go2.environment import get_go2_env_class
+
+
+EVALUATION_ENV_VARIANTS = (
+    "g1_tracking",
+    "g1_tracking_rmr_50hz",
+    "g1_tracking_rmr_50hz_unbounded",
+)
+
+
+def configure_jax() -> None:
+    """Match the float64 precision used by G1 training."""
+    jax.config.update("jax_enable_x64", True)
+
+
+def make_evaluation_env(variant: str) -> G1TrackingEnv:
+    """Build an exact-termination task on the requested control timebase."""
+    if variant not in EVALUATION_ENV_VARIANTS:
+        raise ValueError(f"unsupported evaluation environment: {variant}")
+    return get_go2_env_class(variant)(actor_history_len=1)
 
 
 def scale_policy_action(action: jax.Array, gain: float) -> jax.Array:
@@ -25,7 +45,10 @@ def scale_policy_action(action: jax.Array, gain: float) -> jax.Array:
 def _load_policy(
     env: G1TrackingEnv, checkpoint: Path | None, seed: int
 ):
-    actor = Actor(env.action_dim)
+    actor = Actor(
+        env.action_dim,
+        squash=getattr(env, "squash_actor_actions", True),
+    )
     if checkpoint is not None:
         with checkpoint.open("rb") as handle:
             state = pickle.load(handle)
@@ -73,6 +96,7 @@ def _render_pair(
 
 
 def main() -> None:
+    configure_jax()
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--rmr-action-tape", type=Path)
@@ -82,12 +106,17 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=120)
     parser.add_argument("--render-every", type=int, default=2)
     parser.add_argument("--action-gain", type=float, default=1.0)
+    parser.add_argument(
+        "--env-variant",
+        choices=EVALUATION_ENV_VARIANTS,
+        default="g1_tracking",
+    )
     args = parser.parse_args()
     if not 0.0 <= args.action_gain <= 1.0:
         parser.error("--action-gain must be between 0 and 1")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    env = G1TrackingEnv(actor_history_len=1)
+    env = make_evaluation_env(args.env_variant)
     if args.checkpoint is not None and args.rmr_action_tape is not None:
         parser.error("--checkpoint and --rmr-action-tape are mutually exclusive")
     actor = actor_params = normalizer_state = None
@@ -206,6 +235,7 @@ def main() -> None:
         "mean_body_linear_velocity_error": float(np.mean(values[:, 9])),
         "mean_body_angular_velocity_error": float(np.mean(values[:, 10])),
         "action_gain": args.action_gain,
+        "jax_enable_x64": bool(jax.config.x64_enabled),
     }
     (args.output_dir / "summary.json").write_text(
         __import__("json").dumps(summary, indent=2, sort_keys=True) + "\n"
