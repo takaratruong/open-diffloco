@@ -20,6 +20,10 @@ from src.envs.go2.environment import Go2Env
 from src.envs.go2.terrain import differentiated_ou_foot_forces
 from src.core.utils import compute_grad_norm
 from src.algorithms.shac.gradients import aggregate_per_env_gradients
+from src.algorithms.shac.initialization import (
+    canonicalize_normalizer_dtype,
+    canonicalize_step_dtype,
+)
 
 
 def load_checkpoint(path: str):
@@ -308,6 +312,12 @@ def train(
     # Initialize environments at difficulty=0 (flat ground)
     env_keys = jax.random.split(k3, num_envs)
     env_state = jax.vmap(env.reset)(env_keys, jp.zeros(num_envs))
+    actor_normalizer = canonicalize_normalizer_dtype(
+        actor_normalizer, env_state.obs.dtype
+    )
+    critic_normalizer = canonicalize_normalizer_dtype(
+        critic_normalizer, env_state.info["bootstrap_critic_obs"].dtype
+    )
 
     _push_interval_steps = max(int(round(push_interval_s / env.dt)), 1)
     _push_velocity_lo = jp.array(push_velocity_range[0], dtype=jp.float64)
@@ -753,7 +763,7 @@ def train(
             critic_normalizer=resumed_state.critic_normalizer,
             actor_opt=resumed_state.actor_opt,
             critic_opt=resumed_state.critic_opt,
-            step=resumed_step,
+            step=canonicalize_step_dtype(resumed_step),
         )
     else:
         state = TrainState(
@@ -766,12 +776,13 @@ def train(
             critic_normalizer=critic_normalizer,
             actor_opt=actor_opt_state,
             critic_opt=critic_opt_state,
-            step=0,
+            step=canonicalize_step_dtype(0),
         )
 
     print("Compiling...")
     start_comp_time = time.perf_counter()
     warmup_state, _ = train_step(state)
+    jax.block_until_ready(warmup_state.step)
     compile_time = time.perf_counter() - start_comp_time
     print(f"Compilation took {compile_time:.1f}s")
 
