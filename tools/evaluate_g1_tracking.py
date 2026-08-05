@@ -68,6 +68,7 @@ def _render_pair(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--rmr-action-tape", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--phase", type=int, default=0)
@@ -77,9 +78,24 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     env = G1TrackingEnv(actor_history_len=1)
-    actor, actor_params, normalizer_state = _load_policy(
-        env, args.checkpoint, args.seed
-    )
+    if args.checkpoint is not None and args.rmr_action_tape is not None:
+        parser.error("--checkpoint and --rmr-action-tape are mutually exclusive")
+    actor = actor_params = normalizer_state = None
+    action_tape = None
+    if args.rmr_action_tape is not None:
+        with np.load(args.rmr_action_tape, allow_pickle=False) as archive:
+            source_names = tuple(map(str, archive["joint_names"]))
+            permutation = np.array(
+                [
+                    source_names.index(name)
+                    for name in env.controller.joint_names
+                ]
+            )
+            action_tape = np.asarray(archive["action"][:, permutation])
+    else:
+        actor, actor_params, normalizer_state = _load_policy(
+            env, args.checkpoint, args.seed
+        )
     state = env.reset_at_phase(
         jax.random.PRNGKey(args.seed),
         jnp.array(0.0),
@@ -108,12 +124,20 @@ def main() -> None:
                     reference_data,
                 )
             )
-        normalized = env.normalize_actor_obs(
-            Normalizer(env.actor_frame_obs_dim),
-            normalizer_state,
-            state.obs,
-        ).astype(jnp.float32)
-        action = actor.apply(actor_params, normalized).astype(jnp.float64)
+        if action_tape is not None:
+            # The logged RMR controller runs at 50 Hz; the grounded reference
+            # and MJX task run at 100 Hz. Zero-order hold each logged action for
+            # two reference frames without using it for policy training.
+            action = jnp.asarray(
+                action_tape[min(phase // 2, len(action_tape) - 1)]
+            )
+        else:
+            normalized = env.normalize_actor_obs(
+                Normalizer(env.actor_frame_obs_dim),
+                normalizer_state,
+                state.obs,
+            ).astype(jnp.float32)
+            action = actor.apply(actor_params, normalized).astype(jnp.float64)
         state = env.step(state, action)
         records.append(
             (

@@ -1,0 +1,11 @@
+{
+  "mean_anchor_orientation_error": 0.21773219525560059,
+  "mean_anchor_position_error": 0.06420059757180173,
+  "mean_body_angular_velocity_error": 2.861964548175985,
+  "mean_body_linear_velocity_error": 0.6687333190982993,
+  "mean_body_orientation_error": 0.2465516080741178,
+  "mean_body_position_error": 0.08488633935022252,
+  "mean_reward": 3.2755664812133833,
+  "steps": 44,
+  "terminal": true
+}
