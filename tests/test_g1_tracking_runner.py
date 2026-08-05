@@ -21,6 +21,7 @@ class G1TrackingRunnerTest(unittest.TestCase):
         self.assertEqual(kwargs["action_noise_std_start"], 0.05)
         self.assertEqual(kwargs["action_noise_std_end"], 0.05)
         self.assertEqual(kwargs["actor_per_env_grad_clip"], 1.0)
+        self.assertEqual(kwargs["critic_per_env_grad_clip"], 1.0)
         self.assertEqual(kwargs["actor_bootstrap_scale"], 1.0)
         self.assertEqual(kwargs["friction_range"], (1.0, 1.0))
         self.assertEqual(kwargs["mass_range"], (1.0, 1.0))

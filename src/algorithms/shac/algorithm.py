@@ -113,6 +113,7 @@ def train(
     actor_history_len: int = 10,
     env_variant: str = "blind_nolinvel_nokinref",
     actor_per_env_grad_clip: float = None,
+    critic_per_env_grad_clip: float = None,
     actor_bootstrap_scale: float = 1.0,
 ):
     """
@@ -206,6 +207,16 @@ def train(
                 max_episode_length = resumed_hparams["max_episode_length"]
             if "actor_history_len" in resumed_hparams:
                 actor_history_len = resumed_hparams["actor_history_len"]
+            if "actor_per_env_grad_clip" in resumed_hparams:
+                actor_per_env_grad_clip = resumed_hparams[
+                    "actor_per_env_grad_clip"
+                ]
+            if "critic_per_env_grad_clip" in resumed_hparams:
+                critic_per_env_grad_clip = resumed_hparams[
+                    "critic_per_env_grad_clip"
+                ]
+            if "actor_bootstrap_scale" in resumed_hparams:
+                actor_bootstrap_scale = resumed_hparams["actor_bootstrap_scale"]
 
     # Compute curriculum defaults relative to total_steps
     if curriculum_grace is None:
@@ -660,17 +671,34 @@ def train(
                 all_final_obs,
             )
 
-            c_grads = jax.tree_util.tree_map(lambda g: jp.nanmean(g, axis=0), c_grads)
-            c_grads = jax.tree_util.tree_map(
-                lambda g: jp.where(jp.isfinite(g), g, 0.0), c_grads
-            )
+            if critic_per_env_grad_clip is None:
+                c_grads = jax.tree_util.tree_map(
+                    lambda g: jp.nanmean(g, axis=0), c_grads
+                )
+                c_grads = jax.tree_util.tree_map(
+                    lambda g: jp.where(jp.isfinite(g), g, 0.0), c_grads
+                )
+                critic_grad_stats = {
+                    "finite_fraction": jp.array(1.0, dtype=jp.float32),
+                    "raw_norm_median": jp.array(jp.nan, dtype=jp.float32),
+                    "raw_norm_max": jp.array(jp.nan, dtype=jp.float32),
+                }
+            else:
+                c_grads, critic_grad_stats = aggregate_per_env_gradients(
+                    c_grads, max_norm=critic_per_env_grad_clip
+                )
 
             c_updates, new_c_opt = critic_opt.update(c_grads, c_opt_state)
             new_c_params = optax.apply_updates(c_params, c_updates)
 
-            return (new_c_params, new_c_opt), jp.mean(c_losses)
+            return (new_c_params, new_c_opt), {
+                "loss": jp.nanmean(c_losses),
+                "finite_fraction": critic_grad_stats["finite_fraction"],
+                "raw_norm_median": critic_grad_stats["raw_norm_median"],
+                "raw_norm_max": critic_grad_stats["raw_norm_max"],
+            }
 
-        (new_critic_params, new_critic_opt), critic_losses = jax.lax.scan(
+        (new_critic_params, new_critic_opt), critic_update_metrics = jax.lax.scan(
             critic_update_step,
             (state.critic_params, state.critic_opt),
             None,
@@ -724,7 +752,14 @@ def train(
             "actor_grad_finite_fraction": actor_grad_stats["finite_fraction"],
             "actor_grad_raw_median": actor_grad_stats["raw_norm_median"],
             "actor_grad_raw_max": actor_grad_stats["raw_norm_max"],
-            "critic_loss": critic_losses[-1],
+            "critic_loss": critic_update_metrics["loss"][-1],
+            "critic_grad_finite_fraction": critic_update_metrics[
+                "finite_fraction"
+            ][-1],
+            "critic_grad_raw_median": critic_update_metrics["raw_norm_median"][
+                -1
+            ],
+            "critic_grad_raw_max": critic_update_metrics["raw_norm_max"][-1],
             "actor_loss": jp.mean(losses),
             "action_noise_current": current_noise_std,
             "track_vx": jp.mean(jp.abs(trajs["vel_x"] - trajs["cmd_x"])),
@@ -874,6 +909,15 @@ def train(
                         + "finite="
                         + f"{float(metrics['actor_grad_finite_fraction']):.3f}"
                     )
+                if critic_per_env_grad_clip is not None:
+                    print(
+                        " " * 9
+                        + "raw critic grad "
+                        + f"median={float(metrics['critic_grad_raw_median']):.2e} "
+                        + f"max={float(metrics['critic_grad_raw_max']):.2e} "
+                        + "finite="
+                        + f"{float(metrics['critic_grad_finite_fraction']):.3f}"
+                    )
 
                 diag_log.append(
                     {
@@ -906,6 +950,15 @@ def train(
                             metrics["actor_grad_finite_fraction"]
                         ),
                         "critic_loss": float(metrics["critic_loss"]),
+                        "critic_grad_raw_median": float(
+                            metrics["critic_grad_raw_median"]
+                        ),
+                        "critic_grad_raw_max": float(
+                            metrics["critic_grad_raw_max"]
+                        ),
+                        "critic_grad_finite_fraction": float(
+                            metrics["critic_grad_finite_fraction"]
+                        ),
                     }
                 )
             else:
@@ -1032,6 +1085,7 @@ def train(
         "max_episode_length": max_episode_length,
         "actor_history_len": actor_history_len,
         "actor_per_env_grad_clip": actor_per_env_grad_clip,
+        "critic_per_env_grad_clip": critic_per_env_grad_clip,
         "actor_bootstrap_scale": actor_bootstrap_scale,
         "env_variant": env_variant,
     }

@@ -54,6 +54,7 @@ def build_train_kwargs(
         "actor_history_len": 1,
         "env_variant": "g1_tracking",
         "actor_per_env_grad_clip": 1.0,
+        "critic_per_env_grad_clip": 1.0,
         "actor_bootstrap_scale": actor_bootstrap_scale,
     }
 

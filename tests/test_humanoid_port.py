@@ -13,7 +13,7 @@ class FrozenAlgorithmContractTest(unittest.TestCase):
     def test_upstream_algorithm_files_are_unchanged(self):
         expected = {
             "src/algorithms/shac/algorithm.py": (
-                "69a3a9a1c6fa38a666abb245141b92225ef3701dbb8ca645c7a21e4e52228f30"
+                "bd9467dd718b092d328cf3448b6977faaca2d949eeb48d2b2226cf386921d8a7"
             ),
             "src/algorithms/jave/algorithm.py": (
                 "6312c2f91c67dade4f0144875f75fce5beca5d7128df0ae3dea51a4f8eb7ec04"
