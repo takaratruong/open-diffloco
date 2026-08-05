@@ -8,6 +8,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def configure_jax():
+    """Match the upstream CLI's global float64 physics configuration."""
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+
+
 def build_train_kwargs(
     *,
     steps: int,
@@ -73,6 +80,7 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    configure_jax()
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     os.chdir(output_root)

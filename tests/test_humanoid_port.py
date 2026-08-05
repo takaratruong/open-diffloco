@@ -126,6 +126,16 @@ class HumanoidCliContractTest(unittest.TestCase):
         self.assertEqual(kwargs["curriculum_grace"], 0)
         self.assertEqual(kwargs["curriculum_steps"], 1)
 
+    def test_gate_runner_enables_upstream_x64_mode(self):
+        import jax
+
+        from tools.run_humanoid_shac import configure_jax
+
+        jax.config.update("jax_enable_x64", False)
+        self.assertFalse(jax.config.jax_enable_x64)
+        configure_jax()
+        self.assertTrue(jax.config.jax_enable_x64)
+
 
 if __name__ == "__main__":
     unittest.main()
