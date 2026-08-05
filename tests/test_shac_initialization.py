@@ -12,6 +12,13 @@ from src.core.data_structures import Normalizer
 
 
 class ShacInitializationTest(unittest.TestCase):
+    def test_value_head_squeeze_preserves_single_step_time_axis(self):
+        from src.algorithms.shac.algorithm import squeeze_value_head
+
+        one_step_batch = jnp.ones((1, 1))
+
+        self.assertEqual(squeeze_value_head(one_step_batch).shape, (1,))
+
     def test_normalizer_uses_rollout_observation_dtype_before_warmup(self):
         state = Normalizer(3).init()
 

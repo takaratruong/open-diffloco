@@ -65,6 +65,11 @@ def load_checkpoint(path: str):
     return state, hparams, int(state.step)
 
 
+def squeeze_value_head(values):
+    """Remove only the critic output axis, preserving batch/time axes."""
+    return jp.squeeze(values, axis=-1)
+
+
 def train(
     # General
     total_steps: int = 100_000,
@@ -432,7 +437,9 @@ def train(
         bootstrap_obs = critic_norm.normalize(
             critic_norm_state, traj["bootstrap_critic_obs"]
         ).astype(jp.float32)
-        bootstrap_v = critic.apply(target_critic_params, bootstrap_obs).squeeze()
+        bootstrap_v = squeeze_value_head(
+            critic.apply(target_critic_params, bootstrap_obs)
+        )
 
         # Accumulate discounted returns, handling episode boundaries. Time-limit
         # truncations bootstrap from the pre-reset observation stored by env.step.
@@ -462,7 +469,9 @@ def train(
             critic_norm_state,
             env._get_critic_obs(final_state.data, final_state.info),
         ).astype(jp.float32)
-        final_v = critic.apply(target_critic_params, final_obs).squeeze()
+        final_v = squeeze_value_head(
+            critic.apply(target_critic_params, final_obs)
+        )
         final_bootstrap = jp.where(
             traj["done"][-1],
             0.0,
@@ -504,10 +513,16 @@ def train(
         )
 
         # Predicted values V(s_t)
-        values = critic.apply(critic_params, flat_obs_norm).squeeze()  # (H,)
+        values = squeeze_value_head(
+            critic.apply(critic_params, flat_obs_norm)
+        )  # (H,)
 
-        next_v = critic.apply(target_critic_params, flat_bootstrap_obs_norm).squeeze()
-        final_v = critic.apply(target_critic_params, final_obs_norm).squeeze()  # scalar
+        next_v = squeeze_value_head(
+            critic.apply(target_critic_params, flat_bootstrap_obs_norm)
+        )
+        final_v = squeeze_value_head(
+            critic.apply(target_critic_params, final_obs_norm)
+        )  # scalar
 
         rewards = traj_rewards.reshape(-1).astype(jp.float32)  # (H,)
         dones = traj_dones.reshape(-1).astype(jp.float32)  # (H,)
