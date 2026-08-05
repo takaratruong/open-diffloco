@@ -14,6 +14,7 @@ VARIANTS = {
     "blind_linvel_kinref": "src.envs.go2.variants.blind_linvel_kinref.environment",
     "highspeed_nokinref": "src.envs.go2.variants.highspeed_nokinref.environment",
     "humanoid_blind_linvel_nokinref": "src.envs.humanoid.environment",
+    "g1_tracking": "src.envs.g1_tracking.environment",
 }
 
 
@@ -29,6 +30,8 @@ def get_go2_env_class(variant: str = DEFAULT_VARIANT):
     module = import_module(module_name)
     if variant == "humanoid_blind_linvel_nokinref":
         return module.HumanoidEnv
+    if variant == "g1_tracking":
+        return module.G1TrackingEnv
     return module.Go2Env
 
 

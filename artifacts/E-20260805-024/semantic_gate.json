@@ -1,0 +1,22 @@
+{
+  "action_dim": 29,
+  "actor_obs_dim": 154,
+  "control_dt": 0.01,
+  "critic_obs_dim": 286,
+  "finite_reset_qpos": true,
+  "finite_reset_qvel": true,
+  "phase": 62,
+  "physics_dt": 0.002,
+  "physics_substeps": 5,
+  "reference_components": {
+    "anchor_orientation": 1.0,
+    "anchor_position": 1.0,
+    "body_angular_velocity": 1.0,
+    "body_linear_velocity": 1.0,
+    "body_orientation": 0.9999999999999996,
+    "body_position": 1.0
+  },
+  "reference_frames": 121,
+  "reference_reward": 5.0,
+  "seed": 0
+}
