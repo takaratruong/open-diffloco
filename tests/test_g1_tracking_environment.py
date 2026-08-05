@@ -300,7 +300,7 @@ class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
         self.assertEqual(robust.mj_model.opt.iterations, 10)
         self.assertEqual(robust.mj_model.opt.ls_iterations, 20)
         self.assertEqual(validated.mj_model.opt.iterations, 4)
-        self.assertEqual(validated.mj_model.opt.ls_iterations, 10)
+        self.assertEqual(validated.mj_model.opt.ls_iterations, 5)
 
 
 if __name__ == "__main__":

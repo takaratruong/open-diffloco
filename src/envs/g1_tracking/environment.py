@@ -821,6 +821,6 @@ class G1TrackingRMR50HzValidatedEnv(
         super().__init__(
             *args,
             solver_iterations=4,
-            solver_ls_iterations=10,
+            solver_ls_iterations=5,
             **kwargs,
         )

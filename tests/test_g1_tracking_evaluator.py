@@ -81,7 +81,7 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         )
 
         self.assertEqual(validated.mj_model.opt.iterations, 4)
-        self.assertEqual(validated.mj_model.opt.ls_iterations, 10)
+        self.assertEqual(validated.mj_model.opt.ls_iterations, 5)
 
     def test_action_gain_scales_policy_without_changing_direction(self):
         action = jnp.array([-0.8, 0.2, 1.0])
