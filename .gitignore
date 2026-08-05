@@ -4,6 +4,7 @@
 # Training and deploy files
 **/training_runs/
 **/bagfiles
+artifacts/
 
 # Virtual environments
 **/.venv*/
