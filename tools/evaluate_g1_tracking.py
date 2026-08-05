@@ -30,11 +30,24 @@ def configure_jax() -> None:
     jax.config.update("jax_enable_x64", True)
 
 
-def make_evaluation_env(variant: str) -> G1TrackingEnv:
+def make_evaluation_env(
+    variant: str,
+    *,
+    solver_iterations: int | None = None,
+    solver_ls_iterations: int | None = None,
+) -> G1TrackingEnv:
     """Build an exact-termination task on the requested control timebase."""
     if variant not in EVALUATION_ENV_VARIANTS:
         raise ValueError(f"unsupported evaluation environment: {variant}")
-    return get_go2_env_class(variant)(actor_history_len=1)
+    if (solver_iterations is None) != (solver_ls_iterations is None):
+        raise ValueError("both solver iteration budgets must be provided")
+    kwargs = {"actor_history_len": 1}
+    if solver_iterations is not None:
+        kwargs.update(
+            solver_iterations=solver_iterations,
+            solver_ls_iterations=solver_ls_iterations,
+        )
+    return get_go2_env_class(variant)(**kwargs)
 
 
 def load_rmr_policy(checkpoint: Path):
@@ -148,6 +161,8 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=120)
     parser.add_argument("--render-every", type=int, default=2)
     parser.add_argument("--action-gain", type=float, default=1.0)
+    parser.add_argument("--solver-iterations", type=int)
+    parser.add_argument("--solver-ls-iterations", type=int)
     parser.add_argument(
         "--env-variant",
         choices=EVALUATION_ENV_VARIANTS,
@@ -158,7 +173,11 @@ def main() -> None:
         parser.error("--action-gain must be between 0 and 1")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    env = make_evaluation_env(args.env_variant)
+    env = make_evaluation_env(
+        args.env_variant,
+        solver_iterations=args.solver_iterations,
+        solver_ls_iterations=args.solver_ls_iterations,
+    )
     controller_sources = (
         args.checkpoint,
         args.rmr_action_tape,
@@ -296,6 +315,8 @@ def main() -> None:
         "mean_body_angular_velocity_error": float(np.mean(values[:, 10])),
         "action_gain": args.action_gain,
         "jax_enable_x64": bool(jax.config.x64_enabled),
+        "solver_iterations": int(env.mj_model.opt.iterations),
+        "solver_ls_iterations": int(env.mj_model.opt.ls_iterations),
         "controller": (
             "rmr_action_tape"
             if action_tape is not None
