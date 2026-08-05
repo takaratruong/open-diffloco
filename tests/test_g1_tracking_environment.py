@@ -18,10 +18,6 @@ REFERENCE = Path(
 CONTROLLER = Path(
     "/home/ubuntu/projects/diffsim2real/outputs/rmr_torques_iter4999.npz"
 )
-MJLAB_MODEL = Path(
-    "/home/ubuntu/references/mjlab/src/mjlab/asset_zoo/robots/"
-    "unitree_g1/xmls/g1.xml"
-)
 
 
 class G1TrackingEnvironmentTest(unittest.TestCase):
@@ -254,30 +250,44 @@ class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
             unbounded.reference.qpos[0, 7:][model_to_actor],
         )
 
-    def test_mjlab_variant_matches_source_physics_and_solver_timebase(self):
+    def test_source_step_variants_keep_our_model_and_match_rmr_timebase(self):
         from src.envs.g1_tracking.environment import (
-            G1TrackingRMR50HzMjlabEnv,
+            G1TrackingRMR50HzSourceStepEnv,
+            G1TrackingRMR50HzSourceStepRobustEnv,
         )
         from src.envs.go2.environment import get_go2_env_class
 
-        env = G1TrackingRMR50HzMjlabEnv(
-            xml_path=str(MJLAB_MODEL),
+        source_step = G1TrackingRMR50HzSourceStepEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+        )
+        robust = G1TrackingRMR50HzSourceStepRobustEnv(
+            xml_path=str(MODEL),
             reference_path=str(REFERENCE),
             controller_path=str(CONTROLLER),
             actor_history_len=1,
         )
 
         self.assertIs(
-            get_go2_env_class("g1_tracking_rmr_50hz_mjlab"),
-            G1TrackingRMR50HzMjlabEnv,
+            get_go2_env_class("g1_tracking_rmr_50hz_source_step"),
+            G1TrackingRMR50HzSourceStepEnv,
         )
-        self.assertEqual(env.n_frames, 4)
-        self.assertAlmostEqual(env.mj_model.opt.timestep, 0.005)
-        self.assertAlmostEqual(env.dt, 0.02)
-        self.assertEqual(env.mj_model.opt.iterations, 10)
-        self.assertEqual(env.mj_model.opt.ls_iterations, 20)
-        self.assertEqual(env.mj_model.ngeom, 68)
-        self.assertFalse(env.squash_actor_actions)
+        self.assertIs(
+            get_go2_env_class("g1_tracking_rmr_50hz_source_step_robust"),
+            G1TrackingRMR50HzSourceStepRobustEnv,
+        )
+        for env in (source_step, robust):
+            self.assertEqual(env.mj_model.ngeom, self.env.mj_model.ngeom)
+            self.assertEqual(env.n_frames, 4)
+            self.assertAlmostEqual(env.mj_model.opt.timestep, 0.005)
+            self.assertAlmostEqual(env.dt, 0.02)
+            self.assertFalse(env.squash_actor_actions)
+        self.assertEqual(source_step.mj_model.opt.iterations, 1)
+        self.assertEqual(source_step.mj_model.opt.ls_iterations, 5)
+        self.assertEqual(robust.mj_model.opt.iterations, 10)
+        self.assertEqual(robust.mj_model.opt.ls_iterations, 20)
 
 
 if __name__ == "__main__":

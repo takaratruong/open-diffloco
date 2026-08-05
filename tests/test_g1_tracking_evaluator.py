@@ -51,13 +51,19 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         )
         self.assertGreater(cosine, 0.9)
 
-    def test_mjlab_plant_is_available_for_strict_source_policy_control(self):
-        env = make_evaluation_env("g1_tracking_rmr_50hz_mjlab")
+    def test_source_step_controls_are_available_without_external_models(self):
+        source_step = make_evaluation_env(
+            "g1_tracking_rmr_50hz_source_step"
+        )
+        robust = make_evaluation_env(
+            "g1_tracking_rmr_50hz_source_step_robust"
+        )
 
-        self.assertEqual(env.n_frames, 4)
-        self.assertAlmostEqual(env.mj_model.opt.timestep, 0.005)
-        self.assertEqual(env.mj_model.opt.iterations, 10)
-        self.assertEqual(env.mj_model.opt.ls_iterations, 20)
+        self.assertEqual(source_step.n_frames, 4)
+        self.assertAlmostEqual(source_step.mj_model.opt.timestep, 0.005)
+        self.assertEqual(source_step.mj_model.ngeom, robust.mj_model.ngeom)
+        self.assertEqual(robust.mj_model.opt.iterations, 10)
+        self.assertEqual(robust.mj_model.opt.ls_iterations, 20)
 
     def test_action_gain_scales_policy_without_changing_direction(self):
         action = jnp.array([-0.8, 0.2, 1.0])

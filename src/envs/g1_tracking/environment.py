@@ -32,10 +32,6 @@ DEFAULT_REFERENCE_PATH = (
 DEFAULT_CONTROLLER_PATH = (
     "/home/ubuntu/projects/diffsim2real/outputs/rmr_torques_iter4999.npz"
 )
-DEFAULT_MJLAB_MODEL_PATH = (
-    "/home/ubuntu/references/mjlab/src/mjlab/asset_zoo/robots/"
-    "unitree_g1/xmls/g1.xml"
-)
 
 
 def _quat_inv(q: jax.Array) -> jax.Array:
@@ -765,10 +761,16 @@ class G1TrackingRMR50HzUnboundedEnv(G1TrackingRMR50HzEnv):
         )
 
 
-class G1TrackingRMR50HzMjlabEnv(G1TrackingEnv):
-    """Source-order RMR task on MJLab's validated MuJoCo plant settings."""
+class G1TrackingRMR50HzSourceStepEnv(G1TrackingEnv):
+    """Our RMR G1 model at the source task's 5 ms physics timestep."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(
+        self,
+        *args,
+        solver_iterations: int = 1,
+        solver_ls_iterations: int = 5,
+        **kwargs,
+    ):
         for option in (
             "physics_substeps",
             "reference_stride",
@@ -776,11 +778,8 @@ class G1TrackingRMR50HzMjlabEnv(G1TrackingEnv):
             "clip_actions",
             "actor_joint_order",
             "physics_timestep",
-            "solver_iterations",
-            "solver_ls_iterations",
         ):
             kwargs.pop(option, None)
-        kwargs.setdefault("xml_path", DEFAULT_MJLAB_MODEL_PATH)
         super().__init__(
             *args,
             physics_substeps=4,
@@ -789,6 +788,22 @@ class G1TrackingRMR50HzMjlabEnv(G1TrackingEnv):
             clip_actions=False,
             actor_joint_order="source",
             physics_timestep=0.005,
+            solver_iterations=solver_iterations,
+            solver_ls_iterations=solver_ls_iterations,
+            **kwargs,
+        )
+
+
+class G1TrackingRMR50HzSourceStepRobustEnv(
+    G1TrackingRMR50HzSourceStepEnv
+):
+    """Source timestep with the stable solver budget seen in MuJoCo RMR."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.pop("solver_iterations", None)
+        kwargs.pop("solver_ls_iterations", None)
+        super().__init__(
+            *args,
             solver_iterations=10,
             solver_ls_iterations=20,
             **kwargs,

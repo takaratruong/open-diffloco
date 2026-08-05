@@ -20,7 +20,8 @@ EVALUATION_ENV_VARIANTS = (
     "g1_tracking",
     "g1_tracking_rmr_50hz",
     "g1_tracking_rmr_50hz_unbounded",
-    "g1_tracking_rmr_50hz_mjlab",
+    "g1_tracking_rmr_50hz_source_step",
+    "g1_tracking_rmr_50hz_source_step_robust",
 )
 
 

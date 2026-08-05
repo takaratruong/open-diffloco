@@ -17,7 +17,10 @@ VARIANTS = {
     "g1_tracking": "src.envs.g1_tracking.environment",
     "g1_tracking_rmr_50hz": "src.envs.g1_tracking.environment",
     "g1_tracking_rmr_50hz_unbounded": "src.envs.g1_tracking.environment",
-    "g1_tracking_rmr_50hz_mjlab": "src.envs.g1_tracking.environment",
+    "g1_tracking_rmr_50hz_source_step": "src.envs.g1_tracking.environment",
+    "g1_tracking_rmr_50hz_source_step_robust": (
+        "src.envs.g1_tracking.environment"
+    ),
 }
 
 
@@ -39,8 +42,10 @@ def get_go2_env_class(variant: str = DEFAULT_VARIANT):
         return module.G1TrackingRMR50HzEnv
     if variant == "g1_tracking_rmr_50hz_unbounded":
         return module.G1TrackingRMR50HzUnboundedEnv
-    if variant == "g1_tracking_rmr_50hz_mjlab":
-        return module.G1TrackingRMR50HzMjlabEnv
+    if variant == "g1_tracking_rmr_50hz_source_step":
+        return module.G1TrackingRMR50HzSourceStepEnv
+    if variant == "g1_tracking_rmr_50hz_source_step_robust":
+        return module.G1TrackingRMR50HzSourceStepRobustEnv
     return module.Go2Env
 
 
