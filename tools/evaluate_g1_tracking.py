@@ -12,6 +12,7 @@ import numpy as np
 
 from src.core.data_structures import Normalizer
 from src.core.networks import Actor
+from src.core.rmr_policy import bound_residual_action
 from src.envs.g1_tracking.environment import G1TrackingEnv
 from src.envs.go2.environment import get_go2_env_class
 
@@ -162,6 +163,7 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=120)
     parser.add_argument("--render-every", type=int, default=2)
     parser.add_argument("--action-gain", type=float, default=1.0)
+    parser.add_argument("--residual-action-scale", type=float, default=0.0)
     parser.add_argument("--solver-iterations", type=int)
     parser.add_argument("--solver-ls-iterations", type=int)
     parser.add_argument(
@@ -184,10 +186,23 @@ def main() -> None:
         args.rmr_action_tape,
         args.rmr_policy_checkpoint,
     )
-    if sum(source is not None for source in controller_sources) > 1:
+    paired_residual = (
+        args.checkpoint is not None
+        and args.rmr_policy_checkpoint is not None
+        and args.residual_action_scale > 0.0
+    )
+    if sum(source is not None for source in controller_sources) > 1 and not paired_residual:
         parser.error(
             "--checkpoint, --rmr-action-tape, and --rmr-policy-checkpoint "
-            "are mutually exclusive"
+            "are mutually exclusive unless checkpoint and RMR policy are "
+            "paired with --residual-action-scale"
+        )
+    if args.residual_action_scale < 0.0:
+        parser.error("--residual-action-scale must be non-negative")
+    if args.residual_action_scale > 0.0 and not paired_residual:
+        parser.error(
+            "--residual-action-scale requires both --checkpoint and "
+            "--rmr-policy-checkpoint"
         )
     actor = actor_params = normalizer_state = None
     action_tape = None
@@ -202,14 +217,14 @@ def main() -> None:
                 ]
             )
             action_tape = np.asarray(archive["action"][:, permutation])
-    elif args.rmr_policy_checkpoint is not None:
+    if args.rmr_policy_checkpoint is not None:
         if env.actor_joint_names != env.controller.actor_joint_names:
             parser.error(
                 "--rmr-policy-checkpoint requires the source-order "
                 "unbounded RMR environment"
             )
         rmr_policy = load_rmr_policy(args.rmr_policy_checkpoint)
-    else:
+    if args.checkpoint is not None or not any(controller_sources):
         actor, actor_params, normalizer_state = _load_policy(
             env, args.checkpoint, args.seed
         )
@@ -250,6 +265,17 @@ def main() -> None:
             )
         elif rmr_policy is not None:
             action = rmr_policy(state.obs)
+            if actor is not None:
+                normalized = env.normalize_actor_obs(
+                    Normalizer(env.actor_frame_obs_dim),
+                    normalizer_state,
+                    state.obs,
+                ).astype(jnp.float32)
+                residual_logits = actor.apply(actor_params, normalized)
+                action = action + bound_residual_action(
+                    residual_logits,
+                    action_scale=args.residual_action_scale,
+                ).astype(jnp.float64)
         else:
             normalized = env.normalize_actor_obs(
                 Normalizer(env.actor_frame_obs_dim),
@@ -315,12 +341,15 @@ def main() -> None:
         "mean_body_linear_velocity_error": float(np.mean(values[:, 9])),
         "mean_body_angular_velocity_error": float(np.mean(values[:, 10])),
         "action_gain": args.action_gain,
+        "residual_action_scale": args.residual_action_scale,
         "jax_enable_x64": bool(jax.config.x64_enabled),
         "solver_iterations": int(env.mj_model.opt.iterations),
         "solver_ls_iterations": int(env.mj_model.opt.ls_iterations),
         "controller": (
             "rmr_action_tape"
             if action_tape is not None
+            else "rmr_residual_policy"
+            if rmr_policy is not None and actor is not None
             else "rmr_policy"
             if rmr_policy is not None
             else "flax_policy"

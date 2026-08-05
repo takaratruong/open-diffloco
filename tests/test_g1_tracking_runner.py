@@ -94,6 +94,36 @@ class G1TrackingRunnerTest(unittest.TestCase):
             "g1_tracking_rmr_50hz_validated",
         )
 
+    def test_native_rmr_runner_can_train_a_bounded_source_policy_residual(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        source_policy = object()
+        kwargs = build_train_kwargs(
+            steps=65_536,
+            num_envs=256,
+            seed=3,
+            checkpoint_interval=16_384,
+            validated_task=True,
+            source_actor_policy=source_policy,
+            residual_action_scale=0.1,
+        )
+
+        self.assertIs(kwargs["source_actor_policy"], source_policy)
+        self.assertEqual(kwargs["residual_action_scale"], 0.1)
+
+    def test_native_rmr_runner_rejects_residual_scale_without_source_policy(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        with self.assertRaisesRegex(ValueError, "source_actor_policy"):
+            build_train_kwargs(
+                steps=65_536,
+                num_envs=256,
+                seed=3,
+                checkpoint_interval=16_384,
+                validated_task=True,
+                residual_action_scale=0.1,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

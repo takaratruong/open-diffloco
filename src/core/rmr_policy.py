@@ -30,6 +30,8 @@ __all__ = [
     "RmrPolicy",
     "rmr_policy_from_state_dict",
     "apply_rmr_policy",
+    "bound_residual_action",
+    "compose_bounded_rmr_residual",
     "compose_rmr_residual",
 ]
 
@@ -170,3 +172,26 @@ def compose_rmr_residual(
     """
     source_action = apply_rmr_policy(policy, observations)
     return source_action + jnp.asarray(residual)
+
+
+def compose_bounded_rmr_residual(
+    policy: RmrPolicy,
+    observations: Any,
+    residual_logits: Any,
+    *,
+    action_scale: float,
+) -> jnp.ndarray:
+    """Add a smooth, elementwise-bounded residual to the source action."""
+    residual = bound_residual_action(residual_logits, action_scale=action_scale)
+    return compose_rmr_residual(policy, observations, residual)
+
+
+def bound_residual_action(
+    residual_logits: Any,
+    *,
+    action_scale: float,
+) -> jnp.ndarray:
+    """Map unconstrained residual logits to a symmetric action correction."""
+    if action_scale <= 0.0:
+        raise ValueError("action_scale must be positive")
+    return action_scale * jnp.tanh(jnp.asarray(residual_logits))

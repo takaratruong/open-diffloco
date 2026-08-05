@@ -2,8 +2,10 @@
 
 import argparse
 from contextlib import nullcontext
+from pathlib import Path
 
 from src.algorithms.shac.algorithm import train
+from src.core.rmr_policy import rmr_policy_from_state_dict
 from src.envs.g1_tracking.fixed_solver import fixed_mjx_solver_outer_loop
 from tools.run_g1_tracking_shac import (
     build_train_kwargs as build_100hz_train_kwargs,
@@ -24,10 +26,20 @@ def build_train_kwargs(
     unroll_length: int = 24,
     unbounded_actions: bool = False,
     validated_task: bool = False,
+    source_actor_policy=None,
+    residual_action_scale: float = 0.0,
 ) -> dict:
     if validated_task and unbounded_actions:
         raise ValueError(
             "validated_task already includes unbounded source actions"
+        )
+    if source_actor_policy is None and residual_action_scale != 0.0:
+        raise ValueError(
+            "residual_action_scale requires source_actor_policy"
+        )
+    if source_actor_policy is not None and residual_action_scale <= 0.0:
+        raise ValueError(
+            "source_actor_policy requires a positive residual_action_scale"
         )
     kwargs = build_100hz_train_kwargs(
         steps=steps,
@@ -58,9 +70,26 @@ def build_train_kwargs(
                     else "g1_tracking_rmr_50hz"
                 )
             ),
+            "source_actor_policy": source_actor_policy,
+            "residual_action_scale": residual_action_scale,
         }
     )
     return kwargs
+
+
+def load_source_actor_policy(checkpoint: Path):
+    """Load an RSL-RL checkpoint once, then use pure JAX during training."""
+    import torch
+
+    payload = torch.load(
+        checkpoint,
+        map_location="cpu",
+        weights_only=False,
+    )
+    return rmr_policy_from_state_dict(
+        payload["model_state_dict"],
+        payload["obs_norm_state_dict"],
+    )
 
 
 def main() -> None:
@@ -76,9 +105,16 @@ def main() -> None:
     parser.add_argument("--unroll-length", type=int, default=24)
     parser.add_argument("--unbounded-actions", action="store_true")
     parser.add_argument("--validated-task", action="store_true")
+    parser.add_argument("--source-policy-checkpoint", type=Path)
+    parser.add_argument("--residual-action-scale", type=float, default=0.1)
     args = parser.parse_args()
 
     configure_jax()
+    source_actor_policy = (
+        load_source_actor_policy(args.source_policy_checkpoint)
+        if args.source_policy_checkpoint is not None
+        else None
+    )
     solver_scope = (
         fixed_mjx_solver_outer_loop()
         if args.validated_task
@@ -98,6 +134,12 @@ def main() -> None:
                 unroll_length=args.unroll_length,
                 unbounded_actions=args.unbounded_actions,
                 validated_task=args.validated_task,
+                source_actor_policy=source_actor_policy,
+                residual_action_scale=(
+                    args.residual_action_scale
+                    if source_actor_policy is not None
+                    else 0.0
+                ),
             )
         )
 

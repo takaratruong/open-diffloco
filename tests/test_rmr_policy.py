@@ -36,6 +36,7 @@ if ROOT not in sys.path:
 from src.core.rmr_policy import (  # noqa: E402
     rmr_policy_from_state_dict,
     apply_rmr_policy,
+    compose_bounded_rmr_residual,
     compose_rmr_residual,
 )
 
@@ -133,6 +134,27 @@ def test_nonzero_residual_adds_exactly():
     source = np.asarray(apply_rmr_policy(policy, obs))
     composed = np.asarray(compose_rmr_residual(policy, obs, residual))
     np.testing.assert_allclose(composed, source + residual, rtol=1e-6, atol=1e-6)
+
+
+def test_bounded_residual_is_zero_at_initialization_and_respects_limit():
+    model, normalizer, obs_dim, act_dim = _state_dicts()
+    policy = rmr_policy_from_state_dict(model, normalizer)
+    obs = np.random.default_rng(10).standard_normal((obs_dim,)).astype(np.float32)
+    source = np.asarray(apply_rmr_policy(policy, obs))
+
+    zero = np.asarray(
+        compose_bounded_rmr_residual(
+            policy, obs, jnp.zeros(act_dim), action_scale=0.1
+        )
+    )
+    saturated = np.asarray(
+        compose_bounded_rmr_residual(
+            policy, obs, jnp.full(act_dim, 100.0), action_scale=0.1
+        )
+    )
+
+    np.testing.assert_array_equal(zero, source)
+    np.testing.assert_allclose(saturated - source, 0.1, atol=1e-6)
 
 
 def test_residual_jacobian_is_identity():

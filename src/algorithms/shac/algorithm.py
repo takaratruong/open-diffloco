@@ -16,6 +16,7 @@ import numpy as np
 
 from src.core.data_structures import Normalizer, TrainState
 from src.core.networks import Actor, Critic
+from src.core.rmr_policy import compose_bounded_rmr_residual
 from src.envs.go2.environment import Go2Env
 from src.envs.go2.terrain import differentiated_ou_foot_forces
 from src.core.utils import compute_grad_norm
@@ -121,6 +122,8 @@ def train(
     actor_per_env_grad_clip: float = None,
     critic_per_env_grad_clip: float = None,
     actor_bootstrap_scale: float = 1.0,
+    source_actor_policy=None,
+    residual_action_scale: float = 0.0,
 ):
     """
     Train a quadruped locomotion policy using SHAC.
@@ -394,7 +397,16 @@ def train(
             obs_norm = env.normalize_actor_obs(
                 actor_norm, actor_norm_state, actor_obs
             ).astype(jp.float32)
-            action = actor.apply(actor_params, obs_norm).astype(jp.float64)
+            residual_logits = actor.apply(actor_params, obs_norm)
+            if source_actor_policy is None:
+                action = residual_logits.astype(jp.float64)
+            else:
+                action = compose_bounded_rmr_residual(
+                    source_actor_policy,
+                    actor_obs,
+                    residual_logits,
+                    action_scale=residual_action_scale,
+                ).astype(jp.float64)
 
             # Reparameterized action noise
             noisy_action = action + current_noise_std * noise_t.astype(jp.float64)
@@ -1110,6 +1122,8 @@ def train(
         "actor_per_env_grad_clip": actor_per_env_grad_clip,
         "critic_per_env_grad_clip": critic_per_env_grad_clip,
         "actor_bootstrap_scale": actor_bootstrap_scale,
+        "source_actor_policy": source_actor_policy is not None,
+        "residual_action_scale": residual_action_scale,
         "env_variant": env_variant,
         "squash_actor_actions": squash_actor_actions,
     }
