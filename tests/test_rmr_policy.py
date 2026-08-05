@@ -169,6 +169,26 @@ def test_bounded_residual_is_zero_at_initialization_and_respects_limit():
     np.testing.assert_allclose(saturated - source, 0.1, atol=1e-6)
 
 
+def test_source_feedback_can_be_excluded_from_state_jacobian():
+    model, normalizer, obs_dim, act_dim = _state_dicts()
+    policy = rmr_policy_from_state_dict(model, normalizer)
+    obs = jnp.asarray(
+        np.random.default_rng(12).standard_normal(obs_dim), dtype=jnp.float32
+    )
+
+    jacobian = jax.jacrev(
+        lambda value: compose_bounded_rmr_residual(
+            policy,
+            value,
+            jnp.zeros(act_dim),
+            action_scale=0.1,
+            differentiate_source_feedback=False,
+        )
+    )(obs)
+
+    np.testing.assert_array_equal(np.asarray(jacobian), 0.0)
+
+
 def test_residual_jacobian_is_identity():
     model, normalizer, obs_dim, act_dim = _state_dicts()
     policy = rmr_policy_from_state_dict(model, normalizer)

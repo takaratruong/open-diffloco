@@ -183,10 +183,14 @@ def compose_bounded_rmr_residual(
     residual_logits: Any,
     *,
     action_scale: float,
+    differentiate_source_feedback: bool = True,
 ) -> jnp.ndarray:
     """Add a smooth, elementwise-bounded residual to the source action."""
+    source_action = apply_rmr_policy(policy, observations)
+    if not differentiate_source_feedback:
+        source_action = lax.stop_gradient(source_action)
     residual = bound_residual_action(residual_logits, action_scale=action_scale)
-    return compose_rmr_residual(policy, observations, residual)
+    return source_action + residual
 
 
 def bound_residual_action(

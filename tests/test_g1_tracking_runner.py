@@ -106,10 +106,12 @@ class G1TrackingRunnerTest(unittest.TestCase):
             validated_task=True,
             source_actor_policy=source_policy,
             residual_action_scale=0.1,
+            differentiate_source_feedback=False,
         )
 
         self.assertIs(kwargs["source_actor_policy"], source_policy)
         self.assertEqual(kwargs["residual_action_scale"], 0.1)
+        self.assertFalse(kwargs["differentiate_source_feedback"])
 
     def test_native_rmr_runner_rejects_residual_scale_without_source_policy(self):
         from tools.run_g1_tracking_rmr50_shac import build_train_kwargs

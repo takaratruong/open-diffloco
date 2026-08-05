@@ -28,6 +28,7 @@ def build_train_kwargs(
     validated_task: bool = False,
     source_actor_policy=None,
     residual_action_scale: float = 0.0,
+    differentiate_source_feedback: bool = True,
 ) -> dict:
     if validated_task and unbounded_actions:
         raise ValueError(
@@ -72,6 +73,7 @@ def build_train_kwargs(
             ),
             "source_actor_policy": source_actor_policy,
             "residual_action_scale": residual_action_scale,
+            "differentiate_source_feedback": differentiate_source_feedback,
         }
     )
     return kwargs
@@ -107,6 +109,10 @@ def main() -> None:
     parser.add_argument("--validated-task", action="store_true")
     parser.add_argument("--source-policy-checkpoint", type=Path)
     parser.add_argument("--residual-action-scale", type=float, default=0.1)
+    parser.add_argument(
+        "--stop-gradient-source-feedback",
+        action="store_true",
+    )
     args = parser.parse_args()
 
     configure_jax()
@@ -139,6 +145,9 @@ def main() -> None:
                     args.residual_action_scale
                     if source_actor_policy is not None
                     else 0.0
+                ),
+                differentiate_source_feedback=(
+                    not args.stop_gradient_source_feedback
                 ),
             )
         )

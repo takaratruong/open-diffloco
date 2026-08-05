@@ -124,6 +124,7 @@ def train(
     actor_bootstrap_scale: float = 1.0,
     source_actor_policy=None,
     residual_action_scale: float = 0.0,
+    differentiate_source_feedback: bool = True,
 ):
     """
     Train a quadruped locomotion policy using SHAC.
@@ -406,6 +407,9 @@ def train(
                     actor_obs,
                     residual_logits,
                     action_scale=residual_action_scale,
+                    differentiate_source_feedback=(
+                        differentiate_source_feedback
+                    ),
                 ).astype(jp.float64)
 
             # Reparameterized action noise
@@ -1124,6 +1128,7 @@ def train(
         "actor_bootstrap_scale": actor_bootstrap_scale,
         "source_actor_policy": source_actor_policy is not None,
         "residual_action_scale": residual_action_scale,
+        "differentiate_source_feedback": differentiate_source_feedback,
         "env_variant": env_variant,
         "squash_actor_actions": squash_actor_actions,
     }
