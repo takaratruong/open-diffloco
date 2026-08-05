@@ -112,6 +112,7 @@ class G1TrackingEnv:
         physics_timestep: float | None = None,
         solver_iterations: int = 1,
         solver_ls_iterations: int = 5,
+        mass_range: tuple[float, float] = (1.0, 1.0),
         **_unused_go2_options,
     ):
         if actor_history_len < 1:
@@ -128,6 +129,17 @@ class G1TrackingEnv:
             raise ValueError("physics_timestep must be positive")
         if solver_iterations < 1 or solver_ls_iterations < 1:
             raise ValueError("solver iteration counts must be positive")
+        mass_values = np.asarray(mass_range, dtype=np.float64)
+        if (
+            mass_values.shape != (2,)
+            or not np.isfinite(mass_values).all()
+            or np.any(mass_values <= 0.0)
+            or mass_values[0] != mass_values[1]
+        ):
+            raise ValueError(
+                "mass_range must be an equal pair of positive finite scales"
+            )
+        self.body_mass_scale = float(mass_values[0])
 
         self.xml_path = str(Path(xml_path))
         self.reference_path = str(Path(reference_path))
@@ -147,6 +159,8 @@ class G1TrackingEnv:
         self.mj_model.opt.iterations = solver_iterations
         self.mj_model.opt.ls_iterations = solver_ls_iterations
         self.mj_model.geom_margin[:] = 0.0
+        self.mj_model.body_mass[1:] *= self.body_mass_scale
+        self.mj_model.body_inertia[1:] *= self.body_mass_scale
         self.mjx_model = mjx.put_model(self.mj_model)
 
         self.reference = load_mujoco_reference(

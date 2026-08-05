@@ -46,6 +46,55 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
             state.info["bootstrap_critic_obs"].shape, (286,)
         )
 
+    def test_fixed_mass_scale_changes_only_non_world_mass_and_inertia(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        shifted = G1TrackingEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+            mass_range=(1.15, 1.15),
+        )
+
+        self.assertEqual(self.env.body_mass_scale, 1.0)
+        self.assertEqual(shifted.body_mass_scale, 1.15)
+        np.testing.assert_array_equal(
+            shifted.mj_model.body_mass[0],
+            self.env.mj_model.body_mass[0],
+        )
+        np.testing.assert_array_equal(
+            shifted.mj_model.body_inertia[0],
+            self.env.mj_model.body_inertia[0],
+        )
+        np.testing.assert_allclose(
+            shifted.mj_model.body_mass[1:],
+            self.env.mj_model.body_mass[1:] * 1.15,
+            rtol=1e-12,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            shifted.mj_model.body_inertia[1:],
+            self.env.mj_model.body_inertia[1:] * 1.15,
+            rtol=1e-12,
+            atol=0.0,
+        )
+
+    def test_mass_scale_rejects_invalid_or_randomized_ranges(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        invalid_ranges = (
+            (0.9, 1.1),
+            (0.0, 0.0),
+            (-1.0, -1.0),
+            (float("nan"), float("nan")),
+            (1.0,),
+        )
+        for mass_range in invalid_ranges:
+            with self.subTest(mass_range=mass_range):
+                with self.assertRaisesRegex(ValueError, "mass_range"):
+                    G1TrackingEnv(mass_range=mass_range)
+
     def test_open_diffloco_factory_selects_tracking_environment(self):
         from src.envs.g1_tracking.environment import G1TrackingEnv
         from src.envs.go2.environment import get_go2_env_class
