@@ -94,7 +94,7 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         np.testing.assert_allclose(frame[:58], expected_command, atol=1e-7)
         np.testing.assert_allclose(
             frame[58:64],
-            np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+            np.array([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
             atol=1e-5,
         )
 
@@ -226,13 +226,29 @@ class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
             controller_path=str(CONTROLLER),
             actor_history_len=1,
         )
-        action = jnp.full(unbounded.action_dim, 2.0)
+        action = jnp.arange(unbounded.action_dim, dtype=jnp.float64)
+        source_names = unbounded.controller.actor_joint_names
+        expected_model_action = np.array(
+            [source_names.index(name) for name in unbounded.controller.joint_names]
+        )
 
-        np.testing.assert_allclose(unbounded._prepare_action(action), action)
         np.testing.assert_allclose(
-            self.env._prepare_action(action), jnp.ones(self.env.action_dim)
+            unbounded._prepare_action(action), expected_model_action
+        )
+        np.testing.assert_allclose(
+            self.env._prepare_action(action),
+            np.concatenate(([0.0], np.ones(self.env.action_dim - 1))),
         )
         self.assertFalse(unbounded.squash_actor_actions)
+
+        state = unbounded.reset_at_phase(
+            jax.random.PRNGKey(29), jnp.array(0.0), jnp.array(0)
+        )
+        model_to_actor = unbounded.controller.model_to_actor_permutation
+        np.testing.assert_allclose(
+            state.obs[:29],
+            unbounded.reference.qpos[0, 7:][model_to_actor],
+        )
 
 
 if __name__ == "__main__":

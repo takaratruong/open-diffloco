@@ -42,6 +42,27 @@ class G1TrackingControllerTest(unittest.TestCase):
         self.assertEqual(self.controller.default_joint_pos.shape, (29,))
         self.assertTrue(np.isfinite(self.controller.default_joint_pos).all())
 
+    def test_controller_exposes_exact_actor_and_model_order_maps(self):
+        with np.load(CONTROLLER, allow_pickle=False) as archive:
+            source_names = tuple(map(str, archive["joint_names"]))
+
+        self.assertEqual(self.controller.actor_joint_names, source_names)
+        actor_values = np.arange(29)
+        model_values = actor_values[
+            self.controller.actor_to_model_permutation
+        ]
+        np.testing.assert_array_equal(
+            model_values[self.controller.model_to_actor_permutation],
+            actor_values,
+        )
+        self.assertEqual(
+            tuple(
+                source_names[index]
+                for index in self.controller.actor_to_model_permutation
+            ),
+            self.controller.joint_names,
+        )
+
     def test_inferred_action_scale_reconstructs_logged_rmr_targets(self):
         with np.load(CONTROLLER, allow_pickle=False) as archive:
             log_names = tuple(map(str, archive["joint_names"]))

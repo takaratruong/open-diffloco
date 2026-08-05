@@ -92,7 +92,7 @@ def _rotation_6d(q: jax.Array) -> jax.Array:
         ),
         axis=-1,
     ).reshape(q.shape[:-1] + (3, 3))
-    return matrix[..., :2, :].reshape(q.shape[:-1] + (6,))
+    return matrix[..., :, :2].reshape(q.shape[:-1] + (6,))
 
 
 class G1TrackingEnv:
@@ -108,6 +108,7 @@ class G1TrackingEnv:
         reference_stride: int = 1,
         reward_scale: float = 1.0,
         clip_actions: bool = True,
+        actor_joint_order: str = "model",
         **_unused_go2_options,
     ):
         if actor_history_len < 1:
@@ -118,6 +119,8 @@ class G1TrackingEnv:
             raise ValueError("reference_stride must be at least one")
         if reward_scale <= 0.0:
             raise ValueError("reward_scale must be positive")
+        if actor_joint_order not in ("model", "source"):
+            raise ValueError("actor_joint_order must be 'model' or 'source'")
 
         self.xml_path = str(Path(xml_path))
         self.reference_path = str(Path(reference_path))
@@ -165,6 +168,16 @@ class G1TrackingEnv:
             self.controller.default_joint_pos
         )
         self.action_scales = jp.asarray(self.controller.action_scale)
+        if actor_joint_order == "source":
+            actor_to_model = self.controller.actor_to_model_permutation
+            model_to_actor = self.controller.model_to_actor_permutation
+            self.actor_joint_names = self.controller.actor_joint_names
+        else:
+            actor_to_model = np.arange(29, dtype=np.int32)
+            model_to_actor = actor_to_model
+            self.actor_joint_names = self.controller.joint_names
+        self.actor_to_model_permutation = jp.asarray(actor_to_model)
+        self.model_to_actor_permutation = jp.asarray(model_to_actor)
         joint_ranges = np.asarray(self.mj_model.jnt_range[1:])
         joint_limited = np.asarray(self.mj_model.jnt_limited[1:], dtype=bool)
         if joint_ranges.shape != (29, 2):
@@ -309,15 +322,16 @@ class G1TrackingEnv:
         phase = info["phase"]
         _, anchor_orientation = self._anchor_relative_reference(data, phase)
         root_inverse = _quat_inv(data.qpos[3:7])
+        actor_order = self.model_to_actor_permutation
         return jp.concatenate(
             (
-                self.qpos_reference[phase, 7:],
-                self.qvel_reference[phase, 6:],
+                self.qpos_reference[phase, 7:][actor_order],
+                self.qvel_reference[phase, 6:][actor_order],
                 _rotation_6d(anchor_orientation),
                 _quat_apply(root_inverse, data.qvel[3:6]),
-                data.qpos[7:] - self.default_joints,
-                data.qvel[6:],
-                info["last_act"],
+                (data.qpos[7:] - self.default_joints)[actor_order],
+                data.qvel[6:][actor_order],
+                info["last_act"][actor_order],
             )
         )
 
@@ -330,6 +344,7 @@ class G1TrackingEnv:
         actual_anchor_pos = body_pos[0]
         actual_anchor_quat = body_quat[0]
         inverse_anchor = _quat_inv(actual_anchor_quat)
+        actor_order = self.model_to_actor_permutation
         inverse_anchor_bodies = jp.broadcast_to(
             inverse_anchor, body_quat.shape
         )
@@ -341,17 +356,17 @@ class G1TrackingEnv:
         root_inverse = _quat_inv(data.qpos[3:7])
         return jp.concatenate(
             (
-                self.qpos_reference[phase, 7:],
-                self.qvel_reference[phase, 6:],
+                self.qpos_reference[phase, 7:][actor_order],
+                self.qvel_reference[phase, 6:][actor_order],
                 anchor_pos,
                 _rotation_6d(anchor_orientation),
                 body_pos_b.reshape(-1),
                 _rotation_6d(body_quat_b).reshape(-1),
                 _quat_apply(root_inverse, data.qvel[:3]),
                 _quat_apply(root_inverse, data.qvel[3:6]),
-                data.qpos[7:] - self.default_joints,
-                data.qvel[6:],
-                info["last_act"],
+                (data.qpos[7:] - self.default_joints)[actor_order],
+                data.qvel[6:][actor_order],
+                info["last_act"][actor_order],
             )
         )
 
@@ -693,8 +708,8 @@ class G1TrackingEnv:
     def _prepare_action(self, action: jax.Array) -> jax.Array:
         action = action.astype(jp.float64)
         if self.clip_actions:
-            return jp.clip(action, -1.0, 1.0)
-        return action
+            action = jp.clip(action, -1.0, 1.0)
+        return action[self.actor_to_model_permutation]
 
     def _apply_obs_noise(
         self, obs: jax.Array, _rng: jax.Array
@@ -728,4 +743,10 @@ class G1TrackingRMR50HzUnboundedEnv(G1TrackingRMR50HzEnv):
 
     def __init__(self, *args, **kwargs):
         kwargs.pop("clip_actions", None)
-        super().__init__(*args, clip_actions=False, **kwargs)
+        kwargs.pop("actor_joint_order", None)
+        super().__init__(
+            *args,
+            clip_actions=False,
+            actor_joint_order="source",
+            **kwargs,
+        )

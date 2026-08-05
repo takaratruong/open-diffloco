@@ -12,6 +12,9 @@ class RMRController:
     """PD controller arrays in MuJoCo hinge-joint order."""
 
     joint_names: tuple[str, ...]
+    actor_joint_names: tuple[str, ...]
+    actor_to_model_permutation: np.ndarray
+    model_to_actor_permutation: np.ndarray
     kp: np.ndarray
     kd: np.ndarray
     effort_limit: np.ndarray
@@ -42,6 +45,7 @@ def load_rmr_controller(
         permutation = np.array(
             [source_names.index(name) for name in model_names], dtype=np.int32
         )
+        inverse_permutation = np.argsort(permutation).astype(np.int32)
 
         def ordered(key: str) -> np.ndarray:
             return np.array(
@@ -79,7 +83,15 @@ def load_rmr_controller(
             f"logged RMR action scale is inconsistent (max error {max_error})"
         )
 
-    arrays = (kp, kd, effort_limit, default_joint_pos, scales)
+    arrays = (
+        permutation,
+        inverse_permutation,
+        kp,
+        kd,
+        effort_limit,
+        default_joint_pos,
+        scales,
+    )
     if not all(np.isfinite(array).all() for array in arrays):
         raise ValueError("controller arrays must be finite")
     if not all((array > 0.0).all() for array in (kp, kd, effort_limit, scales)):
@@ -89,6 +101,9 @@ def load_rmr_controller(
 
     return RMRController(
         joint_names=model_names,
+        actor_joint_names=source_names,
+        actor_to_model_permutation=permutation,
+        model_to_actor_permutation=inverse_permutation,
         kp=kp,
         kd=kd,
         effort_limit=effort_limit,

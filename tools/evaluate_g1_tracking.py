@@ -35,6 +35,45 @@ def make_evaluation_env(variant: str) -> G1TrackingEnv:
     return get_go2_env_class(variant)(actor_history_len=1)
 
 
+def load_rmr_policy(checkpoint: Path):
+    """Load the source RSL-RL actor without importing Isaac Lab."""
+    import torch
+
+    payload = torch.load(
+        checkpoint,
+        map_location="cpu",
+        weights_only=False,
+    )
+    state = payload["model_state_dict"]
+    layer_indices = sorted(
+        int(key.split(".")[1])
+        for key in state
+        if key.startswith("actor.") and key.endswith(".weight")
+    )
+    layers = tuple(
+        (state[f"actor.{index}.weight"], state[f"actor.{index}.bias"])
+        for index in layer_indices
+    )
+    normalizer = payload["obs_norm_state_dict"]
+    mean = normalizer["_mean"]
+    std = normalizer["_std"]
+
+    def policy(obs: jax.Array) -> jax.Array:
+        with torch.inference_mode():
+            value = torch.as_tensor(
+                np.array(obs, copy=True),
+                dtype=torch.float32,
+            ).reshape(1, -1)
+            value = (value - mean) / (std + 1e-8)
+            for layer, (weight, bias) in enumerate(layers):
+                value = torch.nn.functional.linear(value, weight, bias)
+                if layer != len(layers) - 1:
+                    value = torch.nn.functional.elu(value)
+        return jnp.asarray(value.numpy()[0], dtype=jnp.float64)
+
+    return policy
+
+
 def scale_policy_action(action: jax.Array, gain: float) -> jax.Array:
     """Interpolates between the zero-action controller and a learned policy."""
     if not 0.0 <= gain <= 1.0:
@@ -100,6 +139,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--rmr-action-tape", type=Path)
+    parser.add_argument("--rmr-policy-checkpoint", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--phase", type=int, default=0)
@@ -117,20 +157,36 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     env = make_evaluation_env(args.env_variant)
-    if args.checkpoint is not None and args.rmr_action_tape is not None:
-        parser.error("--checkpoint and --rmr-action-tape are mutually exclusive")
+    controller_sources = (
+        args.checkpoint,
+        args.rmr_action_tape,
+        args.rmr_policy_checkpoint,
+    )
+    if sum(source is not None for source in controller_sources) > 1:
+        parser.error(
+            "--checkpoint, --rmr-action-tape, and --rmr-policy-checkpoint "
+            "are mutually exclusive"
+        )
     actor = actor_params = normalizer_state = None
     action_tape = None
+    rmr_policy = None
     if args.rmr_action_tape is not None:
         with np.load(args.rmr_action_tape, allow_pickle=False) as archive:
             source_names = tuple(map(str, archive["joint_names"]))
             permutation = np.array(
                 [
                     source_names.index(name)
-                    for name in env.controller.joint_names
+                    for name in env.actor_joint_names
                 ]
             )
             action_tape = np.asarray(archive["action"][:, permutation])
+    elif args.rmr_policy_checkpoint is not None:
+        if env.actor_joint_names != env.controller.actor_joint_names:
+            parser.error(
+                "--rmr-policy-checkpoint requires the source-order "
+                "unbounded RMR environment"
+            )
+        rmr_policy = load_rmr_policy(args.rmr_policy_checkpoint)
     else:
         actor, actor_params, normalizer_state = _load_policy(
             env, args.checkpoint, args.seed
@@ -170,6 +226,8 @@ def main() -> None:
             action = jnp.asarray(
                 action_tape[min(phase // 2, len(action_tape) - 1)]
             )
+        elif rmr_policy is not None:
+            action = rmr_policy(state.obs)
         else:
             normalized = env.normalize_actor_obs(
                 Normalizer(env.actor_frame_obs_dim),
@@ -236,6 +294,13 @@ def main() -> None:
         "mean_body_angular_velocity_error": float(np.mean(values[:, 10])),
         "action_gain": args.action_gain,
         "jax_enable_x64": bool(jax.config.x64_enabled),
+        "controller": (
+            "rmr_action_tape"
+            if action_tape is not None
+            else "rmr_policy"
+            if rmr_policy is not None
+            else "flax_policy"
+        ),
     }
     (args.output_dir / "summary.json").write_text(
         __import__("json").dumps(summary, indent=2, sort_keys=True) + "\n"
