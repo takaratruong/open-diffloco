@@ -109,9 +109,10 @@ def main() -> None:
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    fixed_solver = (
-        args.env_variant == "g1_tracking_rmr_50hz_source_step_robust"
-    )
+    fixed_solver = args.env_variant in {
+        "g1_tracking_rmr_50hz_source_step_robust",
+        "g1_tracking_rmr_50hz_validated",
+    }
     solver_scope = (
         fixed_mjx_solver_outer_loop()
         if fixed_solver

@@ -254,6 +254,7 @@ class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
         from src.envs.g1_tracking.environment import (
             G1TrackingRMR50HzSourceStepEnv,
             G1TrackingRMR50HzSourceStepRobustEnv,
+            G1TrackingRMR50HzValidatedEnv,
         )
         from src.envs.go2.environment import get_go2_env_class
 
@@ -269,6 +270,12 @@ class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
             controller_path=str(CONTROLLER),
             actor_history_len=1,
         )
+        validated = G1TrackingRMR50HzValidatedEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+        )
 
         self.assertIs(
             get_go2_env_class("g1_tracking_rmr_50hz_source_step"),
@@ -278,7 +285,11 @@ class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
             get_go2_env_class("g1_tracking_rmr_50hz_source_step_robust"),
             G1TrackingRMR50HzSourceStepRobustEnv,
         )
-        for env in (source_step, robust):
+        self.assertIs(
+            get_go2_env_class("g1_tracking_rmr_50hz_validated"),
+            G1TrackingRMR50HzValidatedEnv,
+        )
+        for env in (source_step, robust, validated):
             self.assertEqual(env.mj_model.ngeom, self.env.mj_model.ngeom)
             self.assertEqual(env.n_frames, 4)
             self.assertAlmostEqual(env.mj_model.opt.timestep, 0.005)
@@ -288,6 +299,8 @@ class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
         self.assertEqual(source_step.mj_model.opt.ls_iterations, 5)
         self.assertEqual(robust.mj_model.opt.iterations, 10)
         self.assertEqual(robust.mj_model.opt.ls_iterations, 20)
+        self.assertEqual(validated.mj_model.opt.iterations, 4)
+        self.assertEqual(validated.mj_model.opt.ls_iterations, 10)
 
 
 if __name__ == "__main__":

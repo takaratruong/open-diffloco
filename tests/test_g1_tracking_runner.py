@@ -91,7 +91,7 @@ class G1TrackingRunnerTest(unittest.TestCase):
 
         self.assertEqual(
             kwargs["env_variant"],
-            "g1_tracking_rmr_50hz_source_step_robust",
+            "g1_tracking_rmr_50hz_validated",
         )
 
 

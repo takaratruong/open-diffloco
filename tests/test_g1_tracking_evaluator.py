@@ -75,6 +75,14 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         self.assertEqual(candidate.mj_model.opt.iterations, 4)
         self.assertEqual(candidate.mj_model.opt.ls_iterations, 10)
 
+    def test_validated_evaluator_uses_smallest_passing_solver_budget(self):
+        validated = make_evaluation_env(
+            "g1_tracking_rmr_50hz_validated"
+        )
+
+        self.assertEqual(validated.mj_model.opt.iterations, 4)
+        self.assertEqual(validated.mj_model.opt.ls_iterations, 10)
+
     def test_action_gain_scales_policy_without_changing_direction(self):
         action = jnp.array([-0.8, 0.2, 1.0])
         np.testing.assert_allclose(

@@ -22,6 +22,7 @@ EVALUATION_ENV_VARIANTS = (
     "g1_tracking_rmr_50hz_unbounded",
     "g1_tracking_rmr_50hz_source_step",
     "g1_tracking_rmr_50hz_source_step_robust",
+    "g1_tracking_rmr_50hz_validated",
 )
 
 

@@ -808,3 +808,19 @@ class G1TrackingRMR50HzSourceStepRobustEnv(
             solver_ls_iterations=20,
             **kwargs,
         )
+
+
+class G1TrackingRMR50HzValidatedEnv(
+    G1TrackingRMR50HzSourceStepEnv
+):
+    """Smallest solver budget passing strict source-policy tracking."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.pop("solver_iterations", None)
+        kwargs.pop("solver_ls_iterations", None)
+        super().__init__(
+            *args,
+            solver_iterations=4,
+            solver_ls_iterations=10,
+            **kwargs,
+        )

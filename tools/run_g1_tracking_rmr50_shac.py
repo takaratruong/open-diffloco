@@ -50,7 +50,7 @@ def build_train_kwargs(
             "gae_lambda": 0.95,
             "max_episode_length": 60,
             "env_variant": (
-                "g1_tracking_rmr_50hz_source_step_robust"
+                "g1_tracking_rmr_50hz_validated"
                 if validated_task
                 else (
                     "g1_tracking_rmr_50hz_unbounded"
