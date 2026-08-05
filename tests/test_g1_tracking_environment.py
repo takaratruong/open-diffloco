@@ -210,5 +210,84 @@ class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
         )
 
 
+class G1TrackingRMR50HzGraceEnvironmentTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from src.envs.g1_tracking.environment import G1TrackingRMR50HzGraceEnv
+
+        cls.env = G1TrackingRMR50HzGraceEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+        )
+
+    def test_reference_failures_are_suppressed_for_first_twenty_steps(self):
+        env = self.env
+        state = env.reset_at_phase(
+            jax.random.PRNGKey(29), jnp.array(0.0), jnp.array(0)
+        )
+        body_pos, body_quat, _, _ = env._body_state(state.data)
+        failed_body_pos = body_pos.at[0, 2].add(0.26)
+
+        done, terminal = env._termination(
+            state.data,
+            {**state.info, "step": jnp.array(20)},
+            failed_body_pos,
+            body_quat,
+        )
+        self.assertEqual(float(done), 0.0)
+        self.assertEqual(float(terminal), 0.0)
+
+        done, terminal = env._termination(
+            state.data,
+            {**state.info, "step": jnp.array(21)},
+            failed_body_pos,
+            body_quat,
+        )
+        self.assertEqual(float(done), 1.0)
+        self.assertEqual(float(terminal), 1.0)
+
+    def test_nonfinite_state_and_clip_end_bypass_grace(self):
+        env = self.env
+        state = env.reset_at_phase(
+            jax.random.PRNGKey(31), jnp.array(0.0), jnp.array(0)
+        )
+        body_pos, body_quat, _, _ = env._body_state(state.data)
+        nonfinite = state.data.replace(
+            qpos=state.data.qpos.at[0].set(jnp.nan)
+        )
+        done, terminal = env._termination(
+            nonfinite,
+            {**state.info, "step": jnp.array(1)},
+            body_pos,
+            body_quat,
+        )
+        self.assertEqual(float(done), 1.0)
+        self.assertEqual(float(terminal), 1.0)
+
+        done, terminal = env._termination(
+            state.data,
+            {
+                **state.info,
+                "step": jnp.array(1),
+                "phase": jnp.array(env.reference_length - 2),
+            },
+            body_pos,
+            body_quat,
+        )
+        self.assertEqual(float(done), 1.0)
+        self.assertEqual(float(terminal), 0.0)
+
+    def test_factory_selects_grace_environment(self):
+        from src.envs.g1_tracking.environment import G1TrackingRMR50HzGraceEnv
+        from src.envs.go2.environment import get_go2_env_class
+
+        self.assertIs(
+            get_go2_env_class("g1_tracking_rmr_50hz_grace"),
+            G1TrackingRMR50HzGraceEnv,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

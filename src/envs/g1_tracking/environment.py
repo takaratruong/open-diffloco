@@ -107,6 +107,7 @@ class G1TrackingEnv:
         physics_substeps: int = 5,
         reference_stride: int = 1,
         reward_scale: float = 1.0,
+        termination_grace_steps: int = 0,
         **_unused_go2_options,
     ):
         if actor_history_len < 1:
@@ -117,6 +118,8 @@ class G1TrackingEnv:
             raise ValueError("reference_stride must be at least one")
         if reward_scale <= 0.0:
             raise ValueError("reward_scale must be positive")
+        if termination_grace_steps < 0:
+            raise ValueError("termination_grace_steps must be nonnegative")
 
         self.xml_path = str(Path(xml_path))
         self.reference_path = str(Path(reference_path))
@@ -185,6 +188,7 @@ class G1TrackingEnv:
         self.n_frames = physics_substeps
         self.reference_stride = reference_stride
         self.reward_scale = reward_scale
+        self.termination_grace_steps = termination_grace_steps
         self.dt = float(self.mj_model.opt.timestep * self.n_frames)
         self.action_dim = 29
         self.actor_history_len = actor_history_len
@@ -486,13 +490,18 @@ class G1TrackingEnv:
             jp.any(~jp.isfinite(data.qpos))
             | jp.any(~jp.isfinite(data.qvel))
         )
-        terminal = (
+        tracking_failure = (
             (anchor_z_error > 0.25)
             | (anchor_xy_error > 1.3)
             | (gravity_z_error > 0.8)
             | (distal_z_error > 0.4)
-            | nan_failure
-        ).astype(jp.float64)
+        )
+        in_grace = (self.termination_grace_steps > 0) & (
+            info["step"] <= self.termination_grace_steps
+        )
+        terminal = ((tracking_failure & ~in_grace) | nan_failure).astype(
+            jp.float64
+        )
         clip_end = (
             phase >= self.reference_length - self.reference_stride
         ).astype(jp.float64)
@@ -710,5 +719,16 @@ class G1TrackingRMR50HzEnv(G1TrackingEnv):
             physics_substeps=10,
             reference_stride=2,
             reward_scale=0.02,
+            **kwargs,
+        )
+
+
+class G1TrackingRMR50HzGraceEnv(G1TrackingRMR50HzEnv):
+    """Native RMR task with Go2's 0.4-second training recovery window."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(
+            *args,
+            termination_grace_steps=20,
             **kwargs,
         )

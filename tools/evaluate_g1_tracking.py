@@ -13,6 +13,20 @@ import numpy as np
 from src.core.data_structures import Normalizer
 from src.core.networks import Actor
 from src.envs.g1_tracking.environment import G1TrackingEnv
+from src.envs.go2.environment import get_go2_env_class
+
+
+EVALUATION_ENV_VARIANTS = (
+    "g1_tracking",
+    "g1_tracking_rmr_50hz",
+)
+
+
+def make_evaluation_env(variant: str) -> G1TrackingEnv:
+    """Builds an exact-termination task on the requested control timebase."""
+    if variant not in EVALUATION_ENV_VARIANTS:
+        raise ValueError(f"unsupported evaluation environment: {variant}")
+    return get_go2_env_class(variant)(actor_history_len=1)
 
 
 def scale_policy_action(action: jax.Array, gain: float) -> jax.Array:
@@ -82,12 +96,17 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=120)
     parser.add_argument("--render-every", type=int, default=2)
     parser.add_argument("--action-gain", type=float, default=1.0)
+    parser.add_argument(
+        "--env-variant",
+        choices=EVALUATION_ENV_VARIANTS,
+        default="g1_tracking",
+    )
     args = parser.parse_args()
     if not 0.0 <= args.action_gain <= 1.0:
         parser.error("--action-gain must be between 0 and 1")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    env = G1TrackingEnv(actor_history_len=1)
+    env = make_evaluation_env(args.env_variant)
     if args.checkpoint is not None and args.rmr_action_tape is not None:
         parser.error("--checkpoint and --rmr-action-tape are mutually exclusive")
     actor = actor_params = normalizer_state = None
