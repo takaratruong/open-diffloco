@@ -15,6 +15,13 @@ from src.core.networks import Actor
 from src.envs.g1_tracking.environment import G1TrackingEnv
 
 
+def scale_policy_action(action: jax.Array, gain: float) -> jax.Array:
+    """Interpolates between the zero-action controller and a learned policy."""
+    if not 0.0 <= gain <= 1.0:
+        raise ValueError("action gain must be between 0 and 1")
+    return action * gain
+
+
 def _load_policy(
     env: G1TrackingEnv, checkpoint: Path | None, seed: int
 ):
@@ -74,7 +81,10 @@ def main() -> None:
     parser.add_argument("--phase", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=120)
     parser.add_argument("--render-every", type=int, default=2)
+    parser.add_argument("--action-gain", type=float, default=1.0)
     args = parser.parse_args()
+    if not 0.0 <= args.action_gain <= 1.0:
+        parser.error("--action-gain must be between 0 and 1")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     env = G1TrackingEnv(actor_history_len=1)
@@ -137,7 +147,10 @@ def main() -> None:
                 normalizer_state,
                 state.obs,
             ).astype(jnp.float32)
-            action = actor.apply(actor_params, normalized).astype(jnp.float64)
+            action = scale_policy_action(
+                actor.apply(actor_params, normalized).astype(jnp.float64),
+                args.action_gain,
+            )
         state = env.step(state, action)
         records.append(
             (
@@ -192,6 +205,7 @@ def main() -> None:
         "mean_body_orientation_error": float(np.mean(values[:, 8])),
         "mean_body_linear_velocity_error": float(np.mean(values[:, 9])),
         "mean_body_angular_velocity_error": float(np.mean(values[:, 10])),
+        "action_gain": args.action_gain,
     }
     (args.output_dir / "summary.json").write_text(
         __import__("json").dumps(summary, indent=2, sort_keys=True) + "\n"
