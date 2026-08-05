@@ -98,6 +98,35 @@ class RMRTrackingRewardTest(unittest.TestCase):
         self.assertTrue(bool(jnp.isfinite(gradient)))
         self.assertLess(float(gradient), 0.0)
 
+    def test_upstream_differentiable_regularizers_match_rmr_weights(self):
+        from src.envs.g1_tracking.reward import rmr_regularization_reward
+
+        penalty, components = rmr_regularization_reward(
+            action=jnp.array([1.0, -1.0, 0.0]),
+            previous_action=jnp.zeros(3),
+            joint_pos=jnp.array([-1.2, 0.0, 1.4]),
+            soft_joint_lower=jnp.array([-1.0, -1.0, -1.0]),
+            soft_joint_upper=jnp.array([1.0, 1.0, 1.0]),
+        )
+
+        self.assertAlmostEqual(float(components["action_rate"]), -0.2)
+        self.assertAlmostEqual(float(components["joint_limit"]), -6.0)
+        self.assertAlmostEqual(float(penalty), -6.2)
+
+    def test_regularizers_are_zero_for_steady_in_limit_commands(self):
+        from src.envs.g1_tracking.reward import rmr_regularization_reward
+
+        penalty, components = rmr_regularization_reward(
+            action=jnp.array([0.2, -0.1]),
+            previous_action=jnp.array([0.2, -0.1]),
+            joint_pos=jnp.array([0.0, 0.5]),
+            soft_joint_lower=jnp.array([-1.0, -1.0]),
+            soft_joint_upper=jnp.array([1.0, 1.0]),
+        )
+
+        self.assertAlmostEqual(float(penalty), 0.0)
+        self.assertTrue(all(float(value) == 0.0 for value in components.values()))
+
 
 if __name__ == "__main__":
     unittest.main()

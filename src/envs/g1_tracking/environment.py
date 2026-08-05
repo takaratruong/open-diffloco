@@ -17,6 +17,7 @@ from src.envs.g1_tracking.reference import (
 )
 from src.envs.g1_tracking.reward import (
     quaternion_error_magnitude,
+    rmr_regularization_reward,
     rmr_tracking_reward,
 )
 
@@ -154,6 +155,23 @@ class G1TrackingEnv:
             self.controller.default_joint_pos
         )
         self.action_scales = jp.asarray(self.controller.action_scale)
+        joint_ranges = np.asarray(self.mj_model.jnt_range[1:])
+        joint_limited = np.asarray(self.mj_model.jnt_limited[1:], dtype=bool)
+        if joint_ranges.shape != (29, 2):
+            raise ValueError("RMR G1 model must expose 29 scalar joint ranges")
+        joint_centers = np.mean(joint_ranges, axis=-1)
+        soft_lower = joint_centers + 0.9 * (
+            joint_ranges[:, 0] - joint_centers
+        )
+        soft_upper = joint_centers + 0.9 * (
+            joint_ranges[:, 1] - joint_centers
+        )
+        self.soft_joint_lower = jp.asarray(
+            np.where(joint_limited, soft_lower, -np.inf)
+        )
+        self.soft_joint_upper = jp.asarray(
+            np.where(joint_limited, soft_upper, np.inf)
+        )
 
         self.n_frames = 5
         self.dt = float(self.mj_model.opt.timestep * self.n_frames)
@@ -357,6 +375,8 @@ class G1TrackingEnv:
             "rew_body_orientation": zero,
             "rew_body_linear_velocity": zero,
             "rew_body_angular_velocity": zero,
+            "rew_action_rate": zero,
+            "rew_joint_limit": zero,
             # Compatibility names for the current SHAC logger.
             "vel_x": zero,
             "vel_y": zero,
@@ -502,6 +522,17 @@ class G1TrackingEnv:
             body_lin_vel,
             body_ang_vel,
         )
+        regularization_reward, regularization_components = (
+            rmr_regularization_reward(
+                action=action,
+                previous_action=state.info["last_act"],
+                joint_pos=data.qpos[7:],
+                soft_joint_lower=self.soft_joint_lower,
+                soft_joint_upper=self.soft_joint_upper,
+            )
+        )
+        reward = reward + regularization_reward
+        components = {**components, **regularization_components}
         done, terminal = self._termination(
             data, pre_reset_info, body_pos, body_quat
         )
@@ -603,6 +634,8 @@ class G1TrackingEnv:
             "rew_body_orientation": components["body_orientation"],
             "rew_body_linear_velocity": components["body_linear_velocity"],
             "rew_body_angular_velocity": components["body_angular_velocity"],
+            "rew_action_rate": components["action_rate"],
+            "rew_joint_limit": components["joint_limit"],
             # Current SHAC logger compatibility: these carry errors, not velocity.
             "vel_x": anchor_position_error,
             "vel_y": body_position_error,

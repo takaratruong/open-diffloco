@@ -20,6 +20,26 @@ def _position_error(target: jax.Array, actual: jax.Array) -> jax.Array:
     return jp.sum(jp.square(target - actual), axis=-1)
 
 
+def rmr_regularization_reward(
+    *,
+    action: jax.Array,
+    previous_action: jax.Array,
+    joint_pos: jax.Array,
+    soft_joint_lower: jax.Array,
+    soft_joint_upper: jax.Array,
+) -> tuple[jax.Array, Mapping[str, jax.Array]]:
+    """Computes RMR's differentiable action-rate and joint-limit terms."""
+    action_rate = -0.1 * jp.sum(jp.square(action - previous_action), axis=-1)
+    below_limit = jp.maximum(soft_joint_lower - joint_pos, 0.0)
+    above_limit = jp.maximum(joint_pos - soft_joint_upper, 0.0)
+    joint_limit = -10.0 * jp.sum(below_limit + above_limit, axis=-1)
+    components = {
+        "action_rate": action_rate,
+        "joint_limit": joint_limit,
+    }
+    return action_rate + joint_limit, components
+
+
 def rmr_tracking_reward(
     *,
     target_anchor_pos: jax.Array,
