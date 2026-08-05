@@ -107,6 +107,7 @@ class G1TrackingEnv:
         physics_substeps: int = 5,
         reference_stride: int = 1,
         reward_scale: float = 1.0,
+        clip_actions: bool = True,
         **_unused_go2_options,
     ):
         if actor_history_len < 1:
@@ -185,6 +186,8 @@ class G1TrackingEnv:
         self.n_frames = physics_substeps
         self.reference_stride = reference_stride
         self.reward_scale = reward_scale
+        self.clip_actions = clip_actions
+        self.squash_actor_actions = clip_actions
         self.dt = float(self.mj_model.opt.timestep * self.n_frames)
         self.action_dim = 29
         self.actor_history_len = actor_history_len
@@ -500,7 +503,7 @@ class G1TrackingEnv:
 
     @functools.partial(jax.checkpoint, static_argnums=(0,))
     def step(self, state: EnvState, action: jax.Array) -> EnvState:
-        action = jp.clip(action, -1.0, 1.0).astype(jp.float64)
+        action = self._prepare_action(action)
         position_target = self.default_joints + action * self.action_scales
 
         def physics_step(data, _):
@@ -687,6 +690,12 @@ class G1TrackingEnv:
             metrics=metrics,
         )
 
+    def _prepare_action(self, action: jax.Array) -> jax.Array:
+        action = action.astype(jp.float64)
+        if self.clip_actions:
+            return jp.clip(action, -1.0, 1.0)
+        return action
+
     def _apply_obs_noise(
         self, obs: jax.Array, _rng: jax.Array
     ) -> jax.Array:
@@ -712,3 +721,11 @@ class G1TrackingRMR50HzEnv(G1TrackingEnv):
             reward_scale=0.02,
             **kwargs,
         )
+
+
+class G1TrackingRMR50HzUnboundedEnv(G1TrackingRMR50HzEnv):
+    """Native RMR timebase with the upstream linear Gaussian action support."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.pop("clip_actions", None)
+        super().__init__(*args, clip_actions=False, **kwargs)

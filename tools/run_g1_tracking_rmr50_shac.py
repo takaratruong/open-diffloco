@@ -20,6 +20,7 @@ def build_train_kwargs(
     action_noise_std_end: float | None = None,
     actor_bootstrap_scale: float = 1.0,
     unroll_length: int = 24,
+    unbounded_actions: bool = False,
 ) -> dict:
     kwargs = build_100hz_train_kwargs(
         steps=steps,
@@ -41,7 +42,11 @@ def build_train_kwargs(
             "gamma": 0.99,
             "gae_lambda": 0.95,
             "max_episode_length": 60,
-            "env_variant": "g1_tracking_rmr_50hz",
+            "env_variant": (
+                "g1_tracking_rmr_50hz_unbounded"
+                if unbounded_actions
+                else "g1_tracking_rmr_50hz"
+            ),
         }
     )
     return kwargs
@@ -58,6 +63,7 @@ def main() -> None:
     parser.add_argument("--action-noise-std-end", type=float)
     parser.add_argument("--actor-bootstrap-scale", type=float, default=1.0)
     parser.add_argument("--unroll-length", type=int, default=24)
+    parser.add_argument("--unbounded-actions", action="store_true")
     args = parser.parse_args()
 
     configure_jax()
@@ -72,6 +78,7 @@ def main() -> None:
             action_noise_std_end=args.action_noise_std_end,
             actor_bootstrap_scale=args.actor_bootstrap_scale,
             unroll_length=args.unroll_length,
+            unbounded_actions=args.unbounded_actions,
         )
     )
 

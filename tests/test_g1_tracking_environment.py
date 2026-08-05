@@ -209,6 +209,31 @@ class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
             G1TrackingRMR50HzEnv,
         )
 
+    def test_unbounded_rmr_variant_preserves_demonstrated_action_support(self):
+        from src.envs.g1_tracking.environment import (
+            G1TrackingRMR50HzUnboundedEnv,
+        )
+        from src.envs.go2.environment import get_go2_env_class
+
+        self.assertIs(
+            get_go2_env_class("g1_tracking_rmr_50hz_unbounded"),
+            G1TrackingRMR50HzUnboundedEnv,
+        )
+
+        unbounded = G1TrackingRMR50HzUnboundedEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+        )
+        action = jnp.full(unbounded.action_dim, 2.0)
+
+        np.testing.assert_allclose(unbounded._prepare_action(action), action)
+        np.testing.assert_allclose(
+            self.env._prepare_action(action), jnp.ones(self.env.action_dim)
+        )
+        self.assertFalse(unbounded.squash_actor_actions)
+
 
 if __name__ == "__main__":
     unittest.main()

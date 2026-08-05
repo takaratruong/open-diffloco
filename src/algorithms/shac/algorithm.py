@@ -281,7 +281,8 @@ def train(
     key, k1, k2, k3 = jax.random.split(key, 4)
 
     # Initialize networks
-    actor = Actor(env.action_dim)
+    squash_actor_actions = getattr(env, "squash_actor_actions", True)
+    actor = Actor(env.action_dim, squash=squash_actor_actions)
     critic = Critic()
 
     actor_dummy = jp.zeros((1, env.actor_obs_dim), dtype=jp.float32)
@@ -396,7 +397,8 @@ def train(
 
             # Reparameterized action noise
             noisy_action = action + current_noise_std * noise_t.astype(jp.float64)
-            noisy_action = jp.clip(noisy_action, -1.0, 1.0)
+            if squash_actor_actions:
+                noisy_action = jp.clip(noisy_action, -1.0, 1.0)
 
             next_state = env.step(state, noisy_action)
             foot_bump_ou = jp.where(next_state.done, jp.zeros((4, 3)), foot_bump_ou)
@@ -1103,6 +1105,7 @@ def train(
         "critic_per_env_grad_clip": critic_per_env_grad_clip,
         "actor_bootstrap_scale": actor_bootstrap_scale,
         "env_variant": env_variant,
+        "squash_actor_actions": squash_actor_actions,
     }
     with open(f"{save_dir}/hparams.json", "w") as f:
         json.dump(hparams, f, indent=2)

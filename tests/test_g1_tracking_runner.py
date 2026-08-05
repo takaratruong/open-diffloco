@@ -63,6 +63,21 @@ class G1TrackingRunnerTest(unittest.TestCase):
         self.assertEqual(kwargs["action_noise_std_start"], 0.5)
         self.assertEqual(kwargs["action_noise_std_end"], 0.32)
 
+    def test_native_rmr_runner_can_select_linear_unbounded_action_support(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        kwargs = build_train_kwargs(
+            steps=65_536,
+            num_envs=256,
+            seed=3,
+            checkpoint_interval=16_384,
+            unbounded_actions=True,
+        )
+
+        self.assertEqual(
+            kwargs["env_variant"], "g1_tracking_rmr_50hz_unbounded"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

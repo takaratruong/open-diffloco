@@ -11,6 +11,7 @@ class Actor(nn.Module):
 
     action_dim: int
     hidden: Sequence[int] = (512, 256, 128)
+    squash: bool = True
 
     @nn.compact
     def __call__(self, x):
@@ -25,7 +26,7 @@ class Actor(nn.Module):
             bias_init=nn.initializers.zeros,
         )(x)
 
-        return nn.tanh(x)
+        return nn.tanh(x) if self.squash else x
 
 
 class Critic(nn.Module):
