@@ -4,7 +4,9 @@ import os
 import time
 import pickle
 import json
+import shutil
 from datetime import datetime
+from pathlib import Path
 
 # Set to True to enable per-foot normal force logging
 DEBUG_FOOT_CONTACTS = False
@@ -65,6 +67,22 @@ def load_checkpoint(path: str):
             hparams = json.load(f)
 
     return state, hparams, int(state.step)
+
+
+def save_periodic_checkpoint(state, save_dir: str | Path, step: int) -> Path:
+    """Archive a step-addressed checkpoint and atomically advance latest."""
+    directory = Path(save_dir)
+    step_path = directory / f"checkpoint_step_{step:06d}.pkl"
+    step_temp = directory / f".{step_path.name}.tmp"
+    with step_temp.open("wb") as stream:
+        pickle.dump(state, stream)
+    os.replace(step_temp, step_path)
+
+    latest_path = directory / "checkpoint_latest.pkl"
+    latest_temp = directory / ".checkpoint_latest.pkl.tmp"
+    shutil.copyfile(step_path, latest_temp)
+    os.replace(latest_temp, latest_path)
+    return step_path
 
 
 def squeeze_value_head(values):
@@ -1047,9 +1065,7 @@ def train(
 
             # Periodic checkpoint
             if state.step - last_checkpoint_step >= checkpoint_interval:
-                ckpt_path = os.path.join(save_dir, "checkpoint_latest.pkl")
-                with open(ckpt_path, "wb") as f:
-                    pickle.dump(state, f)
+                save_periodic_checkpoint(state, save_dir, int(state.step))
                 last_checkpoint_step = state.step
                 print(f"  >> Checkpoint saved at step {state.step}")
 
