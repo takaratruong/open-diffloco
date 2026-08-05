@@ -46,6 +46,10 @@ class Go2Env:
         terrain_slope_max: float = 5.0,
         max_episode_length: int = 500,
         actor_history_len: int = 10,
+        foot_names: tuple = ("FL", "FR", "RL", "RR"),
+        torso_body_names: tuple = ("base", "trunk", "base_link", "torso"),
+        target_height: float = 0.3,
+        termination_height: float = 0.18,
     ):
         """
         Initialize Go2 environment.
@@ -96,9 +100,15 @@ class Go2Env:
         self.n_frames = 5  # Physics substeps per control step
         self.dt = self.mj_model.opt.timestep * self.n_frames
 
-        self.action_dim = 12
+        self.action_dim = self.mj_model.nu
+        if self.default_joints.shape[0] != self.action_dim:
+            raise ValueError(
+                "Expected one position actuator per free-base joint coordinate, "
+                f"got {self.default_joints.shape[0]} coordinates and "
+                f"{self.action_dim} actuators"
+            )
         self.action_scale = action_scale  # scalar, broadcast in step()
-        # NOTE: scalar is faster but only works if all 12 joints share the same scale
+        # NOTE: scalar is faster but only works if all joints share the same scale
 
         # Command ranges for curriculum
         self.cmd_vel_x_range = cmd_vel_x_range
@@ -107,7 +117,12 @@ class Go2Env:
         self.cmd_zero_prob = jp.array(cmd_zero_prob)
         self.cmd_ctrl_interval_range = cmd_ctrl_interval_range
 
-        self.termination_height = 0.18
+        self.target_height = target_height
+        self.termination_height = termination_height
+        self.foot_names = tuple(foot_names)
+        if len(self.foot_names) != 4:
+            raise ValueError("The frozen terrain interface requires four foot slots")
+        self.torso_body_names = tuple(torso_body_names)
         self.max_episode_length = max_episode_length
         if actor_history_len < 1:
             raise ValueError("actor_history_len must be at least 1")
@@ -186,7 +201,7 @@ class Go2Env:
         dummy_info = {
             "step": jp.array(0),
             "cmd_step": jp.array(0, dtype=jp.int32),
-            "last_act": jp.zeros(12),
+            "last_act": jp.zeros(self.action_dim),
             "cmd": jp.zeros(3),
             "cmd_ctrl_interval": jp.array(cmd_ctrl_interval_range[0], dtype=jp.int32),
             "rng": jax.random.PRNGKey(0),
@@ -271,7 +286,7 @@ class Go2Env:
         """
         Find the torso/base body ID for external force application.
         """
-        for name in ["base", "trunk", "base_link", "torso"]:
+        for name in self.torso_body_names:
             bid = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, name)
             if bid >= 0:
                 print(f"  Torso body: '{name}' -> id {bid}")
@@ -287,10 +302,8 @@ class Go2Env:
 
         Order: [FL, FR, RL, RR].
         """
-        foot_order = ["FL", "FR", "RL", "RR"]
-
         for suffix in ["_foot", ""]:
-            names = [f"{leg}{suffix}" for leg in foot_order]
+            names = [f"{foot}{suffix}" for foot in self.foot_names]
             ids = [
                 mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_SITE, n)
                 for n in names
@@ -311,10 +324,9 @@ class Go2Env:
         Contacts reference geom IDs, so we want the named foot contact geoms
         rather than the first geom attached to each calf body.
         """
-        foot_order = ["FL", "FR", "RL", "RR"]
         foot_geom_ids = []
 
-        for foot_name in foot_order:
+        for foot_name in self.foot_names:
             gid = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_GEOM, foot_name)
             if gid < 0:
                 raise ValueError(f"Could not find foot geom named '{foot_name}'")
@@ -369,7 +381,9 @@ class Go2Env:
         angle = (jp.pi / 20) * (jax.random.uniform(keys[1], ()) - 0.5)
         axis = jp.array([0.0, 0.0, 1.0])
         qpos = qpos.at[3:7].set(axis_angle_to_quat(axis, angle))
-        qpos = qpos.at[7:19].add(0.03 * (jax.random.uniform(keys[2], (12,)) - 0.5))
+        qpos = qpos.at[7:].add(
+            0.03 * (jax.random.uniform(keys[2], (self.action_dim,)) - 0.5)
+        )
 
         friction_scale = jax.random.uniform(
             keys[6], (), minval=self.friction_range[0], maxval=self.friction_range[1]
@@ -423,7 +437,7 @@ class Go2Env:
         info = {
             "step": jp.array(0, dtype=jp.int32),
             "cmd_step": jp.array(0, dtype=jp.int32),
-            "last_act": jp.zeros(12),
+            "last_act": jp.zeros(self.action_dim),
             "cmd": cmd,
             "cmd_ctrl_interval": ctrl_interval,
             "rng": rng,
@@ -494,7 +508,7 @@ class Go2Env:
             "pen_rate": _z,
             "pen_act": _z,
             "pen_joint": _z,
-            "height": jp.float32(0.27),
+            "height": jp.float32(self.target_height),
             "tilt": jp.float32(-1.0),
             "foot_normal_FL": _z,
             "foot_normal_FR": _z,
@@ -641,7 +655,7 @@ class Go2Env:
         next_info = {
             "step": next_step,
             "cmd_step": next_cmd_step,
-            "last_act": jp.where(done, jp.zeros(12), action),
+            "last_act": jp.where(done, jp.zeros(self.action_dim), action),
             "cmd": next_cmd,
             "cmd_ctrl_interval": next_interval,
             "rng": next_rng,
@@ -758,7 +772,9 @@ class Go2Env:
         rew_vel_y = -jp.square(local_linvel[1] - cmd[1])
         rew_yaw = -jp.square(local_angvel[2] - cmd[2])
 
-        rew_height = jp.exp(-10.0 * jp.square(height_above_ground - 0.3))
+        rew_height = jp.exp(
+            -10.0 * jp.square(height_above_ground - self.target_height)
+        )
         rew_vz = -0.5 * jp.square(local_linvel[2])
 
         rew_upright = 0.5 * (-gravity_proj[2])
@@ -797,8 +813,12 @@ class Go2Env:
         next_gravity_proj = next_critic_obs[..., 6:9]
         cmd = critic_obs[..., 9:12]
         next_height = next_critic_obs[..., 12]
-        next_joint_offsets = next_critic_obs[..., 13:25]
-        last_act = critic_obs[..., 37:49]
+        joint_start = 13
+        joint_end = joint_start + self.action_dim
+        last_act_start = joint_end + self.action_dim
+        last_act_end = last_act_start + self.action_dim
+        next_joint_offsets = next_critic_obs[..., joint_start:joint_end]
+        last_act = critic_obs[..., last_act_start:last_act_end]
 
         qpos_prefix = jp.zeros(next_joint_offsets.shape[:-1] + (7,))
         qpos = jp.concatenate(
@@ -861,9 +881,9 @@ class Go2Env:
                 jp.ones(3) * 0.2,  # angular velocity
                 jp.ones(3) * 0.05,  # projected gravity
                 jp.zeros(3),  # commands
-                jp.ones(12) * 0.01,  # joint positions
-                jp.ones(12) * 0.01,  # joint velocities
-                jp.zeros(12),  # actions
+                jp.ones(self.action_dim) * 0.01,  # joint positions
+                jp.ones(self.action_dim) * 0.01,  # joint velocities
+                jp.zeros(self.action_dim),  # actions
             ],
             axis=0,
         )

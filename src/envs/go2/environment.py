@@ -13,6 +13,7 @@ VARIANTS = {
     ),
     "blind_linvel_kinref": "src.envs.go2.variants.blind_linvel_kinref.environment",
     "highspeed_nokinref": "src.envs.go2.variants.highspeed_nokinref.environment",
+    "humanoid_blind_linvel_nokinref": "src.envs.humanoid.environment",
 }
 
 
@@ -25,7 +26,10 @@ def get_go2_env_class(variant: str = DEFAULT_VARIANT):
     except KeyError as exc:
         valid = ", ".join(sorted(VARIANTS))
         raise ValueError(f"Unknown Go2 variant '{variant}'. Valid variants: {valid}") from exc
-    return import_module(module_name).Go2Env
+    module = import_module(module_name)
+    if variant == "humanoid_blind_linvel_nokinref":
+        return module.HumanoidEnv
+    return module.Go2Env
 
 
 def Go2Env(*args, variant: str = DEFAULT_VARIANT, **kwargs):

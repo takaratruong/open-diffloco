@@ -1,0 +1,207 @@
+<mujoco model="diffmimic humanoid open-diffloco port">
+  <compiler angle="degree" coordinate="local" inertiafromgeom="false"
+            eulerseq="xyz"/>
+
+  <option timestep="0.004" gravity="0 0 -9.81" integrator="Euler"
+          cone="pyramidal" impratio="100" iterations="1" ls_iterations="5">
+    <flag eulerdamp="disable"/>
+  </option>
+
+  <default>
+    <geom contype="2" conaffinity="1" condim="3"
+          friction="1 0.005 0.0001" rgba="0.8 0.6 0.4 1"/>
+    <joint type="hinge" limited="true" armature="0" stiffness="0"/>
+    <position ctrllimited="false"/>
+  </default>
+
+  <worldbody>
+    <geom name="floor" type="plane" pos="0 0 0" size="40 40 0.1"
+          contype="1" conaffinity="1" condim="3"
+          friction="1 0.005 0.0001" rgba="0.3 0.35 0.4 1"/>
+
+    <body name="pelvis" pos="0 0 0.88">
+      <freejoint name="root"/>
+      <inertial pos="0 0 0" mass="10.0" diaginertia="1 1 1"/>
+      <geom name="pelvis_lower" type="sphere" pos="0 0 0.07" size="0.09"/>
+      <geom name="pelvis_upper" type="sphere" pos="0 0 0.205" size="0.07"/>
+
+      <body name="torso" pos="0 0 0.236151">
+        <joint name="spine1_x" axis="1 0 0" range="-180 180" damping="100"/>
+        <joint name="spine1_y" axis="0 1 0" range="-180 180" damping="100"/>
+        <joint name="spine1_z" axis="0 0 1" range="-180 180" damping="100"/>
+        <inertial pos="0 0 0" mass="12.002052" diaginertia="1 1 1"/>
+        <geom name="torso_core" type="sphere" pos="0 0 0.12" size="0.11"/>
+        <geom name="torso_shoulder_r" type="capsule"
+              pos="-0.01142375 -0.08697725 0.23320685"
+              euler="83.8885 -7.4404535 -6.6881237"
+              size="0.045 0.04178709"/>
+        <geom name="torso_shoulder_l" type="capsule"
+              pos="-0.01142375 0.08697725 0.23320685"
+              euler="-83.8885 -7.4404535 6.6881237"
+              size="0.045 0.04178709"/>
+
+        <body name="head" pos="0 0 0.223894">
+          <joint name="neck_x" axis="1 0 0" range="-180 180" damping="10"/>
+          <joint name="neck_y" axis="0 1 0" range="-180 180" damping="10"/>
+          <joint name="neck_z" axis="0 0 1" range="-180 180" damping="10"/>
+          <inertial pos="0 0 0" mass="3.8822644" diaginertia="1 1 1"/>
+          <geom name="head_geom" type="sphere" pos="0 0 0.175" size="0.095"/>
+        </body>
+
+        <body name="right_upper_arm" pos="-0.02405 -0.18311 0.2435">
+          <joint name="right_shoulder_x" axis="1 0 0"
+                 range="-180 180" damping="40"/>
+          <joint name="right_shoulder_y" axis="0 1 0"
+                 range="-180 180" damping="40"/>
+          <joint name="right_shoulder_z" axis="0 0 1"
+                 range="-180 180" damping="40"/>
+          <inertial pos="0 0 0" mass="1.4993314" diaginertia="1 1 1"/>
+          <geom name="right_upper_arm_geom" type="capsule"
+                pos="0 0 -0.14" size="0.045 0.09"/>
+          <body name="right_lower_arm" pos="0 0 -0.274788">
+            <joint name="right_elbow" axis="0 1 0"
+                   range="-160 -2" damping="30"/>
+            <inertial pos="0 0 0" mass="1.5" diaginertia="1 1 1"/>
+            <geom name="right_lower_arm_geom" type="capsule"
+                  pos="0 0 -0.12" size="0.04 0.0675"/>
+            <geom name="right_hand" type="sphere"
+                  pos="0 0 -0.258947" size="0.04"/>
+          </body>
+        </body>
+
+        <body name="left_upper_arm" pos="-0.02405 0.18311 0.2435">
+          <joint name="left_shoulder_x" axis="1 0 0"
+                 range="-180 180" damping="40"/>
+          <joint name="left_shoulder_y" axis="0 1 0"
+                 range="-180 180" damping="40"/>
+          <joint name="left_shoulder_z" axis="0 0 1"
+                 range="-180 180" damping="40"/>
+          <inertial pos="0 0 0" mass="1.4993314" diaginertia="1 1 1"/>
+          <geom name="left_upper_arm_geom" type="capsule"
+                pos="0 0 -0.14" size="0.045 0.09"/>
+          <body name="left_lower_arm" pos="0 0 -0.274788">
+            <joint name="left_elbow" axis="0 1 0"
+                   range="-160 -2" damping="30"/>
+            <inertial pos="0 0 0" mass="1.5" diaginertia="1 1 1"/>
+            <geom name="left_lower_arm_geom" type="capsule"
+                  pos="0 0 -0.12" size="0.04 0.0675"/>
+            <geom name="left_hand" type="sphere"
+                  pos="0 0 -0.258947" size="0.04"/>
+          </body>
+        </body>
+      </body>
+
+      <body name="right_thigh" pos="0 -0.084887 0">
+        <joint name="right_hip_x" axis="1 0 0"
+               range="-180 180" damping="50"/>
+        <joint name="right_hip_y" axis="0 1 0"
+               range="-180 180" damping="50"/>
+        <joint name="right_hip_z" axis="0 0 1"
+               range="-180 180" damping="50"/>
+        <inertial pos="0 0 0" mass="4.5022917" diaginertia="1 1 1"/>
+        <geom name="right_thigh_geom" type="capsule"
+              pos="0 0 -0.21" size="0.055 0.15"/>
+        <body name="right_shin" pos="0 0 -0.421546">
+          <joint name="right_knee" axis="0 1 0" range="2 160" damping="50"/>
+          <inertial pos="0 0 0" mass="2.9997497" diaginertia="1 1 1"/>
+          <geom name="right_shin_geom" type="capsule"
+                pos="0 0 -0.2" size="0.05 0.155"/>
+          <body name="right_foot" pos="0 0 -0.40987">
+            <joint name="right_ankle_x" axis="1 0 0"
+                   range="-180 180" damping="40"/>
+            <joint name="right_ankle_y" axis="0 1 0"
+                   range="-180 180" damping="40"/>
+            <joint name="right_ankle_z" axis="0 0 1"
+                   range="-180 180" damping="40"/>
+            <inertial pos="0 0 0" mass="0.99968714" diaginertia="1 1 1"/>
+            <geom name="FR" type="box" pos="0.08925 0 -0.0225"
+                  size="0.04425 0.045 0.0275"/>
+            <geom name="RR" type="box" pos="0.00075 0 -0.0225"
+                  size="0.04425 0.045 0.0275"/>
+            <site name="FR" pos="0.08925 0 -0.05" size="0.005"/>
+            <site name="RR" pos="0.00075 0 -0.05" size="0.005"/>
+          </body>
+        </body>
+      </body>
+
+      <body name="left_thigh" pos="0 0.084887 0">
+        <joint name="left_hip_x" axis="1 0 0"
+               range="-180 180" damping="50"/>
+        <joint name="left_hip_y" axis="0 1 0"
+               range="-180 180" damping="50"/>
+        <joint name="left_hip_z" axis="0 0 1"
+               range="-180 180" damping="50"/>
+        <inertial pos="0 0 0" mass="4.5022917" diaginertia="1 1 1"/>
+        <geom name="left_thigh_geom" type="capsule"
+              pos="0 0 -0.21" size="0.055 0.15"/>
+        <body name="left_shin" pos="0 0 -0.421546">
+          <joint name="left_knee" axis="0 1 0" range="2 160" damping="50"/>
+          <inertial pos="0 0 0" mass="2.9997497" diaginertia="1 1 1"/>
+          <geom name="left_shin_geom" type="capsule"
+                pos="0 0 -0.2" size="0.05 0.155"/>
+          <body name="left_foot" pos="0 0 -0.40987">
+            <joint name="left_ankle_x" axis="1 0 0"
+                   range="-180 180" damping="40"/>
+            <joint name="left_ankle_y" axis="0 1 0"
+                   range="-180 180" damping="40"/>
+            <joint name="left_ankle_z" axis="0 0 1"
+                   range="-180 180" damping="40"/>
+            <inertial pos="0 0 0" mass="0.99968714" diaginertia="1 1 1"/>
+            <geom name="FL" type="box" pos="0.08925 0 -0.0225"
+                  size="0.04425 0.045 0.0275"/>
+            <geom name="RL" type="box" pos="0.00075 0 -0.0225"
+                  size="0.04425 0.045 0.0275"/>
+            <site name="FL" pos="0.08925 0 -0.05" size="0.005"/>
+            <site name="RL" pos="0.00075 0 -0.05" size="0.005"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <contact>
+    <pair name="thigh_pair" geom1="right_thigh_geom" geom2="left_thigh_geom"
+          condim="3" friction="1 0.005 0.0001"/>
+    <pair name="shin_pair" geom1="right_shin_geom" geom2="left_shin_geom"
+          condim="3" friction="1 0.005 0.0001"/>
+  </contact>
+
+  <actuator>
+    <position name="spine1_x" joint="spine1_x" kp="1000"/>
+    <position name="spine1_y" joint="spine1_y" kp="1000"/>
+    <position name="spine1_z" joint="spine1_z" kp="1000"/>
+    <position name="neck_x" joint="neck_x" kp="100"/>
+    <position name="neck_y" joint="neck_y" kp="100"/>
+    <position name="neck_z" joint="neck_z" kp="100"/>
+    <position name="right_shoulder_x" joint="right_shoulder_x" kp="400"/>
+    <position name="right_shoulder_y" joint="right_shoulder_y" kp="400"/>
+    <position name="right_shoulder_z" joint="right_shoulder_z" kp="400"/>
+    <position name="right_elbow" joint="right_elbow" kp="300"/>
+    <position name="left_shoulder_x" joint="left_shoulder_x" kp="400"/>
+    <position name="left_shoulder_y" joint="left_shoulder_y" kp="400"/>
+    <position name="left_shoulder_z" joint="left_shoulder_z" kp="400"/>
+    <position name="left_elbow" joint="left_elbow" kp="300"/>
+    <position name="right_hip_x" joint="right_hip_x" kp="500"/>
+    <position name="right_hip_y" joint="right_hip_y" kp="500"/>
+    <position name="right_hip_z" joint="right_hip_z" kp="500"/>
+    <position name="right_knee" joint="right_knee" kp="500"/>
+    <position name="right_ankle_x" joint="right_ankle_x" kp="400"/>
+    <position name="right_ankle_y" joint="right_ankle_y" kp="400"/>
+    <position name="right_ankle_z" joint="right_ankle_z" kp="400"/>
+    <position name="left_hip_x" joint="left_hip_x" kp="500"/>
+    <position name="left_hip_y" joint="left_hip_y" kp="500"/>
+    <position name="left_hip_z" joint="left_hip_z" kp="500"/>
+    <position name="left_knee" joint="left_knee" kp="500"/>
+    <position name="left_ankle_x" joint="left_ankle_x" kp="400"/>
+    <position name="left_ankle_y" joint="left_ankle_y" kp="400"/>
+    <position name="left_ankle_z" joint="left_ankle_z" kp="400"/>
+  </actuator>
+
+  <keyframe>
+    <key name="home"
+         qpos="0 0 0.88 1 0 0 0
+               0 0 0  0 0 0  0 0 0  -0.034906585
+               0 0 0  -0.034906585  0 0 0  0.034906585  0 0 0
+               0 0 0  0.034906585  0 0 0"/>
+  </keyframe>
+</mujoco>

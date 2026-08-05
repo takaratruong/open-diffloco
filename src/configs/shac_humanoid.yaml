@@ -1,0 +1,5 @@
+algorithm: shac
+embodiment: humanoid
+variant: humanoid_blind_linvel_nokinref
+model_xml: src/envs/humanoid/models/humanoid_mjx.xml
+steps: 8000000

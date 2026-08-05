@@ -84,10 +84,25 @@ GO2_VARIANTS = {
     "highspeed_nokinref",
 }
 
-def _build_go2_parser(subparsers):
+HUMANOID_DEFAULTS = {
+    **GO2_DEFAULTS,
+    "variant": "humanoid_blind_linvel_nokinref",
+    "model_xml": "src/envs/humanoid/models/humanoid_mjx.xml",
+}
+
+HUMANOID_VARIANTS = {"humanoid_blind_linvel_nokinref"}
+
+
+def _build_go2_parser(subparsers, embodiment="go2"):
+    variants = HUMANOID_VARIANTS if embodiment == "humanoid" else GO2_VARIANTS
+    help_text = (
+        "Humanoid locomotion"
+        if embodiment == "humanoid"
+        else "Go2 quadruped locomotion"
+    )
     parser = subparsers.add_parser(
-        "go2",
-        help="Go2 quadruped locomotion",
+        embodiment,
+        help=help_text,
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -105,9 +120,9 @@ def _build_go2_parser(subparsers):
     )
     parser.add_argument(
         "--variant",
-        choices=sorted(GO2_VARIANTS),
+        choices=sorted(variants),
         default=argparse.SUPPRESS,
-        help="Go2 environment variant",
+        help="Locomotion environment variant",
     )
     parser.add_argument(
         "--steps", type=int, default=argparse.SUPPRESS, help="Training steps"
@@ -335,19 +350,21 @@ def _apply_config(args, config):
     if embodiment is not None:
         embodiment = str(embodiment).lower()
 
-    if embodiment != "go2":
+    if embodiment not in {"go2", "humanoid"}:
         merged = dict(raw_values)
         merged["embodiment"] = embodiment
         return argparse.Namespace(**merged)
 
-    merged = dict(GO2_DEFAULTS)
-    unknown_keys = sorted(key for key in config_values if key not in GO2_DEFAULTS)
+    defaults = HUMANOID_DEFAULTS if embodiment == "humanoid" else GO2_DEFAULTS
+    variants = HUMANOID_VARIANTS if embodiment == "humanoid" else GO2_VARIANTS
+    merged = dict(defaults)
+    unknown_keys = sorted(key for key in config_values if key not in defaults)
     if unknown_keys:
         raise ValueError(f"Unknown config key(s): {', '.join(unknown_keys)}")
 
     merged.update(config_values)
     for key, value in raw_values.items():
-        if key in GO2_DEFAULTS:
+        if key in defaults:
             merged[key] = value
 
     merged.update(
@@ -359,8 +376,8 @@ def _apply_config(args, config):
     )
     if merged["algorithm"] not in {"jave", "shac"}:
         raise ValueError("Config value 'algorithm' must be either 'jave' or 'shac'")
-    if merged["variant"] not in GO2_VARIANTS:
-        valid = ", ".join(sorted(GO2_VARIANTS))
+    if merged["variant"] not in variants:
+        valid = ", ".join(sorted(variants))
         raise ValueError(f"Config value 'variant' must be one of: {valid}")
     return argparse.Namespace(**merged)
 
@@ -464,6 +481,7 @@ Examples:
 
     subparsers = parser.add_subparsers(dest="embodiment", help="Choose embodiment")
     _build_go2_parser(subparsers)
+    _build_go2_parser(subparsers, embodiment="humanoid")
 
     args = parser.parse_args()
     config = _load_yaml_config(args.config) if args.config else {}
@@ -474,7 +492,7 @@ Examples:
     if args.embodiment is None:
         parser.print_help()
         sys.exit(1)
-    elif args.embodiment == "go2":
+    elif args.embodiment in {"go2", "humanoid"}:
         _run_go2(args)
     else:
         parser.error(f"Unsupported embodiment: {args.embodiment}")
