@@ -19,6 +19,11 @@ def canonicalize_step_dtype(step):
     return jp.asarray(step, dtype=dtype)
 
 
+def commit_tree_to_local_device(tree):
+    """Commits JIT inputs before warm-up so later calls reuse its signature."""
+    return jax.device_put(tree, jax.local_devices()[0])
+
+
 def canonicalize_tree_like(current_tree, template_tree):
     """Matches array dtype, weak typing, device, and sharding to a template."""
 

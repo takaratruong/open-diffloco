@@ -7,6 +7,7 @@ from src.algorithms.shac.initialization import (
     canonicalize_normalizer_dtype,
     canonicalize_step_dtype,
     canonicalize_tree_like,
+    commit_tree_to_local_device,
 )
 from src.core.data_structures import Normalizer
 
@@ -53,6 +54,27 @@ class ShacInitializationTest(unittest.TestCase):
         self.assertEqual(
             canonical["array"].sharding, warmup_output["array"].sharding
         )
+
+    def test_committed_initial_tree_reuses_warmup_jit_signature(self):
+        traces = []
+
+        @jax.jit
+        def update(state):
+            traces.append(True)
+            return {"value": state["value"] + 1.0}
+
+        state = commit_tree_to_local_device(
+            {"value": jnp.ones(2, dtype=jnp.float64)}
+        )
+        self.assertTrue(state["value"].committed)
+
+        warmup_state = update(state)
+        jax.block_until_ready(warmup_state["value"])
+        replay_state = canonicalize_tree_like(state, warmup_state)
+        replay_state = update(replay_state)
+        jax.block_until_ready(replay_state["value"])
+
+        self.assertEqual(len(traces), 1)
 
 
 if __name__ == "__main__":

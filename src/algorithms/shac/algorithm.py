@@ -24,6 +24,7 @@ from src.algorithms.shac.initialization import (
     canonicalize_normalizer_dtype,
     canonicalize_step_dtype,
     canonicalize_tree_like,
+    commit_tree_to_local_device,
 )
 
 
@@ -831,6 +832,11 @@ def train(
             critic_opt=critic_opt_state,
             step=canonicalize_step_dtype(0),
         )
+
+    # JAX distinguishes uncommitted and explicitly placed arrays in its JIT
+    # cache key.  Commit the initial state before warm-up so the warm-up output
+    # and the real update share one signature instead of compiling twice.
+    state = commit_tree_to_local_device(state)
 
     print("Compiling...")
     start_comp_time = time.perf_counter()
