@@ -133,6 +133,7 @@ class HumanoidCliContractTest(unittest.TestCase):
         self.assertEqual(kwargs["gae_lambda"], 0.95)
         self.assertEqual(kwargs["target_update_rate"], 0.01)
         self.assertEqual(kwargs["action_scale"], 0.5)
+        self.assertEqual(kwargs["cmd_vel_x_range"], (-2.0, 2.0))
         self.assertEqual(kwargs["action_noise_std_start"], 0.5)
         self.assertEqual(kwargs["action_noise_std_end"], 0.32)
         self.assertEqual(kwargs["env_variant"], "humanoid_blind_linvel_nokinref")

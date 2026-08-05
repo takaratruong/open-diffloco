@@ -36,7 +36,7 @@ def build_train_kwargs(
         "use_lr_decay": False,
         "xml_path": str(ROOT / "src/envs/humanoid/models/humanoid_mjx.xml"),
         "action_scale": 0.5,
-        "cmd_vel_x_range": (-1.5, 1.5),
+        "cmd_vel_x_range": (-2.0, 2.0),
         "cmd_vel_y_range": (-1.0, 1.0),
         "cmd_yaw_rate_range": (-1.5, 1.5),
         "cmd_zero_prob": (0.1, 0.7, 0.5),
