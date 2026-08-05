@@ -1,8 +1,10 @@
 """Launch robust G1 SHAC at the native RMR 50 Hz MDP timebase."""
 
 import argparse
+from contextlib import nullcontext
 
 from src.algorithms.shac.algorithm import train
+from src.envs.g1_tracking.fixed_solver import fixed_mjx_solver_outer_loop
 from tools.run_g1_tracking_shac import (
     build_train_kwargs as build_100hz_train_kwargs,
     configure_jax,
@@ -77,21 +79,27 @@ def main() -> None:
     args = parser.parse_args()
 
     configure_jax()
-    train(
-        **build_train_kwargs(
-            steps=args.steps,
-            num_envs=args.num_envs,
-            seed=args.seed,
-            checkpoint_interval=args.checkpoint_interval,
-            actor_lr=args.actor_lr,
-            action_noise_std=args.action_noise_std,
-            action_noise_std_end=args.action_noise_std_end,
-            actor_bootstrap_scale=args.actor_bootstrap_scale,
-            unroll_length=args.unroll_length,
-            unbounded_actions=args.unbounded_actions,
-            validated_task=args.validated_task,
-        )
+    solver_scope = (
+        fixed_mjx_solver_outer_loop()
+        if args.validated_task
+        else nullcontext()
     )
+    with solver_scope:
+        train(
+            **build_train_kwargs(
+                steps=args.steps,
+                num_envs=args.num_envs,
+                seed=args.seed,
+                checkpoint_interval=args.checkpoint_interval,
+                actor_lr=args.actor_lr,
+                action_noise_std=args.action_noise_std,
+                action_noise_std_end=args.action_noise_std_end,
+                actor_bootstrap_scale=args.actor_bootstrap_scale,
+                unroll_length=args.unroll_length,
+                unbounded_actions=args.unbounded_actions,
+                validated_task=args.validated_task,
+            )
+        )
 
 
 if __name__ == "__main__":

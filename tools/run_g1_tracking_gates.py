@@ -3,6 +3,7 @@
 import argparse
 import json
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import jax
@@ -10,6 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from src.envs.g1_tracking.environment import G1TrackingEnv
+from src.envs.g1_tracking.fixed_solver import fixed_mjx_solver_outer_loop
 from src.envs.go2.environment import get_go2_env_class
 
 
@@ -20,14 +22,7 @@ def make_gate_env(env_variant: str) -> G1TrackingEnv:
     return get_go2_env_class(env_variant)(actor_history_len=1)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--env-variant", default="g1_tracking")
-    args = parser.parse_args()
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-
+def _run_gate(args, fixed_solver: bool) -> None:
     env = make_gate_env(args.env_variant)
     state = env.reset(jax.random.PRNGKey(args.seed), jnp.array(0.0))
     reset_reward, reset_components = env._tracking_reward(state.data, state.info)
@@ -47,6 +42,9 @@ def main() -> None:
         "physics_substeps": env.n_frames,
         "solver_iterations": int(env.mj_model.opt.iterations),
         "solver_ls_iterations": int(env.mj_model.opt.ls_iterations),
+        "solver_outer_loop": (
+            "fixed-scan" if fixed_solver else "stock"
+        ),
         "reference_frames": env.reference_length,
         "finite_reset_qpos": bool(jnp.isfinite(state.data.qpos).all()),
         "finite_reset_qvel": bool(jnp.isfinite(state.data.qvel).all()),
@@ -101,6 +99,26 @@ def main() -> None:
         and gradient_gate["repeat_exact"]
     ):
         raise SystemExit(1)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--env-variant", default="g1_tracking")
+    args = parser.parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    fixed_solver = (
+        args.env_variant == "g1_tracking_rmr_50hz_source_step_robust"
+    )
+    solver_scope = (
+        fixed_mjx_solver_outer_loop()
+        if fixed_solver
+        else nullcontext()
+    )
+    with solver_scope:
+        _run_gate(args, fixed_solver)
 
 
 if __name__ == "__main__":
