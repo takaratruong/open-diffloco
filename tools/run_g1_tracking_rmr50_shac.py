@@ -17,7 +17,9 @@ def build_train_kwargs(
     checkpoint_interval: int,
     actor_lr: float = 1e-4,
     action_noise_std: float = 0.05,
+    action_noise_std_end: float | None = None,
     actor_bootstrap_scale: float = 1.0,
+    unroll_length: int = 24,
 ) -> dict:
     kwargs = build_100hz_train_kwargs(
         steps=steps,
@@ -30,7 +32,12 @@ def build_train_kwargs(
     )
     kwargs.update(
         {
-            "unroll_length": 24,
+            "unroll_length": unroll_length,
+            "action_noise_std_end": (
+                action_noise_std
+                if action_noise_std_end is None
+                else action_noise_std_end
+            ),
             "gamma": 0.99,
             "gae_lambda": 0.95,
             "max_episode_length": 60,
@@ -48,7 +55,9 @@ def main() -> None:
     parser.add_argument("--checkpoint-interval", type=int, default=49152)
     parser.add_argument("--actor-lr", type=float, default=1e-4)
     parser.add_argument("--action-noise-std", type=float, default=0.05)
+    parser.add_argument("--action-noise-std-end", type=float)
     parser.add_argument("--actor-bootstrap-scale", type=float, default=1.0)
+    parser.add_argument("--unroll-length", type=int, default=24)
     args = parser.parse_args()
 
     configure_jax()
@@ -60,7 +69,9 @@ def main() -> None:
             checkpoint_interval=args.checkpoint_interval,
             actor_lr=args.actor_lr,
             action_noise_std=args.action_noise_std,
+            action_noise_std_end=args.action_noise_std_end,
             actor_bootstrap_scale=args.actor_bootstrap_scale,
+            unroll_length=args.unroll_length,
         )
     )
 

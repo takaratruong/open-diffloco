@@ -46,6 +46,23 @@ class G1TrackingRunnerTest(unittest.TestCase):
         self.assertEqual(kwargs["total_steps"], 196608)
         self.assertEqual(kwargs["checkpoint_interval"], 49152)
 
+    def test_native_rmr_runner_can_match_go2_batch_and_noise_schedule(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        kwargs = build_train_kwargs(
+            steps=8_000_000,
+            num_envs=256,
+            seed=3,
+            checkpoint_interval=400_000,
+            actor_lr=5e-3,
+            action_noise_std=0.5,
+            action_noise_std_end=0.32,
+            unroll_length=12,
+        )
+        self.assertEqual(kwargs["unroll_length"], 12)
+        self.assertEqual(kwargs["action_noise_std_start"], 0.5)
+        self.assertEqual(kwargs["action_noise_std_end"], 0.32)
+
 
 if __name__ == "__main__":
     unittest.main()
