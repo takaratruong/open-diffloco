@@ -32,7 +32,14 @@ def rmr_regularization_reward(
     action_rate = -0.1 * jp.sum(jp.square(action - previous_action), axis=-1)
     below_limit = jp.maximum(soft_joint_lower - joint_pos, 0.0)
     above_limit = jp.maximum(joint_pos - soft_joint_upper, 0.0)
-    joint_limit = -10.0 * jp.sum(below_limit + above_limit, axis=-1)
+    # Upstream PhysX trajectories do not exhibit MJX's rare finite solver
+    # explosions. Preserve the exact local slope and weight while preventing
+    # an invalid transition from dominating critic targets by orders of
+    # magnitude.
+    total_violation = jp.minimum(
+        jp.sum(below_limit + above_limit, axis=-1), 1.0
+    )
+    joint_limit = -10.0 * total_violation
     components = {
         "action_rate": action_rate,
         "joint_limit": joint_limit,

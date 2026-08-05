@@ -23,6 +23,7 @@ from src.algorithms.shac.gradients import aggregate_per_env_gradients
 from src.algorithms.shac.initialization import (
     canonicalize_normalizer_dtype,
     canonicalize_step_dtype,
+    canonicalize_tree_like,
 )
 
 
@@ -787,6 +788,7 @@ def train(
     print(f"Compilation took {compile_time:.1f}s")
 
     # Warm up normalizer from the compilation step.
+    state = canonicalize_tree_like(state, warmup_state)
     state = state.replace(
         normalizer=warmup_state.normalizer,
         critic_normalizer=warmup_state.critic_normalizer,

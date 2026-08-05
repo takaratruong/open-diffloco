@@ -127,6 +127,20 @@ class RMRTrackingRewardTest(unittest.TestCase):
         self.assertAlmostEqual(float(penalty), 0.0)
         self.assertTrue(all(float(value) == 0.0 for value in components.values()))
 
+    def test_joint_limit_penalty_caps_solver_explosion_without_changing_weight(self):
+        from src.envs.g1_tracking.reward import rmr_regularization_reward
+
+        penalty, components = rmr_regularization_reward(
+            action=jnp.zeros(2),
+            previous_action=jnp.zeros(2),
+            joint_pos=jnp.array([-1e9, 1e9]),
+            soft_joint_lower=jnp.array([-1.0, -1.0]),
+            soft_joint_upper=jnp.array([1.0, 1.0]),
+        )
+
+        self.assertAlmostEqual(float(components["joint_limit"]), -10.0)
+        self.assertAlmostEqual(float(penalty), -10.0)
+
 
 if __name__ == "__main__":
     unittest.main()

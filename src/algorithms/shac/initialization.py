@@ -17,3 +17,19 @@ def canonicalize_step_dtype(step):
     """Returns a non-weak device scalar for a stable train-step signature."""
     dtype = jp.int64 if jax.config.x64_enabled else jp.int32
     return jp.asarray(step, dtype=dtype)
+
+
+def canonicalize_tree_like(current_tree, template_tree):
+    """Matches array dtype, weak typing, device, and sharding to a template."""
+
+    def canonicalize(current, template):
+        if isinstance(template, jax.Array):
+            value = jp.asarray(current, dtype=template.dtype)
+            return jax.device_put(value, template.sharding)
+        return current
+
+    return jax.tree_util.tree_map(
+        canonicalize,
+        current_tree,
+        template_tree,
+    )

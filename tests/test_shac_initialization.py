@@ -6,6 +6,7 @@ import jax.numpy as jnp
 from src.algorithms.shac.initialization import (
     canonicalize_normalizer_dtype,
     canonicalize_step_dtype,
+    canonicalize_tree_like,
 )
 from src.core.data_structures import Normalizer
 
@@ -26,6 +27,25 @@ class ShacInitializationTest(unittest.TestCase):
         self.assertFalse(getattr(step, "weak_type", True))
         expected = jnp.dtype("int64" if jax.config.x64_enabled else "int32")
         self.assertEqual(step.dtype, expected)
+
+    def test_state_tree_matches_warmup_output_signature(self):
+        current = {
+            "scalar": 0,
+            "array": jnp.ones(2, dtype=jnp.float32),
+        }
+        warmup_output = {
+            "scalar": jnp.asarray(1, dtype=jnp.int64),
+            "array": jnp.ones(2, dtype=jnp.float64),
+        }
+
+        canonical = canonicalize_tree_like(current, warmup_output)
+
+        self.assertEqual(canonical["scalar"].dtype, jnp.dtype("int64"))
+        self.assertFalse(canonical["scalar"].weak_type)
+        self.assertEqual(canonical["array"].dtype, jnp.dtype("float64"))
+        self.assertEqual(
+            canonical["array"].sharding, warmup_output["array"].sharding
+        )
 
 
 if __name__ == "__main__":
