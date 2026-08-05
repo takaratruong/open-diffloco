@@ -101,6 +101,31 @@ class HumanoidCliContractTest(unittest.TestCase):
         self.assertEqual(configured.critic_lr, 5e-4)
         self.assertEqual(configured.action_scale, 0.5)
 
+    def test_gate_runner_pins_upstream_shac_parameters(self):
+        from tools.run_humanoid_shac import build_train_kwargs
+
+        kwargs = build_train_kwargs(
+            steps=3_072,
+            num_envs=256,
+            seed=7,
+            checkpoint_interval=100_000,
+        )
+        self.assertEqual(kwargs["total_steps"], 3_072)
+        self.assertEqual(kwargs["num_envs"], 256)
+        self.assertEqual(kwargs["unroll_length"], 12)
+        self.assertEqual(kwargs["critic_iterations"], 16)
+        self.assertEqual(kwargs["actor_lr"], 5e-3)
+        self.assertEqual(kwargs["critic_lr"], 5e-4)
+        self.assertEqual(kwargs["gamma"], 0.99)
+        self.assertEqual(kwargs["gae_lambda"], 0.95)
+        self.assertEqual(kwargs["target_update_rate"], 0.01)
+        self.assertEqual(kwargs["action_scale"], 0.5)
+        self.assertEqual(kwargs["action_noise_std_start"], 0.5)
+        self.assertEqual(kwargs["action_noise_std_end"], 0.32)
+        self.assertEqual(kwargs["env_variant"], "humanoid_blind_linvel_nokinref")
+        self.assertEqual(kwargs["curriculum_grace"], 0)
+        self.assertEqual(kwargs["curriculum_steps"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
