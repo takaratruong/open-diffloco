@@ -19,6 +19,7 @@ from src.core.networks import Actor, Critic
 from src.envs.go2.environment import Go2Env
 from src.envs.go2.terrain import differentiated_ou_foot_forces
 from src.core.utils import compute_grad_norm
+from src.algorithms.shac.gradients import aggregate_per_env_gradients
 
 
 def load_checkpoint(path: str):
@@ -106,6 +107,8 @@ def train(
     max_episode_length: int = 5000,
     actor_history_len: int = 10,
     env_variant: str = "blind_nolinvel_nokinref",
+    actor_per_env_grad_clip: float = None,
+    actor_bootstrap_scale: float = 1.0,
 ):
     """
     Train a quadruped locomotion policy using SHAC.
@@ -416,7 +419,12 @@ def train(
             r, done, terminal, v_next = x
             next_discount = discount * gamma
             running = running + discount * r
-            trunc_bootstrap = (1.0 - terminal) * next_discount * v_next
+            trunc_bootstrap = (
+                actor_bootstrap_scale
+                * (1.0 - terminal)
+                * next_discount
+                * v_next
+            )
             total = total + jp.where(done, running + trunc_bootstrap, 0.0)
             running = jp.where(done, 0.0, running)
             discount = jp.where(done, 1.0, next_discount)
@@ -433,7 +441,11 @@ def train(
             env._get_critic_obs(final_state.data, final_state.info),
         ).astype(jp.float32)
         final_v = critic.apply(target_critic_params, final_obs).squeeze()
-        final_bootstrap = jp.where(traj["done"][-1], 0.0, final_discount * final_v)
+        final_bootstrap = jp.where(
+            traj["done"][-1],
+            0.0,
+            actor_bootstrap_scale * final_discount * final_v,
+        )
 
         total_ret = total_ret + running + final_bootstrap
 
@@ -566,10 +578,20 @@ def train(
             current_noise_std,
         )
 
-        grads = jax.tree_util.tree_map(lambda g: jp.nanmean(g, axis=0), grads)
-        grads = jax.tree_util.tree_map(
-            lambda g: jp.where(jp.isfinite(g), g, 0.0), grads
-        )
+        if actor_per_env_grad_clip is None:
+            grads = jax.tree_util.tree_map(lambda g: jp.nanmean(g, axis=0), grads)
+            grads = jax.tree_util.tree_map(
+                lambda g: jp.where(jp.isfinite(g), g, 0.0), grads
+            )
+            actor_grad_stats = {
+                "finite_fraction": jp.array(1.0, dtype=jp.float32),
+                "raw_norm_median": jp.array(jp.nan, dtype=jp.float32),
+                "raw_norm_max": jp.array(jp.nan, dtype=jp.float32),
+            }
+        else:
+            grads, actor_grad_stats = aggregate_per_env_gradients(
+                grads, max_norm=actor_per_env_grad_clip
+            )
 
         actor_grad_norm = compute_grad_norm(grads)
 
@@ -688,6 +710,9 @@ def train(
             "cmd_yaw": jp.mean(trajs["cmd_yaw"]),
             "contact": jp.mean(final_states.metrics["contact_force"]),
             "actor_grad": actor_grad_norm,
+            "actor_grad_finite_fraction": actor_grad_stats["finite_fraction"],
+            "actor_grad_raw_median": actor_grad_stats["raw_norm_median"],
+            "actor_grad_raw_max": actor_grad_stats["raw_norm_max"],
             "critic_loss": critic_losses[-1],
             "actor_loss": jp.mean(losses),
             "action_noise_current": current_noise_std,
@@ -827,6 +852,15 @@ def train(
                     f"{metrics['pen_rate']:7.3f} | {metrics['height']:7.3f} | "
                     f"{metrics['tilt']:7.2f} | {diff:5.2f} | {metrics['actor_grad']:7.1f} | {status}"
                 )
+                if actor_per_env_grad_clip is not None:
+                    print(
+                        " " * 9
+                        + "raw actor grad "
+                        + f"median={float(metrics['actor_grad_raw_median']):.2e} "
+                        + f"max={float(metrics['actor_grad_raw_max']):.2e} "
+                        + "finite="
+                        + f"{float(metrics['actor_grad_finite_fraction']):.3f}"
+                    )
 
                 diag_log.append(
                     {
@@ -849,6 +883,15 @@ def train(
                         "height": float(metrics["height"]),
                         "tilt": float(metrics["tilt"]),
                         "actor_grad": float(metrics["actor_grad"]),
+                        "actor_grad_raw_median": float(
+                            metrics["actor_grad_raw_median"]
+                        ),
+                        "actor_grad_raw_max": float(
+                            metrics["actor_grad_raw_max"]
+                        ),
+                        "actor_grad_finite_fraction": float(
+                            metrics["actor_grad_finite_fraction"]
+                        ),
                         "critic_loss": float(metrics["critic_loss"]),
                     }
                 )
@@ -975,6 +1018,8 @@ def train(
         "best_reward": best_reward,
         "max_episode_length": max_episode_length,
         "actor_history_len": actor_history_len,
+        "actor_per_env_grad_clip": actor_per_env_grad_clip,
+        "actor_bootstrap_scale": actor_bootstrap_scale,
         "env_variant": env_variant,
     }
     with open(f"{save_dir}/hparams.json", "w") as f:
