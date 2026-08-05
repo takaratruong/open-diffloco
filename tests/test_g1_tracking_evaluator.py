@@ -1,12 +1,24 @@
 import unittest
+from unittest import mock
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tools.evaluate_g1_tracking import make_evaluation_env, scale_policy_action
+from tools.evaluate_g1_tracking import (
+    configure_jax,
+    make_evaluation_env,
+    scale_policy_action,
+)
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    def test_evaluator_enables_training_precision(self):
+        with mock.patch.object(jax.config, "update") as update:
+            configure_jax()
+
+        update.assert_called_once_with("jax_enable_x64", True)
+
     def test_native_timebase_evaluation_uses_strict_rmr_termination(self):
         env = make_evaluation_env("g1_tracking_rmr_50hz")
 

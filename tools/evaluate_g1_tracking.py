@@ -22,6 +22,11 @@ EVALUATION_ENV_VARIANTS = (
 )
 
 
+def configure_jax() -> None:
+    """Match the float64 precision used by G1 training."""
+    jax.config.update("jax_enable_x64", True)
+
+
 def make_evaluation_env(variant: str) -> G1TrackingEnv:
     """Builds an exact-termination task on the requested control timebase."""
     if variant not in EVALUATION_ENV_VARIANTS:
@@ -87,6 +92,7 @@ def _render_pair(
 
 
 def main() -> None:
+    configure_jax()
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--rmr-action-tape", type=Path)
@@ -225,6 +231,7 @@ def main() -> None:
         "mean_body_linear_velocity_error": float(np.mean(values[:, 9])),
         "mean_body_angular_velocity_error": float(np.mean(values[:, 10])),
         "action_gain": args.action_gain,
+        "jax_enable_x64": bool(jax.config.x64_enabled),
     }
     (args.output_dir / "summary.json").write_text(
         __import__("json").dumps(summary, indent=2, sort_keys=True) + "\n"
