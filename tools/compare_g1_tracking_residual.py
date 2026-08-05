@@ -47,6 +47,36 @@ def summarize_records(records: np.ndarray) -> dict:
     }
 
 
+def summarize_action_deltas(
+    deltas: np.ndarray,
+    *,
+    bound: float,
+) -> dict:
+    """Summarize bounded residual corrections across rollout steps."""
+    values = np.asarray(deltas, dtype=np.float64)
+    if (
+        values.ndim != 2
+        or values.shape[0] == 0
+        or values.shape[1] == 0
+        or not np.isfinite(values).all()
+    ):
+        raise ValueError("action deltas must be a nonempty finite matrix")
+    if not np.isfinite(bound) or bound <= 0.0:
+        raise ValueError("action-delta bound must be positive and finite")
+    absolute = np.abs(values)
+    return {
+        "steps": int(values.shape[0]),
+        "action_dim": int(values.shape[1]),
+        "bound": float(bound),
+        "mean_abs": float(np.mean(absolute)),
+        "root_mean_square": float(np.sqrt(np.mean(np.square(values)))),
+        "max_abs": float(np.max(absolute)),
+        "fraction_at_95pct_bound": float(
+            np.mean(absolute >= 0.95 * bound)
+        ),
+    }
+
+
 def rollout(
     env,
     action_fn: Callable,
@@ -94,6 +124,18 @@ def aggregate(results: list[dict], controller: str) -> dict:
     }
 
 
+def summary_delta(minuend: dict, subtrahend: dict) -> dict:
+    """Subtract registered rollout aggregates or phase summaries."""
+    step_field = "steps" if "steps" in minuend else "mean_steps"
+    return {
+        step_field: minuend[step_field] - subtrahend[step_field],
+        **{
+            field: minuend[field] - subtrahend[field]
+            for field in SUMMARY_FIELDS
+        },
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Builds the paired source/residual comparison CLI."""
     parser = argparse.ArgumentParser()
@@ -107,6 +149,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--solver-iterations", type=int, default=4)
     parser.add_argument("--solver-ls-iterations", type=int, default=5)
     parser.add_argument("--body-mass-scale", type=float, default=1.0)
+    parser.add_argument("--baseline-body-mass-scale", type=float)
     return parser
 
 
@@ -121,6 +164,16 @@ def main() -> None:
         solver_ls_iterations=args.solver_ls_iterations,
         body_mass_scale=args.body_mass_scale,
     )
+    baseline_env = (
+        make_evaluation_env(
+            "g1_tracking_rmr_50hz_validated",
+            solver_iterations=args.solver_iterations,
+            solver_ls_iterations=args.solver_ls_iterations,
+            body_mass_scale=args.baseline_body_mass_scale,
+        )
+        if args.baseline_body_mass_scale is not None
+        else None
+    )
     if any(phase < 0 or phase >= env.reference.qpos.shape[0] for phase in args.phases):
         parser.error("every phase must index the registered reference")
 
@@ -129,6 +182,7 @@ def main() -> None:
         env, args.checkpoint, args.seed
     )
     normalizer = Normalizer(env.actor_frame_obs_dim)
+    residual_action_deltas = []
 
     def source_action(state):
         return source_policy(state.obs)
@@ -140,13 +194,28 @@ def main() -> None:
             state.obs,
         ).astype(jnp.float32)
         residual_logits = actor.apply(actor_params, normalized)
-        return source_policy(state.obs) + bound_residual_action(
+        delta = bound_residual_action(
             residual_logits,
             action_scale=args.residual_action_scale,
         ).astype(jnp.float64)
+        residual_action_deltas.append(
+            np.asarray(delta, dtype=np.float64)
+        )
+        return source_policy(state.obs) + delta
 
     results = []
     for phase in args.phases:
+        baseline_source = (
+            rollout(
+                baseline_env,
+                source_action,
+                phase=phase,
+                seed=args.seed,
+                max_steps=args.max_steps,
+            )
+            if baseline_env is not None
+            else None
+        )
         source = rollout(
             env,
             source_action,
@@ -161,42 +230,67 @@ def main() -> None:
             seed=args.seed,
             max_steps=args.max_steps,
         )
-        results.append(
-            {
-                "phase": phase,
-                "source": source,
-                "residual": residual,
-                "delta_residual_minus_source": {
-                    "steps": residual["steps"] - source["steps"],
-                    **{
-                        field: residual[field] - source[field]
-                        for field in SUMMARY_FIELDS
-                    },
-                },
-            }
-        )
+        result = {
+            "phase": phase,
+            "source": source,
+            "residual": residual,
+            "delta_residual_minus_source": summary_delta(
+                residual, source
+            ),
+        }
+        if baseline_source is not None:
+            result.update(
+                baseline_source=baseline_source,
+                delta_shifted_source_minus_baseline_source=summary_delta(
+                    source, baseline_source
+                ),
+            )
+        results.append(result)
 
+    aggregate_document = {
+        "source": aggregate(results, "source"),
+        "residual": aggregate(results, "residual"),
+    }
+    aggregate_document["delta_residual_minus_source"] = summary_delta(
+        aggregate_document["residual"],
+        aggregate_document["source"],
+    )
+    if baseline_env is not None:
+        aggregate_document["baseline_source"] = aggregate(
+            results, "baseline_source"
+        )
+        aggregate_document[
+            "delta_shifted_source_minus_baseline_source"
+        ] = summary_delta(
+            aggregate_document["source"],
+            aggregate_document["baseline_source"],
+        )
     document = {
-        "protocol": "paired-replay-free-four-phase-rmr-residual-v1",
+        "protocol": (
+            "paired-replay-free-mass-shift-triad-v1"
+            if baseline_env is not None
+            else "paired-replay-free-four-phase-rmr-residual-v1"
+        ),
         "phases": args.phases,
         "seed": args.seed,
         "max_steps": args.max_steps,
         "solver_iterations": args.solver_iterations,
         "solver_ls_iterations": args.solver_ls_iterations,
         "body_mass_scale": env.body_mass_scale,
+        "baseline_body_mass_scale": (
+            baseline_env.body_mass_scale
+            if baseline_env is not None
+            else None
+        ),
         "source_checkpoint": str(args.rmr_policy_checkpoint.resolve()),
         "residual_checkpoint": str(args.checkpoint.resolve()),
         "residual_action_scale": args.residual_action_scale,
         "results": results,
-        "aggregate": {
-            "source": aggregate(results, "source"),
-            "residual": aggregate(results, "residual"),
-        },
-    }
-    document["aggregate"]["delta_residual_minus_source"] = {
-        key: document["aggregate"]["residual"][key]
-        - document["aggregate"]["source"][key]
-        for key in ("mean_steps", *SUMMARY_FIELDS)
+        "aggregate": aggregate_document,
+        "residual_action_delta": summarize_action_deltas(
+            np.stack(residual_action_deltas),
+            bound=args.residual_action_scale,
+        ),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
