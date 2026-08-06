@@ -32,6 +32,7 @@ def build_train_kwargs(
     residual_action_scale: float = 0.0,
     differentiate_source_feedback: bool = True,
     body_mass_scale: float = 1.0,
+    effort_limit_scale: float = 1.0,
 ) -> dict:
     if (
         source_actor_policy is not None
@@ -59,6 +60,8 @@ def build_train_kwargs(
         )
     if not math.isfinite(body_mass_scale) or body_mass_scale <= 0.0:
         raise ValueError("body_mass_scale must be positive and finite")
+    if not math.isfinite(effort_limit_scale) or effort_limit_scale <= 0.0:
+        raise ValueError("effort_limit_scale must be positive and finite")
     kwargs = build_100hz_train_kwargs(
         steps=steps,
         num_envs=num_envs,
@@ -93,6 +96,7 @@ def build_train_kwargs(
             "residual_action_scale": residual_action_scale,
             "differentiate_source_feedback": differentiate_source_feedback,
             "mass_range": (body_mass_scale, body_mass_scale),
+            "effort_limit_scale": effort_limit_scale,
         }
     )
     return kwargs
@@ -130,6 +134,7 @@ def main() -> None:
     parser.add_argument("--initialize-full-policy-from", type=Path)
     parser.add_argument("--residual-action-scale", type=float, default=0.1)
     parser.add_argument("--body-mass-scale", type=float, default=1.0)
+    parser.add_argument("--effort-limit-scale", type=float, default=1.0)
     parser.add_argument(
         "--stop-gradient-source-feedback",
         action="store_true",
@@ -177,6 +182,7 @@ def main() -> None:
                     not args.stop_gradient_source_feedback
                 ),
                 body_mass_scale=args.body_mass_scale,
+                effort_limit_scale=args.effort_limit_scale,
             )
         )
 

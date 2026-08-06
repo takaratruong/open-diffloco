@@ -163,6 +163,7 @@ def train(
     initial_full_actor_policy=None,
     residual_action_scale: float = 0.0,
     differentiate_source_feedback: bool = True,
+    effort_limit_scale: float = 1.0,
 ):
     """
     Train a quadruped locomotion policy using SHAC.
@@ -187,6 +188,7 @@ def train(
         action_noise_std_end: Std dev of Gaussian action noise at total_steps
         friction_range: (lo, hi) multiplicative factor for geom_friction per episode
         mass_range: (lo, hi) multiplicative factor for body_mass per episode
+        effort_limit_scale: Fixed G1 controller torque-limit multiplier.
         kp_range: (lo, hi) absolute range for actuator position gain per episode
         kd_range: (lo, hi) absolute range for actuator velocity gain per episode
         push_velocity_range: Interval root x/y velocity disturbance range.
@@ -309,6 +311,11 @@ def train(
         terrain_slope_max=terrain_slope_max if terrain else 0.0,
         max_episode_length=max_episode_length,
         actor_history_len=actor_history_len,
+        **(
+            {"effort_limit_scale": effort_limit_scale}
+            if env_variant.startswith("g1_tracking")
+            else {}
+        ),
     )
     actor_norm = Normalizer(env.actor_frame_obs_dim)
     critic_norm = Normalizer(env.critic_obs_dim)
@@ -1175,6 +1182,7 @@ def train(
         "action_noise_std_end": action_noise_std_end,
         "friction_range": list(friction_range),
         "mass_range": list(mass_range),
+        "effort_limit_scale": effort_limit_scale,
         "kp_range": list(kp_range),
         "kd_range": list(kd_range),
         "com_offset_range": list(com_offset_range),

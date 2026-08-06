@@ -39,6 +39,7 @@ def make_evaluation_env(
     solver_iterations: int | None = None,
     solver_ls_iterations: int | None = None,
     body_mass_scale: float = 1.0,
+    effort_limit_scale: float = 1.0,
 ) -> G1TrackingEnv:
     """Build an exact-termination task on the requested control timebase."""
     if variant not in EVALUATION_ENV_VARIANTS:
@@ -48,6 +49,7 @@ def make_evaluation_env(
     kwargs = {
         "actor_history_len": 1,
         "mass_range": (body_mass_scale, body_mass_scale),
+        "effort_limit_scale": effort_limit_scale,
     }
     if solver_iterations is not None:
         kwargs.update(
@@ -172,6 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--solver-iterations", type=int)
     parser.add_argument("--solver-ls-iterations", type=int)
     parser.add_argument("--body-mass-scale", type=float, default=1.0)
+    parser.add_argument("--effort-limit-scale", type=float, default=1.0)
     parser.add_argument("--full-rmr-actor", action="store_true")
     parser.add_argument(
         "--env-variant",
@@ -194,6 +197,7 @@ def main() -> None:
         solver_iterations=args.solver_iterations,
         solver_ls_iterations=args.solver_ls_iterations,
         body_mass_scale=args.body_mass_scale,
+        effort_limit_scale=args.effort_limit_scale,
     )
     controller_sources = (
         args.checkpoint,
@@ -379,6 +383,7 @@ def main() -> None:
         "solver_iterations": int(env.mj_model.opt.iterations),
         "solver_ls_iterations": int(env.mj_model.opt.ls_iterations),
         "body_mass_scale": env.body_mass_scale,
+        "effort_limit_scale": env.effort_limit_scale,
         "controller": (
             "full_rmr_actor"
             if full_rmr_actor is not None

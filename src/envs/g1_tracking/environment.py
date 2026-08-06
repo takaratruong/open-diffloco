@@ -113,6 +113,7 @@ class G1TrackingEnv:
         solver_iterations: int = 1,
         solver_ls_iterations: int = 5,
         mass_range: tuple[float, float] = (1.0, 1.0),
+        effort_limit_scale: float = 1.0,
         **_unused_go2_options,
     ):
         if actor_history_len < 1:
@@ -129,6 +130,14 @@ class G1TrackingEnv:
             raise ValueError("physics_timestep must be positive")
         if solver_iterations < 1 or solver_ls_iterations < 1:
             raise ValueError("solver iteration counts must be positive")
+        if (
+            not np.isfinite(effort_limit_scale)
+            or effort_limit_scale <= 0.0
+        ):
+            raise ValueError(
+                "effort_limit_scale must be positive and finite"
+            )
+        self.effort_limit_scale = float(effort_limit_scale)
         mass_values = np.asarray(mass_range, dtype=np.float64)
         if (
             mass_values.shape != (2,)
@@ -186,7 +195,9 @@ class G1TrackingEnv:
         )
         self.kp = jp.asarray(self.controller.kp)
         self.kd = jp.asarray(self.controller.kd)
-        self.effort_limit = jp.asarray(self.controller.effort_limit)
+        self.effort_limit = jp.asarray(
+            self.controller.effort_limit * self.effort_limit_scale
+        )
         self.default_joints = jp.asarray(
             self.controller.default_joint_pos
         )

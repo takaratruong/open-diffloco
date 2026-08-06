@@ -105,6 +105,28 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
 
         self.assertEqual(args.body_mass_scale, 1.15)
 
+    def test_evaluator_transports_a_fixed_effort_limit_scale(self):
+        shifted = make_evaluation_env(
+            "g1_tracking_rmr_50hz_validated",
+            effort_limit_scale=0.7,
+        )
+
+        self.assertEqual(shifted.effort_limit_scale, 0.7)
+
+    def test_evaluator_cli_accepts_a_fixed_effort_limit_scale(self):
+        from tools.evaluate_g1_tracking import build_parser
+
+        args = build_parser().parse_args(
+            [
+                "--output-dir",
+                "/tmp/g1-evaluation",
+                "--effort-limit-scale",
+                "0.7",
+            ]
+        )
+
+        self.assertEqual(args.effort_limit_scale, 0.7)
+
     def test_action_gain_scales_policy_without_changing_direction(self):
         action = jnp.array([-0.8, 0.2, 1.0])
         np.testing.assert_allclose(

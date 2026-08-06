@@ -95,6 +95,41 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "mass_range"):
                     G1TrackingEnv(mass_range=mass_range)
 
+    def test_fixed_effort_limit_scale_changes_only_torque_authority(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        shifted = G1TrackingEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+            effort_limit_scale=0.7,
+        )
+
+        self.assertEqual(self.env.effort_limit_scale, 1.0)
+        self.assertEqual(shifted.effort_limit_scale, 0.7)
+        np.testing.assert_array_equal(
+            self.env.effort_limit,
+            self.env.controller.effort_limit,
+        )
+        np.testing.assert_allclose(
+            shifted.effort_limit,
+            shifted.controller.effort_limit * 0.7,
+            rtol=1e-7,
+            atol=0.0,
+        )
+
+    def test_effort_limit_scale_rejects_nonpositive_or_nonfinite_values(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        for scale in (0.0, -1.0, float("nan"), float("inf")):
+            with self.subTest(scale=scale):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "effort_limit_scale",
+                ):
+                    G1TrackingEnv(effort_limit_scale=scale)
+
     def test_open_diffloco_factory_selects_tracking_environment(self):
         from src.envs.g1_tracking.environment import G1TrackingEnv
         from src.envs.go2.environment import get_go2_env_class

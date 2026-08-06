@@ -121,6 +121,38 @@ class G1TrackingRunnerTest(unittest.TestCase):
                 body_mass_scale=0.0,
             )
 
+    def test_native_rmr_runner_transports_a_fixed_effort_limit_scale(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        kwargs = build_train_kwargs(
+            steps=65_536,
+            num_envs=256,
+            seed=3,
+            checkpoint_interval=16_384,
+            validated_task=True,
+            effort_limit_scale=0.7,
+        )
+
+        self.assertEqual(kwargs["effort_limit_scale"], 0.7)
+
+    def test_native_rmr_runner_rejects_invalid_effort_limit_scale(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        for scale in (0.0, -1.0, float("nan"), float("inf")):
+            with self.subTest(scale=scale):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "effort_limit_scale",
+                ):
+                    build_train_kwargs(
+                        steps=65_536,
+                        num_envs=256,
+                        seed=3,
+                        checkpoint_interval=16_384,
+                        validated_task=True,
+                        effort_limit_scale=scale,
+                    )
+
     def test_native_rmr_runner_can_train_a_bounded_source_policy_residual(self):
         from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
 
