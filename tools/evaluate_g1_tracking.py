@@ -106,19 +106,61 @@ def scale_policy_action(action: jax.Array, gain: float) -> jax.Array:
 
 
 def _load_policy(
-    env: G1TrackingEnv, checkpoint: Path | None, seed: int
+    env: G1TrackingEnv,
+    checkpoint: Path | None,
+    seed: int,
+    *,
+    actor_hidden: tuple[int, ...] = (512, 256, 128),
+    actor_layer_norm: bool = True,
+    actor_zero_output: bool = True,
+    training_initialization: bool = False,
 ):
-    actor = Actor(
-        env.action_dim,
-        squash=getattr(env, "squash_actor_actions", True),
-    )
     if checkpoint is not None:
         with checkpoint.open("rb") as handle:
             state = pickle.load(handle)
+        modules = state.actor_params["params"]
+        dense_names = sorted(
+            (name for name in modules if name.startswith("Dense_")),
+            key=lambda name: int(name.rsplit("_", 1)[1]),
+        )
+        if len(dense_names) < 2:
+            raise ValueError(
+                "checkpoint actor must contain at least one hidden Dense "
+                "layer and one output Dense layer"
+            )
+        hidden = tuple(
+            int(modules[name]["kernel"].shape[-1])
+            for name in dense_names[:-1]
+        )
+        layer_norm = any(
+            name.startswith("LayerNorm_") for name in modules
+        )
+        actor = Actor(
+            env.action_dim,
+            hidden=hidden,
+            squash=getattr(env, "squash_actor_actions", True),
+            layer_norm=layer_norm,
+            # Initializers do not affect apply(), but using a nonzero head
+            # describes both compact random-head checkpoints and legacy
+            # checkpoints without changing their stored parameters.
+            zero_output=False,
+        )
         return actor, state.actor_params, state.normalizer
 
+    actor = Actor(
+        env.action_dim,
+        hidden=actor_hidden,
+        squash=getattr(env, "squash_actor_actions", True),
+        layer_norm=actor_layer_norm,
+        zero_output=actor_zero_output,
+    )
+    actor_key = jax.random.PRNGKey(seed)
+    if training_initialization:
+        _unused, actor_key, _critic_key, _env_key = jax.random.split(
+            actor_key, 4
+        )
     params = actor.init(
-        jax.random.PRNGKey(seed),
+        actor_key,
         jnp.zeros((1, env.actor_obs_dim), dtype=jnp.float32),
     )
     return actor, params, Normalizer(env.actor_frame_obs_dim).init()
@@ -176,6 +218,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--body-mass-scale", type=float, default=1.0)
     parser.add_argument("--effort-limit-scale", type=float, default=1.0)
     parser.add_argument("--full-rmr-actor", action="store_true")
+    parser.add_argument(
+        "--actor-hidden",
+        type=int,
+        nargs="+",
+        default=(512, 256, 128),
+    )
+    parser.add_argument("--no-actor-layer-norm", action="store_true")
+    parser.add_argument("--random-actor-output-head", action="store_true")
+    parser.add_argument(
+        "--training-initialization",
+        action="store_true",
+        help="recreate train()'s actor PRNG split for a no-checkpoint baseline",
+    )
     parser.add_argument(
         "--env-variant",
         choices=EVALUATION_ENV_VARIANTS,
@@ -259,7 +314,13 @@ def main() -> None:
             full_rmr_actor = pickle.load(handle).actor_params
     elif args.checkpoint is not None or not any(controller_sources):
         actor, actor_params, normalizer_state = _load_policy(
-            env, args.checkpoint, args.seed
+            env,
+            args.checkpoint,
+            args.seed,
+            actor_hidden=tuple(args.actor_hidden),
+            actor_layer_norm=not args.no_actor_layer_norm,
+            actor_zero_output=not args.random_actor_output_head,
+            training_initialization=args.training_initialization,
         )
     state = env.reset_at_phase(
         jax.random.PRNGKey(args.seed),

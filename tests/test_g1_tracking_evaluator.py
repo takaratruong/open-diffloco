@@ -1,12 +1,17 @@
 import unittest
 from unittest import mock
 from pathlib import Path
+import pickle
+from types import SimpleNamespace
+import tempfile
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
+from src.core.networks import Actor
 from tools.evaluate_g1_tracking import (
+    _load_policy,
     configure_jax,
     load_rmr_policy,
     make_evaluation_env,
@@ -23,6 +28,73 @@ RMR_ACTIONS = Path(
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    def test_checkpoint_loader_infers_compact_actor_architecture(self):
+        env = SimpleNamespace(
+            action_dim=3,
+            squash_actor_actions=False,
+            actor_obs_dim=7,
+            actor_frame_obs_dim=7,
+        )
+        expected_actor = Actor(
+            3,
+            hidden=(512, 512),
+            squash=False,
+            layer_norm=False,
+            zero_output=False,
+        )
+        params = expected_actor.init(
+            jax.random.PRNGKey(0),
+            jnp.zeros((1, 7), dtype=jnp.float32),
+        )
+        state = SimpleNamespace(actor_params=params, normalizer="normalizer")
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "checkpoint.pkl"
+            with checkpoint.open("wb") as handle:
+                pickle.dump(state, handle)
+            actor, loaded_params, normalizer = _load_policy(
+                env, checkpoint, seed=123
+            )
+
+        self.assertEqual(tuple(actor.hidden), (512, 512))
+        self.assertFalse(actor.layer_norm)
+        self.assertFalse(actor.squash)
+        self.assertEqual(normalizer, "normalizer")
+        np.testing.assert_allclose(
+            actor.apply(loaded_params, jnp.zeros((1, 7))),
+            expected_actor.apply(params, jnp.zeros((1, 7))),
+        )
+
+    def test_loader_recreates_exact_compact_training_initialization(self):
+        env = SimpleNamespace(
+            action_dim=3,
+            squash_actor_actions=False,
+            actor_obs_dim=7,
+            actor_frame_obs_dim=7,
+        )
+        actor, params, _normalizer = _load_policy(
+            env,
+            checkpoint=None,
+            seed=0,
+            actor_hidden=(512, 512),
+            actor_layer_norm=False,
+            actor_zero_output=False,
+            training_initialization=True,
+        )
+        _unused, actor_key, _critic_key, _env_key = jax.random.split(
+            jax.random.PRNGKey(0), 4
+        )
+        expected = actor.init(
+            actor_key, jnp.zeros((1, 7), dtype=jnp.float32)
+        )
+
+        self.assertEqual(tuple(actor.hidden), (512, 512))
+        self.assertFalse(actor.layer_norm)
+        np.testing.assert_allclose(
+            actor.apply(params, jnp.zeros((1, 7))),
+            actor.apply(expected, jnp.zeros((1, 7))),
+        )
+
     def test_evaluator_enables_training_precision(self):
         with mock.patch.object(jax.config, "update") as update:
             configure_jax()
