@@ -63,6 +63,27 @@ class G1TrackingRunnerTest(unittest.TestCase):
         self.assertEqual(kwargs["action_noise_std_start"], 0.5)
         self.assertEqual(kwargs["action_noise_std_end"], 0.32)
 
+    def test_native_rmr_runner_can_select_compact_random_actor(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        kwargs = build_train_kwargs(
+            steps=1,
+            num_envs=1,
+            seed=3,
+            checkpoint_interval=1,
+            action_noise_std=1.0,
+            unroll_length=1,
+            actor_hidden=(512, 512),
+            actor_layer_norm=False,
+            actor_zero_output=False,
+        )
+
+        self.assertEqual(kwargs["actor_hidden"], (512, 512))
+        self.assertFalse(kwargs["actor_layer_norm"])
+        self.assertFalse(kwargs["actor_zero_output"])
+        self.assertEqual(kwargs["action_noise_std_start"], 1.0)
+        self.assertEqual(kwargs["action_noise_std_end"], 1.0)
+
     def test_native_rmr_runner_can_select_linear_unbounded_action_support(self):
         from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
 

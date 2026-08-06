@@ -33,6 +33,9 @@ def build_train_kwargs(
     differentiate_source_feedback: bool = True,
     body_mass_scale: float = 1.0,
     effort_limit_scale: float = 1.0,
+    actor_hidden: tuple[int, ...] = (512, 256, 128),
+    actor_layer_norm: bool = True,
+    actor_zero_output: bool = True,
 ) -> dict:
     if (
         source_actor_policy is not None
@@ -97,6 +100,9 @@ def build_train_kwargs(
             "differentiate_source_feedback": differentiate_source_feedback,
             "mass_range": (body_mass_scale, body_mass_scale),
             "effort_limit_scale": effort_limit_scale,
+            "actor_hidden": actor_hidden,
+            "actor_layer_norm": actor_layer_norm,
+            "actor_zero_output": actor_zero_output,
         }
     )
     return kwargs
@@ -135,6 +141,20 @@ def main() -> None:
     parser.add_argument("--residual-action-scale", type=float, default=0.1)
     parser.add_argument("--body-mass-scale", type=float, default=1.0)
     parser.add_argument("--effort-limit-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--actor-hidden",
+        type=int,
+        nargs="+",
+        default=(512, 256, 128),
+    )
+    parser.add_argument(
+        "--no-actor-layer-norm",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--random-actor-output-head",
+        action="store_true",
+    )
     parser.add_argument(
         "--stop-gradient-source-feedback",
         action="store_true",
@@ -183,6 +203,9 @@ def main() -> None:
                 ),
                 body_mass_scale=args.body_mass_scale,
                 effort_limit_scale=args.effort_limit_scale,
+                actor_hidden=tuple(args.actor_hidden),
+                actor_layer_norm=not args.no_actor_layer_norm,
+                actor_zero_output=not args.random_actor_output_head,
             )
         )
 

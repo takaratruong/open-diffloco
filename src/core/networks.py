@@ -12,19 +12,25 @@ class Actor(nn.Module):
     action_dim: int
     hidden: Sequence[int] = (512, 256, 128)
     squash: bool = True
+    layer_norm: bool = True
+    zero_output: bool = True
 
     @nn.compact
     def __call__(self, x):
         for h in self.hidden:
             x = nn.Dense(h)(x)
-            x = nn.LayerNorm()(x)
+            if self.layer_norm:
+                x = nn.LayerNorm()(x)
             x = nn.elu(x)
 
-        x = nn.Dense(
-            self.action_dim,
-            kernel_init=nn.initializers.zeros,
-            bias_init=nn.initializers.zeros,
-        )(x)
+        if self.zero_output:
+            x = nn.Dense(
+                self.action_dim,
+                kernel_init=nn.initializers.zeros,
+                bias_init=nn.initializers.zeros,
+            )(x)
+        else:
+            x = nn.Dense(self.action_dim)(x)
 
         return nn.tanh(x) if self.squash else x
 

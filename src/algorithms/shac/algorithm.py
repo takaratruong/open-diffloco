@@ -159,6 +159,9 @@ def train(
     actor_per_env_grad_clip: float = None,
     critic_per_env_grad_clip: float = None,
     actor_bootstrap_scale: float = 1.0,
+    actor_hidden: tuple[int, ...] = (512, 256, 128),
+    actor_layer_norm: bool = True,
+    actor_zero_output: bool = True,
     source_actor_policy=None,
     initial_full_actor_policy=None,
     residual_action_scale: float = 0.0,
@@ -346,7 +349,13 @@ def train(
 
     # Initialize networks
     squash_actor_actions = getattr(env, "squash_actor_actions", True)
-    actor = Actor(env.action_dim, squash=squash_actor_actions)
+    actor = Actor(
+        env.action_dim,
+        hidden=actor_hidden,
+        squash=squash_actor_actions,
+        layer_norm=actor_layer_norm,
+        zero_output=actor_zero_output,
+    )
     critic = Critic()
 
     actor_dummy = jp.zeros((1, env.actor_obs_dim), dtype=jp.float32)
@@ -1203,6 +1212,9 @@ def train(
         "actor_per_env_grad_clip": actor_per_env_grad_clip,
         "critic_per_env_grad_clip": critic_per_env_grad_clip,
         "actor_bootstrap_scale": actor_bootstrap_scale,
+        "actor_hidden": list(actor_hidden),
+        "actor_layer_norm": actor_layer_norm,
+        "actor_zero_output": actor_zero_output,
         "source_actor_policy": source_actor_policy is not None,
         "actor_kind": (
             "full_rmr"
