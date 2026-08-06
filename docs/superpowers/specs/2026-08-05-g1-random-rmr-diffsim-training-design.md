@@ -37,8 +37,11 @@ random-weight RMR training test. They used:
 - fixed action noise of `0.05` or `0.5`, rather than the RMR policy's
   trainable Gaussian exploration initialized at standard deviation `1.0`.
 
-The new path corrects these differences as one strict training-contract port.
-It does not reinterpret the earlier failures.
+The new path corrects the policy, initialization, normalization, reset,
+observation-noise, and exploration mismatches. Environment count and
+differentiable horizon are algorithm-specific: they begin from the proven SHAC
+scale and are increased only when measured capacity or gradient quality
+requires it. This does not reinterpret the earlier failures.
 
 ## Selected Design
 
@@ -126,8 +129,8 @@ mechanism.
 
 PPO is replaced by SHAC:
 
-- the actor objective is the 24-step differentiated return plus the RMR entropy
-  term;
+- the first actor objective is the 12-step differentiated return used by
+  successful Open-DiffLoco SHAC, plus the RMR entropy term;
 - `gamma=0.99`, `lambda=0.95`, actor learning rate `1e-3`, and aggregate global
   gradient clipping at norm `1.0`;
 - the critic uses the same architecture and the existing SHAC TD(lambda)
@@ -136,46 +139,87 @@ PPO is replaced by SHAC:
 - no PPO likelihood ratio, clipping objective, KL schedule, or checkpoint is
   used.
 
-This is the intended meaning of “same RL training, otherwise with DiffSim”:
-task, policy family, initialization distribution, exploration, rollout scale,
-and data distribution match RMR; the estimator and optimizer data flow are
-SHAC because gradients pass through MJX.
+This is the intended meaning of “same RL task, otherwise with DiffSim”: task,
+policy family, initialization distribution, exploration, and data distribution
+match RMR. Batch size, differentiable horizon, estimator, and optimizer data
+flow follow SHAC because PPO's 4096-environment sampling regime is not evidence
+for the variance or memory needs of simulator gradients.
 
-## Large-Batch Execution
+## One-GPU Capacity and Batch Selection
 
 The existing trainer materializes one complete policy gradient per environment.
 For the 8,463,901-parameter actor, 4096 float32 gradient copies alone would
 require about 139 GB before simulator intermediates. That implementation cannot
-honestly claim a 4096-environment run.
+be used to decide whether a larger batch is scientifically useful.
 
-The dedicated RMR trainer will instead differentiate the mean loss of a
-microbatch directly, producing one actor gradient per microbatch. Eight GPUs
-process equal microbatches with a data-parallel map and all-reduce. Multiple
-waves are accumulated before one optimizer update until the effective batch is
-exactly 4096. The initial target is 256 environments per device and two waves:
+The dedicated RMR trainer instead differentiates a batch-mean loss directly and
+produces one aggregate actor gradient. The first registered execution is a
+single-L40S capacity ladder with the exact random actor, task, resets,
+observation noise, exploration, and horizon 12. It tries ordered environment
+counts `256`, `512`, `1024`, and `2048`, stopping after the first capacity
+failure or when the registered wall-time limit is reached. Each admitted tier
+must complete one actor update and its complete critic-update boundary; a reset
+or forward-only result is not a passed tier.
 
-```text
-8 devices * 256 environments * 2 waves = 4096 environments
-```
+The capacity ladder answers only what fits. It does not select the largest
+possible batch by default. Afterward, the smallest admitted batch whose
+independent gradient estimates are useful on fixed held-out rollouts becomes
+the training batch. Larger batches are justified only by measured disagreement
+or held-out update failure. Gradient accumulation or multi-GPU all-reduce is a
+later response to that evidence, not prerequisite infrastructure.
 
-If 256 environments per device does not fit, only the microbatch size and wave
-count may change; the effective batch remains 4096. Each device retains its own
-environment states and PRNG stream. Actor/critic parameters, optimizer state,
-normalizers, and phase-sampler statistics are synchronized at the update
-boundary.
+### Matched SHAC/PPO gradient diagnostic
+
+At the selected one-GPU capacity, a separate registered diagnostic compares two
+policy-gradient estimators without changing simulator, task, policy, data, or
+randomness:
+
+1. **SHAC pathwise gradient:** reparameterize the Gaussian action and
+   differentiate return through MJX.
+2. **PPO-style score-function gradient:** use the same sampled MJX trajectory,
+   stop gradients through actions and simulator state, form RMR's normalized
+   GAE advantages, and differentiate the on-policy log-probability surrogate.
+   At the data-collection policy the likelihood ratio is one, so PPO clipping
+   is inactive; the result is the actual first on-policy PPO policy-gradient
+   direction plus the same entropy term.
+
+This is intentionally not a comparison against a separately executed PhysX
+rollout, which would confound gradient estimator and simulator. The pretrained
+RMR actor is never loaded. Both estimators start from the identical random actor
+and critic and consume caller-owned matched phase samples, reset
+perturbations, observation corruption, and Gaussian action epsilon.
+
+Eight disjoint matched batches are evaluated sequentially without retaining
+eight full gradient trees. Online summaries record:
+
+- aggregate and per-layer gradient norms;
+- pairwise cosine to each estimator's pooled mean;
+- trace variance and signal-to-noise ratio
+  `||mean(g)||^2 / mean(||g_i - mean(g)||^2)`;
+- cosine and norm ratio between the pooled SHAC and PPO-style gradients;
+- compile time, execution time, and peak device memory; and
+- held-out return changes after equal-global-norm SHAC and PPO-style candidate
+  steps from the identical parameters.
+
+Neither estimator is declared ground truth from cosine alone. The practical
+gate is whether its equal-size candidate update improves fixed held-out
+rollouts. Gradient variance and cross-estimator direction explain that result
+and determine whether increasing the environment count is justified.
 
 The preflight must establish:
 
 1. On a finite small batch, direct mean-loss differentiation agrees with the
    mean of legacy per-environment gradients before clipping.
-2. Every device and wave consumes disjoint registered PRNG keys and RSI phases.
-3. The aggregated actor and critic gradients, updated parameters, and all
+2. Every capacity tier consumes disjoint registered PRNG keys and RSI phases.
+3. The actor and critic gradients, updated parameters, and all
    environment states are finite.
-4. The update executes at effective batch 4096 and horizon 24 without changing
-   the registered task.
-5. Two disjoint half-batch actor gradients have their cosine, norms, and update
-   ratios recorded. These are diagnostic measurements, not silently tuned
-   acceptance thresholds.
+4. The exact highest completed environment count and peak device memory are
+   recorded without changing the registered task.
+5. Two independent actor gradients at every admitted tier have their cosine,
+   norms, and update ratios recorded, and the corresponding clipped updates are
+   evaluated on caller-fixed held-out rollouts.
+6. At the selected tier, eight matched SHAC/PPO-style estimates produce finite
+   online variance, direction, cost, and held-out-update summaries.
 
 No long training run starts until this preflight passes.
 
@@ -186,7 +230,8 @@ set of branches inside the existing Go2-oriented SHAC function:
 
 - a small pure-JAX RMR MLP module owns initialization and application;
 - G1 training-reset helpers own perturbations and adaptive phase sampling;
-- a dedicated SHAC trainer owns sharded mean-gradient accumulation; and
+- a dedicated SHAC trainer owns aggregate mean gradients and the one-GPU
+  capacity boundary; and
 - the CLI binds the exact configuration and artifact directory.
 
 Existing Go2 training, generic G1 SHAC, pretrained full-policy fine-tuning, and
@@ -208,7 +253,12 @@ Implementation tests must prove:
   clean;
 - direct batch gradients agree with legacy averaged gradients on a finite toy
   boundary;
-- sharded accumulation equals an unsharded reference on a small problem; and
+- aggregate batch gradients equal an explicit mean-gradient reference on a
+  small problem; and
+- the PPO-style diagnostic stops simulator/action gradients and reproduces a
+  closed-form score-function gradient on a toy Gaussian policy;
+- matched-estimator online moments equal explicit stored-gradient moments on a
+  small tree;
 - checkpoints reload into the standalone deterministic evaluator.
 
 Every GPU run receives a schema-v1 experiment registration with pinned code,
@@ -230,8 +280,9 @@ steps. A visible-success claim requires:
 
 ## Decision Branches
 
-- **Preflight fails for memory only:** reduce per-device microbatch size and
-  increase waves while preserving the 4096 effective batch.
+- **A capacity tier fails for memory only:** retain the highest fully completed
+  tier and do not build distributed execution unless its gradients fail the
+  held-out usefulness gate.
 - **Gradients are nonfinite:** localize the first environment/time/component;
   do not start training or replace invalid values without a registered causal
   repair.
@@ -239,7 +290,13 @@ steps. A visible-success claim requires:
   seed, then add RMR dynamics randomization and evaluate sim-to-sim.
 - **Finite exact-contract training remains outside the walking basin:** retain
   the exact actor/task and preregister a horizon curriculum
-  `1 -> 4 -> 12 -> 24`; do not fall back to PPO initialization.
+  `1 -> 4 -> 12 -> 24`, or increase the effective batch only if recorded
+  gradient disagreement supports it; do not fall back to PPO initialization.
+- **PPO-style directions improve held-out returns but SHAC directions do not:**
+  localize the pathwise gradient disagreement by horizon and contact phase
+  before changing the task or policy.
+- **Both estimators have poor signal-to-noise at the admitted batch:** increase
+  effective batch through accumulation before beginning a long run.
 - **An early checkpoint walks and later checkpoints regress:** select only by
   the fixed strict evaluator and register the duration/early-stopping question.
 
