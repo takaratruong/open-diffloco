@@ -40,30 +40,42 @@ class G1TrackingEffortLimitScaleComparisonTest(unittest.TestCase):
     def test_cli_preserves_registered_scale_order(self):
         from tools.compare_g1_tracking_effort_limit_scales import build_parser
 
-        args = build_parser().parse_args(
-            [
-                "--effort-limit-scales",
-                "1.0",
-                "0.8",
-                "0.7",
-                "0.6",
-                "0.5",
-                "--rmr-policy-checkpoint",
-                "/tmp/source.pt",
-                "--output",
-                "/tmp/comparison.json",
-                "--phases",
-                "0",
-                "30",
-                "60",
-                "90",
-            ]
-        )
+        argv = [
+            "--effort-limit-scales",
+            "1.0",
+            "0.8",
+            "0.7",
+            "0.6",
+            "0.5",
+            "--rmr-policy-checkpoint",
+            "/tmp/source.pt",
+            "--output",
+            "/tmp/comparison.json",
+            "--phases",
+            "0",
+            "30",
+            "60",
+            "90",
+        ]
+        args = build_parser().parse_args(argv)
 
         self.assertEqual(
             args.effort_limit_scales,
             [1.0, 0.8, 0.7, 0.6, 0.5],
         )
+        self.assertEqual(args.solver_iterations, 4)
+        self.assertEqual(args.solver_ls_iterations, 5)
+
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(
+                argv
+                + [
+                    "--solver-iterations",
+                    "10",
+                    "--solver-ls-iterations",
+                    "20",
+                ]
+            )
 
     def test_gate_includes_exact_material_reward_threshold(self):
         from tools.compare_g1_tracking_effort_limit_scales import (

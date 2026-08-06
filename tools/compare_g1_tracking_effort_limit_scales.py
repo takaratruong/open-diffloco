@@ -40,8 +40,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phases", type=int, nargs="+", required=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=60)
-    parser.add_argument("--solver-iterations", type=int, default=4)
-    parser.add_argument("--solver-ls-iterations", type=int, default=5)
+    parser.add_argument(
+        "--solver-iterations",
+        type=int,
+        choices=(4,),
+        default=4,
+    )
+    parser.add_argument(
+        "--solver-ls-iterations",
+        type=int,
+        choices=(5,),
+        default=5,
+    )
     parser.add_argument("--minimum-reward-drop", type=float, default=0.001)
     return parser
 
@@ -172,6 +182,18 @@ def main() -> None:
         for phase in args.phases
     ):
         parser.error("every phase must index the registered reference")
+    effective_solver_iterations = int(nominal_env.mj_model.opt.iterations)
+    effective_solver_ls_iterations = int(
+        nominal_env.mj_model.opt.ls_iterations
+    )
+    if (
+        effective_solver_iterations != args.solver_iterations
+        or effective_solver_ls_iterations != args.solver_ls_iterations
+    ):
+        raise RuntimeError(
+            "validated environment solver budget does not match the "
+            "registered CLI budget"
+        )
 
     source_policy = load_rmr_policy(source_checkpoint)
     nominal_results, nominal_aggregate = _evaluate_source(
@@ -191,6 +213,15 @@ def main() -> None:
             solver_ls_iterations=args.solver_ls_iterations,
             effort_limit_scale=scale,
         )
+        if (
+            int(shifted_env.mj_model.opt.iterations)
+            != effective_solver_iterations
+            or int(shifted_env.mj_model.opt.ls_iterations)
+            != effective_solver_ls_iterations
+        ):
+            raise RuntimeError(
+                "shifted environment solver budget differs from nominal"
+            )
         shifted_results, shifted_aggregate = _evaluate_source(
             env=shifted_env,
             source_policy=source_policy,
@@ -246,8 +277,8 @@ def main() -> None:
         "phases": args.phases,
         "seed": args.seed,
         "max_steps": args.max_steps,
-        "solver_iterations": args.solver_iterations,
-        "solver_ls_iterations": args.solver_ls_iterations,
+        "solver_iterations": effective_solver_iterations,
+        "solver_ls_iterations": effective_solver_ls_iterations,
         "minimum_reward_drop": args.minimum_reward_drop,
         "source_checkpoint": str(source_checkpoint),
         "nominal": {
