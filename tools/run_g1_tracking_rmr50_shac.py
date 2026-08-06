@@ -28,10 +28,23 @@ def build_train_kwargs(
     unbounded_actions: bool = False,
     validated_task: bool = False,
     source_actor_policy=None,
+    initial_full_actor_policy=None,
     residual_action_scale: float = 0.0,
     differentiate_source_feedback: bool = True,
     body_mass_scale: float = 1.0,
 ) -> dict:
+    if (
+        source_actor_policy is not None
+        and initial_full_actor_policy is not None
+    ):
+        raise ValueError(
+            "source_actor_policy and initial_full_actor_policy are "
+            "mutually exclusive"
+        )
+    if initial_full_actor_policy is not None and not validated_task:
+        raise ValueError(
+            "initial_full_actor_policy requires validated_task source order"
+        )
     if validated_task and unbounded_actions:
         raise ValueError(
             "validated_task already includes unbounded source actions"
@@ -76,6 +89,7 @@ def build_train_kwargs(
                 )
             ),
             "source_actor_policy": source_actor_policy,
+            "initial_full_actor_policy": initial_full_actor_policy,
             "residual_action_scale": residual_action_scale,
             "differentiate_source_feedback": differentiate_source_feedback,
             "mass_range": (body_mass_scale, body_mass_scale),
@@ -113,6 +127,7 @@ def main() -> None:
     parser.add_argument("--unbounded-actions", action="store_true")
     parser.add_argument("--validated-task", action="store_true")
     parser.add_argument("--source-policy-checkpoint", type=Path)
+    parser.add_argument("--initialize-full-policy-from", type=Path)
     parser.add_argument("--residual-action-scale", type=float, default=0.1)
     parser.add_argument("--body-mass-scale", type=float, default=1.0)
     parser.add_argument(
@@ -125,6 +140,11 @@ def main() -> None:
     source_actor_policy = (
         load_source_actor_policy(args.source_policy_checkpoint)
         if args.source_policy_checkpoint is not None
+        else None
+    )
+    initial_full_actor_policy = (
+        load_source_actor_policy(args.initialize_full_policy_from)
+        if args.initialize_full_policy_from is not None
         else None
     )
     solver_scope = (
@@ -147,6 +167,7 @@ def main() -> None:
                 unbounded_actions=args.unbounded_actions,
                 validated_task=args.validated_task,
                 source_actor_policy=source_actor_policy,
+                initial_full_actor_policy=initial_full_actor_policy,
                 residual_action_scale=(
                     args.residual_action_scale
                     if source_actor_policy is not None

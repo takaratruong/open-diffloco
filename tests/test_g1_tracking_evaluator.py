@@ -116,6 +116,21 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "between 0 and 1"):
             scale_policy_action(jnp.zeros(3), 1.1)
 
+    def test_evaluator_cli_accepts_standalone_full_rmr_actor_checkpoint(self):
+        from tools.evaluate_g1_tracking import build_parser
+
+        args = build_parser().parse_args(
+            [
+                "--output-dir",
+                "/tmp/g1-evaluation",
+                "--checkpoint",
+                "/tmp/full-actor.pkl",
+                "--full-rmr-actor",
+            ]
+        )
+
+        self.assertTrue(args.full_rmr_actor)
+
 
 if __name__ == "__main__":
     unittest.main()

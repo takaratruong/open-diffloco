@@ -36,6 +36,7 @@ if ROOT not in sys.path:
 from src.core.rmr_policy import (  # noqa: E402
     rmr_policy_from_state_dict,
     apply_rmr_policy,
+    apply_trainable_rmr_policy,
     compose_bounded_rmr_residual,
     compose_rmr_residual,
 )
@@ -123,6 +124,40 @@ def test_float64_sim_observation_runs_at_source_float32_precision():
 
     assert got.dtype == np.float32
     np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_trainable_policy_exactly_matches_source_initialization():
+    model, normalizer, obs_dim, _ = _state_dicts()
+    policy = rmr_policy_from_state_dict(model, normalizer)
+    obs = np.random.default_rng(14).standard_normal(
+        (3, obs_dim)
+    ).astype(np.float64)
+
+    expected = np.asarray(apply_rmr_policy(policy, obs))
+    actual = np.asarray(apply_trainable_rmr_policy(policy, obs))
+
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_trainable_policy_freezes_normalizer_but_updates_all_layers():
+    model, normalizer, obs_dim, _ = _state_dicts()
+    policy = rmr_policy_from_state_dict(model, normalizer)
+    obs = jnp.asarray(
+        np.random.default_rng(15).standard_normal(obs_dim),
+        dtype=jnp.float64,
+    )
+
+    gradients = jax.grad(
+        lambda params: jnp.sum(
+            apply_trainable_rmr_policy(params, obs)
+        )
+    )(policy)
+
+    np.testing.assert_array_equal(np.asarray(gradients.mean), 0.0)
+    np.testing.assert_array_equal(np.asarray(gradients.std), 0.0)
+    for gradient in (*gradients.weights, *gradients.biases):
+        assert np.isfinite(np.asarray(gradient)).all()
+        assert np.linalg.norm(np.asarray(gradient)) > 0.0
 
 
 def test_zero_residual_preserves_source_action():

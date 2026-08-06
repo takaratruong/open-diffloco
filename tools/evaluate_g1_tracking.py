@@ -13,6 +13,7 @@ import numpy as np
 from src.core.data_structures import Normalizer
 from src.core.networks import Actor
 from src.core.rmr_policy import bound_residual_action
+from src.core.rmr_policy import apply_trainable_rmr_policy
 from src.envs.g1_tracking.environment import G1TrackingEnv
 from src.envs.go2.environment import get_go2_env_class
 
@@ -171,6 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--solver-iterations", type=int)
     parser.add_argument("--solver-ls-iterations", type=int)
     parser.add_argument("--body-mass-scale", type=float, default=1.0)
+    parser.add_argument("--full-rmr-actor", action="store_true")
     parser.add_argument(
         "--env-variant",
         choices=EVALUATION_ENV_VARIANTS,
@@ -203,6 +205,17 @@ def main() -> None:
         and args.rmr_policy_checkpoint is not None
         and args.residual_action_scale > 0.0
     )
+    if args.full_rmr_actor and args.checkpoint is None:
+        parser.error("--full-rmr-actor requires --checkpoint")
+    if args.full_rmr_actor and (
+        args.rmr_action_tape is not None
+        or args.rmr_policy_checkpoint is not None
+        or args.residual_action_scale != 0.0
+    ):
+        parser.error(
+            "--full-rmr-actor is a standalone controller and cannot be "
+            "combined with source or residual inputs"
+        )
     if sum(source is not None for source in controller_sources) > 1 and not paired_residual:
         parser.error(
             "--checkpoint, --rmr-action-tape, and --rmr-policy-checkpoint "
@@ -217,6 +230,7 @@ def main() -> None:
             "--rmr-policy-checkpoint"
         )
     actor = actor_params = normalizer_state = None
+    full_rmr_actor = None
     action_tape = None
     rmr_policy = None
     if args.rmr_action_tape is not None:
@@ -236,7 +250,10 @@ def main() -> None:
                 "unbounded RMR environment"
             )
         rmr_policy = load_rmr_policy(args.rmr_policy_checkpoint)
-    if args.checkpoint is not None or not any(controller_sources):
+    if args.full_rmr_actor:
+        with args.checkpoint.open("rb") as handle:
+            full_rmr_actor = pickle.load(handle).actor_params
+    elif args.checkpoint is not None or not any(controller_sources):
         actor, actor_params, normalizer_state = _load_policy(
             env, args.checkpoint, args.seed
         )
@@ -268,7 +285,11 @@ def main() -> None:
                     reference_data,
                 )
             )
-        if action_tape is not None:
+        if full_rmr_actor is not None:
+            action = apply_trainable_rmr_policy(
+                full_rmr_actor, state.obs
+            ).astype(jnp.float64)
+        elif action_tape is not None:
             # The logged RMR controller runs at 50 Hz; the grounded reference
             # and MJX task run at 100 Hz. Zero-order hold each logged action for
             # two reference frames without using it for policy training.
@@ -359,7 +380,9 @@ def main() -> None:
         "solver_ls_iterations": int(env.mj_model.opt.ls_iterations),
         "body_mass_scale": env.body_mass_scale,
         "controller": (
-            "rmr_action_tape"
+            "full_rmr_actor"
+            if full_rmr_actor is not None
+            else "rmr_action_tape"
             if action_tape is not None
             else "rmr_residual_policy"
             if rmr_policy is not None and actor is not None

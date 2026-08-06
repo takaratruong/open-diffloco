@@ -30,6 +30,7 @@ __all__ = [
     "RmrPolicy",
     "rmr_policy_from_state_dict",
     "apply_rmr_policy",
+    "apply_trainable_rmr_policy",
     "bound_residual_action",
     "compose_bounded_rmr_residual",
     "compose_rmr_residual",
@@ -139,18 +140,22 @@ def rmr_policy_from_state_dict(
     )
 
 
-def apply_rmr_policy(policy: RmrPolicy, observations: Any) -> jnp.ndarray:
-    """Run the pure-JAX RMR forward pass on one or a batch of observations.
-
-    Applies ``(obs - mean) / std`` normalization, ELU hidden layers, and a
-    final linear output layer. A single observation returns a 1-D action; a
-    leading batch dimension is preserved.
-    """
+def _apply_rmr_policy(
+    policy: RmrPolicy,
+    observations: Any,
+    *,
+    freeze_normalizer: bool,
+) -> jnp.ndarray:
     # The source RSL-RL actor is a float32 network even when the simulator
     # state is float64. Preserve that boundary to avoid changing its actions
     # and promoting the large frozen network inside the differentiated graph.
+    mean = policy.mean
+    std = policy.std
+    if freeze_normalizer:
+        mean = lax.stop_gradient(mean)
+        std = lax.stop_gradient(std)
     x = jnp.asarray(observations, dtype=policy.mean.dtype)
-    x = (x - policy.mean) / (policy.std + 1e-8)
+    x = (x - mean) / (std + 1e-8)
 
     last = len(policy.weights) - 1
     for i, (weight, bias) in enumerate(zip(policy.weights, policy.biases)):
@@ -162,6 +167,26 @@ def apply_rmr_policy(policy: RmrPolicy, observations: Any) -> jnp.ndarray:
         if i != last:
             x = jnn.elu(x)
     return x
+
+
+def apply_rmr_policy(policy: RmrPolicy, observations: Any) -> jnp.ndarray:
+    """Run the pure-JAX RMR forward pass on one or batched observations."""
+    return _apply_rmr_policy(
+        policy,
+        observations,
+        freeze_normalizer=False,
+    )
+
+
+def apply_trainable_rmr_policy(
+    policy: RmrPolicy, observations: Any
+) -> jnp.ndarray:
+    """Apply a full trainable RMR actor with frozen normalization statistics."""
+    return _apply_rmr_policy(
+        policy,
+        observations,
+        freeze_normalizer=True,
+    )
 
 
 def compose_rmr_residual(

@@ -18,7 +18,10 @@ import numpy as np
 
 from src.core.data_structures import Normalizer, TrainState
 from src.core.networks import Actor, Critic
-from src.core.rmr_policy import compose_bounded_rmr_residual
+from src.core.rmr_policy import (
+    apply_trainable_rmr_policy,
+    compose_bounded_rmr_residual,
+)
 from src.envs.go2.environment import Go2Env
 from src.envs.go2.terrain import differentiated_ou_foot_forces
 from src.core.utils import compute_grad_norm
@@ -141,6 +144,7 @@ def train(
     critic_per_env_grad_clip: float = None,
     actor_bootstrap_scale: float = 1.0,
     source_actor_policy=None,
+    initial_full_actor_policy=None,
     residual_action_scale: float = 0.0,
     differentiate_source_feedback: bool = True,
 ):
@@ -186,6 +190,20 @@ def train(
     Returns:
         Tuple of (final_state, save_directory)
     """
+    if (
+        source_actor_policy is not None
+        and initial_full_actor_policy is not None
+    ):
+        raise ValueError(
+            "source_actor_policy and initial_full_actor_policy are "
+            "mutually exclusive"
+        )
+    if initial_full_actor_policy is not None and residual_action_scale != 0.0:
+        raise ValueError(
+            "initial_full_actor_policy is standalone and cannot use "
+            "residual_action_scale"
+        )
+
     # Handle checkpoint resumption
     resumed_state = None
     resumed_step = 0
@@ -310,7 +328,11 @@ def train(
 
     actor_dummy = jp.zeros((1, env.actor_obs_dim), dtype=jp.float32)
     critic_dummy = jp.zeros((1, env.critic_obs_dim), dtype=jp.float32)
-    actor_params = actor.init(k1, actor_dummy)
+    actor_params = (
+        initial_full_actor_policy
+        if initial_full_actor_policy is not None
+        else actor.init(k1, actor_dummy)
+    )
     critic_params = critic.init(k2, critic_dummy)
     target_critic_params = critic_params
 
@@ -416,8 +438,16 @@ def train(
             obs_norm = env.normalize_actor_obs(
                 actor_norm, actor_norm_state, actor_obs
             ).astype(jp.float32)
-            residual_logits = actor.apply(actor_params, obs_norm)
-            if source_actor_policy is None:
+            residual_logits = (
+                actor.apply(actor_params, obs_norm)
+                if initial_full_actor_policy is None
+                else None
+            )
+            if initial_full_actor_policy is not None:
+                action = apply_trainable_rmr_policy(
+                    actor_params, actor_obs
+                ).astype(jp.float64)
+            elif source_actor_policy is None:
                 action = residual_logits.astype(jp.float64)
             else:
                 action = compose_bounded_rmr_residual(
@@ -1143,6 +1173,13 @@ def train(
         "critic_per_env_grad_clip": critic_per_env_grad_clip,
         "actor_bootstrap_scale": actor_bootstrap_scale,
         "source_actor_policy": source_actor_policy is not None,
+        "actor_kind": (
+            "full_rmr"
+            if initial_full_actor_policy is not None
+            else "bounded_rmr_residual"
+            if source_actor_policy is not None
+            else "flax"
+        ),
         "residual_action_scale": residual_action_scale,
         "differentiate_source_feedback": differentiate_source_feedback,
         "env_variant": env_variant,

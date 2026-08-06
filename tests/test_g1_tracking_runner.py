@@ -140,6 +140,49 @@ class G1TrackingRunnerTest(unittest.TestCase):
         self.assertEqual(kwargs["residual_action_scale"], 0.1)
         self.assertFalse(kwargs["differentiate_source_feedback"])
 
+    def test_native_rmr_runner_can_initialize_the_complete_source_actor(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        full_actor = object()
+        kwargs = build_train_kwargs(
+            steps=65_536,
+            num_envs=256,
+            seed=3,
+            checkpoint_interval=16_384,
+            validated_task=True,
+            initial_full_actor_policy=full_actor,
+        )
+
+        self.assertIs(kwargs["initial_full_actor_policy"], full_actor)
+        self.assertIsNone(kwargs["source_actor_policy"])
+
+    def test_full_actor_initialization_rejects_residual_composition(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            build_train_kwargs(
+                steps=65_536,
+                num_envs=256,
+                seed=3,
+                checkpoint_interval=16_384,
+                validated_task=True,
+                source_actor_policy=object(),
+                residual_action_scale=0.1,
+                initial_full_actor_policy=object(),
+            )
+
+    def test_full_actor_initialization_requires_validated_source_order(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        with self.assertRaisesRegex(ValueError, "validated_task"):
+            build_train_kwargs(
+                steps=65_536,
+                num_envs=256,
+                seed=3,
+                checkpoint_interval=16_384,
+                initial_full_actor_policy=object(),
+            )
+
     def test_native_rmr_runner_rejects_residual_scale_without_source_policy(self):
         from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
 
