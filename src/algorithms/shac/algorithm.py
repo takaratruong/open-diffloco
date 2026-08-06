@@ -88,6 +88,22 @@ def save_periodic_checkpoint(state, save_dir: str | Path, step: int) -> Path:
     return step_path
 
 
+def archive_periodic_checkpoint_if_due(
+    state,
+    save_dir: str | Path,
+    last_checkpoint_step: int,
+    checkpoint_interval: int,
+    *,
+    current_step: int | None = None,
+) -> tuple[int, Path | None]:
+    """Archive a due checkpoint without coupling persistence to log cadence."""
+    step = int(state.step) if current_step is None else current_step
+    if step - last_checkpoint_step < checkpoint_interval:
+        return last_checkpoint_step, None
+    checkpoint_path = save_periodic_checkpoint(state, save_dir, step)
+    return step, checkpoint_path
+
+
 def squeeze_value_head(values):
     """Remove only the critic output axis, preserving batch/time axes."""
     return jp.squeeze(values, axis=-1)
@@ -1093,11 +1109,18 @@ def train(
                     pickle.dump(state, f)
                 print(f"  >> New best! Reward: {best_reward:.3f}")
 
-            # Periodic checkpoint
-            if state.step - last_checkpoint_step >= checkpoint_interval:
-                save_periodic_checkpoint(state, save_dir, int(state.step))
-                last_checkpoint_step = state.step
-                print(f"  >> Checkpoint saved at step {state.step}")
+        current_step = (i + 1) * steps_per_iter
+        last_checkpoint_step, checkpoint_path = (
+            archive_periodic_checkpoint_if_due(
+                state,
+                save_dir,
+                last_checkpoint_step,
+                checkpoint_interval,
+                current_step=current_step,
+            )
+        )
+        if checkpoint_path is not None:
+            print(f"  >> Checkpoint saved at step {current_step}")
 
     # Save final state and logs
     with open(f"{save_dir}/policy_final.pkl", "wb") as f:
