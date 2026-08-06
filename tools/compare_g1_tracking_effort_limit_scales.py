@@ -26,6 +26,27 @@ TRACKING_ERROR_FIELDS = tuple(
 )
 
 
+def _effective_environment_provenance(
+    env,
+    *,
+    expected_effort_limit_scale: float,
+) -> dict:
+    """Record and validate the causal environment inputs actually in use."""
+    provenance = {
+        "body_mass_scale": float(env.body_mass_scale),
+        "effort_limit_scale": float(env.effort_limit_scale),
+        "solver_iterations": int(env.mj_model.opt.iterations),
+        "solver_ls_iterations": int(env.mj_model.opt.ls_iterations),
+    }
+    if provenance["body_mass_scale"] != 1.0:
+        raise RuntimeError("authority screen requires nominal body mass")
+    if provenance["effort_limit_scale"] != expected_effort_limit_scale:
+        raise RuntimeError(
+            "effective effort-limit scale differs from the requested scale"
+        )
+    return provenance
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the fixed effort-limit-scale comparison CLI."""
     parser = argparse.ArgumentParser()
@@ -182,10 +203,14 @@ def main() -> None:
         for phase in args.phases
     ):
         parser.error("every phase must index the registered reference")
-    effective_solver_iterations = int(nominal_env.mj_model.opt.iterations)
-    effective_solver_ls_iterations = int(
-        nominal_env.mj_model.opt.ls_iterations
+    nominal_environment = _effective_environment_provenance(
+        nominal_env,
+        expected_effort_limit_scale=1.0,
     )
+    effective_solver_iterations = nominal_environment["solver_iterations"]
+    effective_solver_ls_iterations = nominal_environment[
+        "solver_ls_iterations"
+    ]
     if (
         effective_solver_iterations != args.solver_iterations
         or effective_solver_ls_iterations != args.solver_ls_iterations
@@ -213,10 +238,14 @@ def main() -> None:
             solver_ls_iterations=args.solver_ls_iterations,
             effort_limit_scale=scale,
         )
+        shifted_environment = _effective_environment_provenance(
+            shifted_env,
+            expected_effort_limit_scale=scale,
+        )
         if (
-            int(shifted_env.mj_model.opt.iterations)
+            shifted_environment["solver_iterations"]
             != effective_solver_iterations
-            or int(shifted_env.mj_model.opt.ls_iterations)
+            or shifted_environment["solver_ls_iterations"]
             != effective_solver_ls_iterations
         ):
             raise RuntimeError(
@@ -258,6 +287,7 @@ def main() -> None:
         }
         candidate = {
             "effort_limit_scale": scale,
+            "environment": shifted_environment,
             "results": phase_results,
             "aggregate": aggregate_document,
         }
@@ -283,6 +313,7 @@ def main() -> None:
         "source_checkpoint": str(source_checkpoint),
         "nominal": {
             "effort_limit_scale": 1.0,
+            "environment": nominal_environment,
             "results": nominal_results,
             "aggregate": nominal_aggregate,
         },
