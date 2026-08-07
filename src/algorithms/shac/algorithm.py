@@ -115,6 +115,18 @@ def squeeze_value_head(values):
     return jp.squeeze(values, axis=-1)
 
 
+def actor_bootstrap_scale_at_step(
+    step: jax.Array,
+    target_scale: float,
+    delay_steps: int,
+) -> jax.Array:
+    """Keeps actor value bootstrapping off until the critic warm-up ends."""
+    # Target-critic values are float32.  Keep the scheduled scalar in the
+    # same dtype so delay=0 preserves the original weak-scalar arithmetic.
+    target = jp.asarray(target_scale, dtype=jp.float32)
+    return jp.where(step >= delay_steps, target, jp.zeros_like(target))
+
+
 def train(
     # General
     total_steps: int = 100_000,
@@ -166,6 +178,7 @@ def train(
     actor_per_env_grad_clip: float = None,
     critic_per_env_grad_clip: float = None,
     actor_bootstrap_scale: float = 1.0,
+    actor_bootstrap_delay_steps: int = 0,
     actor_hidden: tuple[int, ...] = (512, 256, 128),
     actor_layer_norm: bool = True,
     actor_zero_output: bool = True,
@@ -215,6 +228,8 @@ def train(
         seed: Random seed
         resume_from: Path to checkpoint .pkl file or training folder to resume from
         checkpoint_interval: Save checkpoint every N steps
+        actor_bootstrap_delay_steps: Environment steps before the actor uses
+                                     target-critic terminal value estimates.
 
     Returns:
         Tuple of (final_state, save_directory)
@@ -240,6 +255,14 @@ def train(
         raise ValueError(
             "gradient_accumulation_steps must be a positive integer"
         )
+    if (
+        isinstance(actor_bootstrap_delay_steps, bool)
+        or not isinstance(actor_bootstrap_delay_steps, int)
+        or actor_bootstrap_delay_steps < 0
+    ):
+        raise ValueError(
+            "actor_bootstrap_delay_steps must be a non-negative integer"
+        )
     effective_num_envs = num_envs * gradient_accumulation_steps
     steps_per_actor_update = effective_num_envs * unroll_length
 
@@ -258,6 +281,13 @@ def train(
             if resumed_accumulation_steps != gradient_accumulation_steps:
                 raise ValueError(
                     "gradient_accumulation_steps must match the checkpoint"
+                )
+            resumed_bootstrap_delay = resumed_hparams.get(
+                "actor_bootstrap_delay_steps", 0
+            )
+            if resumed_bootstrap_delay != actor_bootstrap_delay_steps:
+                raise ValueError(
+                    "actor_bootstrap_delay_steps must match the checkpoint"
                 )
             print(
                 f"  Loaded hparams: action_scale={resumed_hparams.get('action_scale')}"
@@ -456,6 +486,7 @@ def train(
         env_state,
         randomization,
         current_noise_std,
+        current_actor_bootstrap_scale,
     ):
         """Short-horizon actor objective with sampled perturbations."""
         action_noise, velocity_pushes, terrain_bump_innovations = randomization
@@ -575,7 +606,7 @@ def train(
             next_discount = discount * gamma
             running = running + discount * r
             trunc_bootstrap = (
-                actor_bootstrap_scale
+                current_actor_bootstrap_scale
                 * (1.0 - terminal)
                 * next_discount
                 * v_next
@@ -601,7 +632,7 @@ def train(
         final_bootstrap = jp.where(
             traj["done"][-1],
             0.0,
-            actor_bootstrap_scale * final_discount * final_v,
+            current_actor_bootstrap_scale * final_discount * final_v,
         )
 
         total_ret = total_ret + running + final_bootstrap
@@ -754,13 +785,18 @@ def train(
         current_noise_std = action_noise_std_start + progress * (
             action_noise_std_end - action_noise_std_start
         )
+        current_actor_bootstrap_scale = actor_bootstrap_scale_at_step(
+            state.step,
+            actor_bootstrap_scale,
+            actor_bootstrap_delay_steps,
+        )
 
         # Actor update
         actor_grad_fn = jax.value_and_grad(actor_loss, has_aux=True)
         if gradient_accumulation_steps == 1:
             (losses, (trajs, final_states)), per_env_grads = jax.vmap(
                 actor_grad_fn,
-                in_axes=(None, None, None, None, 0, 0, None),
+                in_axes=(None, None, None, None, 0, 0, None, None),
             )(
                 state.actor_params,
                 state.target_critic_params,
@@ -769,6 +805,7 @@ def train(
                 updated_env_state,
                 all_randomization,
                 current_noise_std,
+                current_actor_bootstrap_scale,
             )
             grads, actor_grad_stats = aggregate_env_gradients(
                 per_env_grads, actor_per_env_grad_clip
@@ -792,7 +829,7 @@ def train(
                     (shard_trajs, shard_final_states),
                 ), shard_per_env_grads = jax.vmap(
                     actor_grad_fn,
-                    in_axes=(None, None, None, None, 0, 0, None),
+                    in_axes=(None, None, None, None, 0, 0, None, None),
                 )(
                     state.actor_params,
                     state.target_critic_params,
@@ -801,6 +838,7 @@ def train(
                     shard_env_state,
                     shard_randomization,
                     current_noise_std,
+                    current_actor_bootstrap_scale,
                 )
                 shard_grads, shard_grad_stats = aggregate_env_gradients(
                     shard_per_env_grads, actor_per_env_grad_clip
@@ -1045,6 +1083,7 @@ def train(
             ],
             "critic_grad_raw_max": critic_update_metrics["raw_norm_max"][-1],
             "actor_loss": jp.mean(losses),
+            "actor_bootstrap_scale_current": current_actor_bootstrap_scale,
             "action_noise_current": current_noise_std,
             "track_vx": jp.mean(jp.abs(trajs["vel_x"] - trajs["cmd_x"])),
             "track_vy": jp.mean(jp.abs(trajs["vel_y"] - trajs["cmd_y"])),
@@ -1229,6 +1268,9 @@ def train(
                         "height": float(metrics["height"]),
                         "tilt": float(metrics["tilt"]),
                         "actor_grad": float(metrics["actor_grad"]),
+                        "actor_bootstrap_scale_current": float(
+                            metrics["actor_bootstrap_scale_current"]
+                        ),
                         "actor_grad_raw_median": float(
                             metrics["actor_grad_raw_median"]
                         ),
@@ -1385,6 +1427,7 @@ def train(
         "actor_per_env_grad_clip": actor_per_env_grad_clip,
         "critic_per_env_grad_clip": critic_per_env_grad_clip,
         "actor_bootstrap_scale": actor_bootstrap_scale,
+        "actor_bootstrap_delay_steps": actor_bootstrap_delay_steps,
         "actor_hidden": list(actor_hidden),
         "actor_layer_norm": actor_layer_norm,
         "actor_zero_output": actor_zero_output,

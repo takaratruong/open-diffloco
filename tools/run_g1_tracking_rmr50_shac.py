@@ -24,6 +24,7 @@ def build_train_kwargs(
     action_noise_std: float = 0.05,
     action_noise_std_end: float | None = None,
     actor_bootstrap_scale: float = 1.0,
+    actor_bootstrap_delay_steps: int = 0,
     unroll_length: int = 24,
     unbounded_actions: bool = False,
     validated_task: bool = False,
@@ -45,6 +46,14 @@ def build_train_kwargs(
     ):
         raise ValueError(
             "gradient_accumulation_steps must be a positive integer"
+        )
+    if (
+        isinstance(actor_bootstrap_delay_steps, bool)
+        or not isinstance(actor_bootstrap_delay_steps, int)
+        or actor_bootstrap_delay_steps < 0
+    ):
+        raise ValueError(
+            "actor_bootstrap_delay_steps must be a non-negative integer"
         )
     if (
         source_actor_policy is not None
@@ -113,6 +122,7 @@ def build_train_kwargs(
             "actor_layer_norm": actor_layer_norm,
             "actor_zero_output": actor_zero_output,
             "gradient_accumulation_steps": gradient_accumulation_steps,
+            "actor_bootstrap_delay_steps": actor_bootstrap_delay_steps,
         }
     )
     return kwargs
@@ -143,6 +153,7 @@ def main() -> None:
     parser.add_argument("--action-noise-std", type=float, default=0.05)
     parser.add_argument("--action-noise-std-end", type=float)
     parser.add_argument("--actor-bootstrap-scale", type=float, default=1.0)
+    parser.add_argument("--actor-bootstrap-delay-steps", type=int, default=0)
     parser.add_argument("--unroll-length", type=int, default=24)
     parser.add_argument(
         "--gradient-accumulation-steps", type=int, default=1
@@ -201,6 +212,9 @@ def main() -> None:
                 action_noise_std=args.action_noise_std,
                 action_noise_std_end=args.action_noise_std_end,
                 actor_bootstrap_scale=args.actor_bootstrap_scale,
+                actor_bootstrap_delay_steps=(
+                    args.actor_bootstrap_delay_steps
+                ),
                 unroll_length=args.unroll_length,
                 unbounded_actions=args.unbounded_actions,
                 validated_task=args.validated_task,

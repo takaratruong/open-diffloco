@@ -99,6 +99,37 @@ class G1TrackingRunnerTest(unittest.TestCase):
         self.assertEqual(kwargs["num_envs"], 256)
         self.assertEqual(kwargs["gradient_accumulation_steps"], 4)
 
+    def test_native_rmr_runner_transports_delayed_actor_bootstrap(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        kwargs = build_train_kwargs(
+            steps=393_216,
+            num_envs=256,
+            seed=3,
+            checkpoint_interval=30_720,
+            actor_bootstrap_scale=1.0,
+            actor_bootstrap_delay_steps=61_440,
+        )
+
+        self.assertEqual(kwargs["actor_bootstrap_scale"], 1.0)
+        self.assertEqual(kwargs["actor_bootstrap_delay_steps"], 61_440)
+
+    def test_native_rmr_runner_rejects_invalid_actor_bootstrap_delay(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        for delay_steps in (-1, 1.5, True):
+            with self.subTest(delay_steps=delay_steps):
+                with self.assertRaisesRegex(
+                    ValueError, "actor_bootstrap_delay_steps"
+                ):
+                    build_train_kwargs(
+                        steps=393_216,
+                        num_envs=256,
+                        seed=3,
+                        checkpoint_interval=30_720,
+                        actor_bootstrap_delay_steps=delay_steps,
+                    )
+
     def test_native_rmr_runner_rejects_invalid_gradient_accumulation(self):
         from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
 
