@@ -144,20 +144,25 @@ state semantics.
    optimizer state, normalizers, environment state, and metrics as the
    unaccumulated path within dtype-appropriate tolerance.
 
-### Small actual-MJX parity
+### Small actual-MJX batch-shape sensitivity diagnostic
 
-On the validated G1 task, compare one monolithic four-environment update with
-two accumulated two-environment shards using the same seed and pre-sampled
-ordered randomness. Require:
+Compare one monolithic four-environment update with two accumulated
+two-environment shards using the same seed and pre-sampled ordered randomness,
+but do not treat it as an estimator-parity authority. The comparison changes
+the physical `vmap` width from four to two. Contact-rich MJX trajectories and
+their pathwise gradients can diverge under that numerical batching change even
+when the shard aggregation algebra is exact.
 
-- identical step and environment-state shapes;
-- finite actor and critic gradients and checkpoint leaves;
-- actor and critic parameter/update cosine at least 0.9999;
-- aggregate parameter/update relative L2 error at most 1e-4;
-- normalizer mean, variance, and count relative error at most 1e-6;
-- no second real-step compilation.
+Record step, shape, finiteness, parameter, optimizer, normalizer, and
+environment-state differences. A failure diagnoses physical-batch numerical
+sensitivity; it must not be converted into a pass by relaxing thresholds.
+Production admission instead requires all of the following:
 
-If this parity gate fails, stop before any production-scale training.
+- factor one retains the committed physical-256 path;
+- pure clipped-gradient tests prove that equal-size shard means equal the
+  concatenated effective-population mean;
+- every accumulated shard uses physical width 256, exactly matching E098;
+- the production resource gate below publishes a complete finite update.
 
 ### Production resource gate
 
@@ -166,6 +171,10 @@ L40S. It must compile, remain below device memory, execute one actor plus all
 16 critic updates, publish complete finite diagnostics, and advance exactly
 6,144 environment steps. Failure stops the accumulation branch before long
 training.
+
+An effective-1,024 technical gate may run concurrently as four sequential
+physical-256 shards. It must satisfy the analogous 12,288-step contract before
+the factor-four learning arm is admitted.
 
 ## Learning Experiments
 

@@ -264,6 +264,16 @@ Expected: all focused tests pass.
 
 ### Task 5: Build the real-G1 parity evaluator
 
+**Execution correction (2026-08-07):** The proposed monolithic-4 versus
+physical-2-by-2 threshold is not an implementation-parity authority. The
+executed diagnostic preserved seed, samples, actor, horizon, and task but
+changed physical `vmap` width; finite contact-rich MJX trajectories and
+pathwise gradients diverged materially. Do not weaken the thresholds or call
+that result a pass. Retain the comparison as a batch-shape-sensitivity
+diagnostic and admit learning only through exact shard-aggregation tests plus
+the physical-256 production gates, which preserve E098's differentiation
+width.
+
 **Files:**
 - Create: `tools/validate_g1_shac_gradient_accumulation.py`
 - Create: `tests/test_g1_shac_gradient_accumulation_validator.py`
@@ -313,6 +323,12 @@ git push takaratruong research/g1-rmr-50hz-20260805
 Expected: all tests pass and the implementation branch is published.
 
 ### Task 6: Execute parity and production resource gates
+
+The revised execution gate is physical-shape preservation: every learning
+shard remains exactly 256 environments, the factor-two gate must complete one
+finite 6,144-step update, and the factor-four gate must complete one finite
+12,288-step update. The small changed-width diagnostic is descriptive and
+cannot block or authorize production by itself.
 
 **Files:**
 - Create in research repository: `research/experiments/E-20260807-000.yaml`
