@@ -236,6 +236,38 @@ class G1TrackingRunnerTest(unittest.TestCase):
                         effort_limit_scale=scale,
                     )
 
+    def test_native_rmr_runner_transports_termination_margin_weight(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        kwargs = build_train_kwargs(
+            steps=65_536,
+            num_envs=256,
+            seed=3,
+            checkpoint_interval=16_384,
+            validated_task=True,
+            termination_margin_weight=0.5,
+        )
+
+        self.assertEqual(kwargs["termination_margin_weight"], 0.5)
+
+    def test_native_rmr_runner_rejects_invalid_termination_margin_weight(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        for weight in (-1.0, float("nan"), float("inf"), True):
+            with self.subTest(weight=weight):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "termination_margin_weight",
+                ):
+                    build_train_kwargs(
+                        steps=65_536,
+                        num_envs=256,
+                        seed=3,
+                        checkpoint_interval=16_384,
+                        validated_task=True,
+                        termination_margin_weight=weight,
+                    )
+
     def test_native_rmr_runner_can_train_a_bounded_source_policy_residual(self):
         from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
 

@@ -34,6 +34,7 @@ def build_train_kwargs(
     differentiate_source_feedback: bool = True,
     body_mass_scale: float = 1.0,
     effort_limit_scale: float = 1.0,
+    termination_margin_weight: float = 0.0,
     actor_hidden: tuple[int, ...] = (512, 256, 128),
     actor_layer_norm: bool = True,
     actor_zero_output: bool = True,
@@ -83,6 +84,14 @@ def build_train_kwargs(
         raise ValueError("body_mass_scale must be positive and finite")
     if not math.isfinite(effort_limit_scale) or effort_limit_scale <= 0.0:
         raise ValueError("effort_limit_scale must be positive and finite")
+    if (
+        isinstance(termination_margin_weight, bool)
+        or not math.isfinite(termination_margin_weight)
+        or termination_margin_weight < 0.0
+    ):
+        raise ValueError(
+            "termination_margin_weight must be non-negative and finite"
+        )
     kwargs = build_100hz_train_kwargs(
         steps=steps,
         num_envs=num_envs,
@@ -118,6 +127,7 @@ def build_train_kwargs(
             "differentiate_source_feedback": differentiate_source_feedback,
             "mass_range": (body_mass_scale, body_mass_scale),
             "effort_limit_scale": effort_limit_scale,
+            "termination_margin_weight": termination_margin_weight,
             "actor_hidden": actor_hidden,
             "actor_layer_norm": actor_layer_norm,
             "actor_zero_output": actor_zero_output,
@@ -165,6 +175,9 @@ def main() -> None:
     parser.add_argument("--residual-action-scale", type=float, default=0.1)
     parser.add_argument("--body-mass-scale", type=float, default=1.0)
     parser.add_argument("--effort-limit-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--termination-margin-weight", type=float, default=0.0
+    )
     parser.add_argument(
         "--actor-hidden",
         type=int,
@@ -230,6 +243,9 @@ def main() -> None:
                 ),
                 body_mass_scale=args.body_mass_scale,
                 effort_limit_scale=args.effort_limit_scale,
+                termination_margin_weight=(
+                    args.termination_margin_weight
+                ),
                 actor_hidden=tuple(args.actor_hidden),
                 actor_layer_norm=not args.no_actor_layer_norm,
                 actor_zero_output=not args.random_actor_output_head,

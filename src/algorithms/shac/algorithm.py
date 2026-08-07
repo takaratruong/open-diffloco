@@ -5,6 +5,7 @@ import time
 import pickle
 import json
 import shutil
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -187,6 +188,7 @@ def train(
     residual_action_scale: float = 0.0,
     differentiate_source_feedback: bool = True,
     effort_limit_scale: float = 1.0,
+    termination_margin_weight: float = 0.0,
 ):
     """
     Train a quadruped locomotion policy using SHAC.
@@ -213,6 +215,8 @@ def train(
         friction_range: (lo, hi) multiplicative factor for geom_friction per episode
         mass_range: (lo, hi) multiplicative factor for body_mass per episode
         effort_limit_scale: Fixed G1 controller torque-limit multiplier.
+        termination_margin_weight: Optional differentiable G1 termination-
+                                   margin surrogate weight.
         kp_range: (lo, hi) absolute range for actuator position gain per episode
         kd_range: (lo, hi) absolute range for actuator velocity gain per episode
         push_velocity_range: Interval root x/y velocity disturbance range.
@@ -263,6 +267,14 @@ def train(
         raise ValueError(
             "actor_bootstrap_delay_steps must be a non-negative integer"
         )
+    if (
+        isinstance(termination_margin_weight, bool)
+        or not math.isfinite(termination_margin_weight)
+        or termination_margin_weight < 0.0
+    ):
+        raise ValueError(
+            "termination_margin_weight must be non-negative and finite"
+        )
     effective_num_envs = num_envs * gradient_accumulation_steps
     steps_per_actor_update = effective_num_envs * unroll_length
 
@@ -288,6 +300,13 @@ def train(
             if resumed_bootstrap_delay != actor_bootstrap_delay_steps:
                 raise ValueError(
                     "actor_bootstrap_delay_steps must match the checkpoint"
+                )
+            resumed_margin_weight = resumed_hparams.get(
+                "termination_margin_weight", 0.0
+            )
+            if resumed_margin_weight != termination_margin_weight:
+                raise ValueError(
+                    "termination_margin_weight must match the checkpoint"
                 )
             print(
                 f"  Loaded hparams: action_scale={resumed_hparams.get('action_scale')}"
@@ -370,7 +389,10 @@ def train(
         max_episode_length=max_episode_length,
         actor_history_len=actor_history_len,
         **(
-            {"effort_limit_scale": effort_limit_scale}
+            {
+                "effort_limit_scale": effort_limit_scale,
+                "termination_margin_weight": termination_margin_weight,
+            }
             if env_variant.startswith("g1_tracking")
             else {}
         ),
@@ -1407,6 +1429,7 @@ def train(
         "friction_range": list(friction_range),
         "mass_range": list(mass_range),
         "effort_limit_scale": effort_limit_scale,
+        "termination_margin_weight": termination_margin_weight,
         "kp_range": list(kp_range),
         "kd_range": list(kd_range),
         "com_offset_range": list(com_offset_range),

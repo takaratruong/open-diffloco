@@ -20,6 +20,38 @@ def _position_error(target: jax.Array, actual: jax.Array) -> jax.Array:
     return jp.sum(jp.square(target - actual), axis=-1)
 
 
+def termination_margin_penalty(
+    *,
+    anchor_z_error: jax.Array,
+    anchor_xy_error: jax.Array,
+    gravity_z_error: jax.Array,
+    distal_z_error: jax.Array,
+) -> jax.Array:
+    """Returns a differentiable surrogate for the four hard RMR limits.
+
+    The penalty is zero inside half of every termination threshold, then grows
+    quadratically to minus one when any individual threshold is reached and is
+    capped beyond it. Its optional environment weight defaults to zero, so the
+    exact upstream RMR reward remains the default task.
+    """
+    thresholds = jp.array([0.25, 1.3, 0.8, 0.4])
+    errors = jp.stack(
+        (
+            anchor_z_error,
+            anchor_xy_error,
+            gravity_z_error,
+            distal_z_error,
+        ),
+        axis=-1,
+    )
+    normalized_excess = jp.clip(
+        (errors / thresholds - 0.5) / 0.5,
+        0.0,
+        1.0,
+    )
+    return -jp.sum(jp.square(normalized_excess), axis=-1)
+
+
 def rmr_regularization_reward(
     *,
     action: jax.Array,

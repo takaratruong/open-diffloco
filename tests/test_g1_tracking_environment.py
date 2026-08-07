@@ -130,6 +130,21 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
                 ):
                     G1TrackingEnv(effort_limit_scale=scale)
 
+    def test_termination_margin_weight_is_default_off_and_validated(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        shifted = G1TrackingEnv(termination_margin_weight=0.5)
+
+        self.assertEqual(self.env.termination_margin_weight, 0.0)
+        self.assertEqual(shifted.termination_margin_weight, 0.5)
+        for weight in (-1.0, float("nan"), float("inf"), True):
+            with self.subTest(weight=weight):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "termination_margin_weight",
+                ):
+                    G1TrackingEnv(termination_margin_weight=weight)
+
     def test_open_diffloco_factory_selects_tracking_environment(self):
         from src.envs.g1_tracking.environment import G1TrackingEnv
         from src.envs.go2.environment import get_go2_env_class

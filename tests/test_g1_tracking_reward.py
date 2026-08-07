@@ -98,6 +98,48 @@ class RMRTrackingRewardTest(unittest.TestCase):
         self.assertTrue(bool(jnp.isfinite(gradient)))
         self.assertLess(float(gradient), 0.0)
 
+    def test_termination_margin_penalty_activates_before_hard_limits(self):
+        from src.envs.g1_tracking.reward import termination_margin_penalty
+
+        inactive = termination_margin_penalty(
+            anchor_z_error=jnp.array(0.125),
+            anchor_xy_error=jnp.array(0.65),
+            gravity_z_error=jnp.array(0.4),
+            distal_z_error=jnp.array(0.2),
+        )
+        anchor_at_limit = termination_margin_penalty(
+            anchor_z_error=jnp.array(0.25),
+            anchor_xy_error=jnp.array(0.0),
+            gravity_z_error=jnp.array(0.0),
+            distal_z_error=jnp.array(0.0),
+        )
+
+        self.assertAlmostEqual(float(inactive), 0.0, places=7)
+        self.assertAlmostEqual(float(anchor_at_limit), -1.0, places=7)
+
+        bounded_explosion = termination_margin_penalty(
+            anchor_z_error=jnp.array(1e9),
+            anchor_xy_error=jnp.array(1e9),
+            gravity_z_error=jnp.array(1e9),
+            distal_z_error=jnp.array(1e9),
+        )
+        self.assertAlmostEqual(float(bounded_explosion), -4.0, places=7)
+
+    def test_termination_margin_penalty_has_height_recovery_gradient(self):
+        from src.envs.g1_tracking.reward import termination_margin_penalty
+
+        gradient = jax.grad(
+            lambda anchor_z_error: termination_margin_penalty(
+                anchor_z_error=anchor_z_error,
+                anchor_xy_error=jnp.array(0.0),
+                gravity_z_error=jnp.array(0.0),
+                distal_z_error=jnp.array(0.0),
+            )
+        )(jnp.array(0.2))
+
+        self.assertTrue(math.isfinite(float(gradient)))
+        self.assertLess(float(gradient), 0.0)
+
     def test_upstream_differentiable_regularizers_match_rmr_weights(self):
         from src.envs.g1_tracking.reward import rmr_regularization_reward
 
