@@ -517,14 +517,14 @@ class G1TrackingEnv:
         )
         return self.reset_at_phase(rng, difficulty, phase)
 
-    def _termination(
+    def termination_errors(
         self,
-        data: mjx.Data,
-        info: dict,
+        *,
+        phase: jax.Array,
         body_pos: jax.Array,
         body_quat: jax.Array,
-    ) -> tuple[jax.Array, jax.Array]:
-        phase = info["phase"]
+    ) -> dict[str, jax.Array]:
+        """Return the four RMR failure errors for rewards or constraints."""
         anchor_z_error = jp.abs(
             self.body_pos_reference[phase, 0, 2] - body_pos[0, 2]
         )
@@ -545,15 +545,35 @@ class G1TrackingEnv:
                 - body_pos[jp.array(self.distal_body_slots), 2]
             )
         )
+        return {
+            "anchor_z_error": anchor_z_error,
+            "anchor_xy_error": anchor_xy_error,
+            "gravity_z_error": gravity_z_error,
+            "distal_z_error": distal_z_error,
+        }
+
+    def _termination(
+        self,
+        data: mjx.Data,
+        info: dict,
+        body_pos: jax.Array,
+        body_quat: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
+        phase = info["phase"]
+        errors = self.termination_errors(
+            phase=phase,
+            body_pos=body_pos,
+            body_quat=body_quat,
+        )
         nan_failure = (
             jp.any(~jp.isfinite(data.qpos))
             | jp.any(~jp.isfinite(data.qvel))
         )
         terminal = (
-            (anchor_z_error > 0.25)
-            | (anchor_xy_error > 1.3)
-            | (gravity_z_error > 0.8)
-            | (distal_z_error > 0.4)
+            (errors["anchor_z_error"] > 0.25)
+            | (errors["anchor_xy_error"] > 1.3)
+            | (errors["gravity_z_error"] > 0.8)
+            | (errors["distal_z_error"] > 0.4)
             | nan_failure
         ).astype(jp.float64)
         clip_end = (
@@ -615,35 +635,14 @@ class G1TrackingEnv:
         reward = reward + regularization_reward
         if self.termination_margin_weight > 0.0:
             phase = pre_reset_info["phase"]
-            anchor_z_error = jp.abs(
-                self.body_pos_reference[phase, 0, 2] - body_pos[0, 2]
-            )
-            anchor_xy_error = jp.linalg.norm(
-                self.body_pos_reference[phase, 0, :2] - body_pos[0, :2]
-            )
-            world_down = jp.array([0.0, 0.0, -1.0])
-            target_down = _quat_apply(
-                _quat_inv(self.body_quat_reference[phase, 0]), world_down
-            )
-            actual_down = _quat_apply(
-                _quat_inv(body_quat[0]), world_down
-            )
-            gravity_z_error = jp.abs(target_down[2] - actual_down[2])
-            distal_z_error = jp.max(
-                jp.abs(
-                    self.body_pos_reference[
-                        phase, jp.array(self.distal_body_slots), 2
-                    ]
-                    - body_pos[jp.array(self.distal_body_slots), 2]
-                )
-            )
             reward = reward + (
                 self.termination_margin_weight
                 * termination_margin_penalty(
-                    anchor_z_error=anchor_z_error,
-                    anchor_xy_error=anchor_xy_error,
-                    gravity_z_error=gravity_z_error,
-                    distal_z_error=distal_z_error,
+                    **self.termination_errors(
+                        phase=phase,
+                        body_pos=body_pos,
+                        body_quat=body_quat,
+                    ),
                 )
             )
         reward = self.reward_scale * reward

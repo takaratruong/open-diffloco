@@ -268,6 +268,34 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         )
         self.assertEqual(float(terminal), 0.0)
 
+    def test_termination_errors_are_reusable_for_collocation_barriers(self):
+        env = self.env
+        state = env.reset_at_phase(
+            jax.random.PRNGKey(29), jnp.array(0.0), jnp.array(0)
+        )
+        body_pos, body_quat, _, _ = env._body_state(state.data)
+        shifted = body_pos.at[0, 2].add(0.2)
+
+        errors = env.termination_errors(
+            phase=state.info["phase"],
+            body_pos=shifted,
+            body_quat=body_quat,
+        )
+
+        self.assertEqual(
+            set(errors),
+            {
+                "anchor_z_error",
+                "anchor_xy_error",
+                "gravity_z_error",
+                "distal_z_error",
+            },
+        )
+        self.assertAlmostEqual(float(errors["anchor_z_error"]), 0.2, places=6)
+        self.assertAlmostEqual(float(errors["anchor_xy_error"]), 0.0, places=6)
+        self.assertAlmostEqual(float(errors["gravity_z_error"]), 0.0, places=6)
+        self.assertAlmostEqual(float(errors["distal_z_error"]), 0.0, places=6)
+
 
 class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
     @classmethod
