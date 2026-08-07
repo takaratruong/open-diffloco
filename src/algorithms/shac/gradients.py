@@ -50,5 +50,7 @@ def aggregate_per_env_gradients(
         "finite_fraction": jp.mean(finite_by_env.astype(jp.float32)),
         "raw_norm_median": jp.median(raw_norm),
         "raw_norm_max": jp.max(raw_norm),
+        "finite_by_env": finite_by_env,
+        "raw_norm_by_env": raw_norm,
     }
     return aggregated, stats

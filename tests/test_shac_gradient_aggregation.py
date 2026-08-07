@@ -49,6 +49,52 @@ class PerEnvironmentGradientAggregationTest(unittest.TestCase):
                 max_norm=1.0,
             )
 
+    def test_shard_statistics_reconstruct_full_population(self):
+        gradients = {
+            "w": jnp.array(
+                [
+                    [1.0, 0.0],
+                    [2.0, 0.0],
+                    [jnp.nan, 1.0],
+                    [0.0, 4.0],
+                    [0.0, 5.0],
+                    [0.0, 6.0],
+                ]
+            )
+        }
+
+        full, full_stats = aggregate_per_env_gradients(
+            gradients, max_norm=2.0
+        )
+        shard_results = [
+            aggregate_per_env_gradients(
+                {"w": gradients["w"][start : start + 3]},
+                max_norm=2.0,
+            )
+            for start in (0, 3)
+        ]
+        shard_means = jnp.stack(
+            [result[0]["w"] for result in shard_results]
+        )
+        norms = jnp.concatenate(
+            [result[1]["raw_norm_by_env"] for result in shard_results]
+        )
+        finite = jnp.concatenate(
+            [result[1]["finite_by_env"] for result in shard_results]
+        )
+
+        np.testing.assert_allclose(jnp.mean(shard_means, axis=0), full["w"])
+        self.assertAlmostEqual(
+            float(jnp.mean(finite.astype(jnp.float32))),
+            float(full_stats["finite_fraction"]),
+        )
+        self.assertAlmostEqual(
+            float(jnp.median(norms)), float(full_stats["raw_norm_median"])
+        )
+        self.assertAlmostEqual(
+            float(jnp.max(norms)), float(full_stats["raw_norm_max"])
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
