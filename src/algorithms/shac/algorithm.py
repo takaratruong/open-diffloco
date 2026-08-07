@@ -114,6 +114,7 @@ def train(
     total_steps: int = 100_000,
     unroll_length: int = 12,
     num_envs: int = 256,
+    gradient_accumulation_steps: int = 1,
     actor_lr: float = 5e-3,
     critic_lr: float = 5e-4,
     gamma: float = 0.99,
@@ -175,6 +176,7 @@ def train(
         total_steps: Total environment steps to train
         unroll_length: Number of steps per trajectory rollout (short horizon h)
         num_envs: Number of parallel environments (N)
+        gradient_accumulation_steps: Equal microbatches averaged per update
         actor_lr: Actor learning rate
         critic_lr: Critic learning rate
         gamma: Discount factor
@@ -224,6 +226,16 @@ def train(
             "initial_full_actor_policy is standalone and cannot use "
             "residual_action_scale"
         )
+    if (
+        isinstance(gradient_accumulation_steps, bool)
+        or not isinstance(gradient_accumulation_steps, int)
+        or gradient_accumulation_steps < 1
+    ):
+        raise ValueError(
+            "gradient_accumulation_steps must be a positive integer"
+        )
+    effective_num_envs = num_envs * gradient_accumulation_steps
+    steps_per_actor_update = effective_num_envs * unroll_length
 
     # Handle checkpoint resumption
     resumed_state = None
@@ -234,6 +246,13 @@ def train(
         resumed_state, resumed_hparams, resumed_step = load_checkpoint(resume_from)
         if resumed_hparams:
             print(f"Resuming from step {resumed_step}")
+            resumed_accumulation_steps = resumed_hparams.get(
+                "gradient_accumulation_steps", 1
+            )
+            if resumed_accumulation_steps != gradient_accumulation_steps:
+                raise ValueError(
+                    "gradient_accumulation_steps must match the checkpoint"
+                )
             print(
                 f"  Loaded hparams: action_scale={resumed_hparams.get('action_scale')}"
             )
@@ -373,7 +392,7 @@ def train(
 
     # Linear LR decay
     if use_lr_decay:
-        total_iters = total_steps // (num_envs * unroll_length)
+        total_iters = total_steps // steps_per_actor_update
         lr_floor = 0.62
         actor_schedule = optax.linear_schedule(
             init_value=actor_lr,
@@ -405,8 +424,10 @@ def train(
     critic_opt_state = critic_opt.init(critic_params)
 
     # Initialize environments at difficulty=0 (flat ground)
-    env_keys = jax.random.split(k3, num_envs)
-    env_state = jax.vmap(env.reset)(env_keys, jp.zeros(num_envs))
+    env_keys = jax.random.split(k3, effective_num_envs)
+    env_state = jax.vmap(env.reset)(
+        env_keys, jp.zeros(effective_num_envs)
+    )
     actor_normalizer = canonicalize_normalizer_dtype(
         actor_normalizer, env_state.obs.dtype
     )
@@ -664,10 +685,13 @@ def train(
         # Per-env difficulty: a fixed fraction of envs are held at difficulty=0
         # The mask is resampled every unroll
         zero_diff_mask = (
-            jax.random.uniform(diff_mask_key, (num_envs,)) < zero_difficulty_frac
+            jax.random.uniform(diff_mask_key, (effective_num_envs,))
+            < zero_difficulty_frac
         )
         per_env_difficulty = jp.where(
-            zero_diff_mask, jp.zeros(num_envs), jp.full((num_envs,), difficulty)
+            zero_diff_mask,
+            jp.zeros(effective_num_envs),
+            jp.full((effective_num_envs,), difficulty),
         )
 
         # Inject per-env difficulty into all non-zeroed-out env states
@@ -677,16 +701,16 @@ def train(
 
         # Pre-sample all stochastic inputs (reparameterization)
         all_action_noise = jax.random.normal(
-            noise_key, (num_envs, unroll_length, env.action_dim)
+            noise_key, (effective_num_envs, unroll_length, env.action_dim)
         )
         all_velocity_pushes = jax.random.uniform(
             push_key,
-            (num_envs, unroll_length, 2),
+            (effective_num_envs, unroll_length, 2),
             minval=_push_velocity_lo,
             maxval=_push_velocity_hi,
         )
         all_terrain_bump_innovations = jax.random.normal(
-            bump_key, (num_envs, unroll_length, 4, 3)
+            bump_key, (effective_num_envs, unroll_length, 4, 3)
         )
         all_randomization = (
             all_action_noise,
@@ -849,7 +873,7 @@ def train(
             critic_normalizer=new_critic_norm,
             actor_opt=new_actor_opt,
             critic_opt=new_critic_opt,
-            step=state.step + num_envs * unroll_length,
+            step=state.step + steps_per_actor_update,
         )
 
         # Collect metrics
@@ -975,7 +999,7 @@ def train(
     diag_log = []
     last_checkpoint_step = state.step
 
-    steps_per_iter = num_envs * unroll_length
+    steps_per_iter = steps_per_actor_update
     start_iter = resumed_step // steps_per_iter
     total_iters = total_steps // steps_per_iter
 
@@ -1174,6 +1198,9 @@ def train(
         "total_steps": total_steps,
         "unroll_length": unroll_length,
         "num_envs": num_envs,
+        "gradient_accumulation_steps": gradient_accumulation_steps,
+        "effective_num_envs": effective_num_envs,
+        "steps_per_actor_update": steps_per_actor_update,
         "actor_lr": actor_lr,
         "critic_lr": critic_lr,
         "gamma": gamma,

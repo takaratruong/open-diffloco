@@ -36,7 +36,16 @@ def build_train_kwargs(
     actor_hidden: tuple[int, ...] = (512, 256, 128),
     actor_layer_norm: bool = True,
     actor_zero_output: bool = True,
+    gradient_accumulation_steps: int = 1,
 ) -> dict:
+    if (
+        isinstance(gradient_accumulation_steps, bool)
+        or not isinstance(gradient_accumulation_steps, int)
+        or gradient_accumulation_steps < 1
+    ):
+        raise ValueError(
+            "gradient_accumulation_steps must be a positive integer"
+        )
     if (
         source_actor_policy is not None
         and initial_full_actor_policy is not None
@@ -103,6 +112,7 @@ def build_train_kwargs(
             "actor_hidden": actor_hidden,
             "actor_layer_norm": actor_layer_norm,
             "actor_zero_output": actor_zero_output,
+            "gradient_accumulation_steps": gradient_accumulation_steps,
         }
     )
     return kwargs
@@ -134,6 +144,9 @@ def main() -> None:
     parser.add_argument("--action-noise-std-end", type=float)
     parser.add_argument("--actor-bootstrap-scale", type=float, default=1.0)
     parser.add_argument("--unroll-length", type=int, default=24)
+    parser.add_argument(
+        "--gradient-accumulation-steps", type=int, default=1
+    )
     parser.add_argument("--unbounded-actions", action="store_true")
     parser.add_argument("--validated-task", action="store_true")
     parser.add_argument("--source-policy-checkpoint", type=Path)
@@ -206,6 +219,9 @@ def main() -> None:
                 actor_hidden=tuple(args.actor_hidden),
                 actor_layer_norm=not args.no_actor_layer_norm,
                 actor_zero_output=not args.random_actor_output_head,
+                gradient_accumulation_steps=(
+                    args.gradient_accumulation_steps
+                ),
             )
         )
 

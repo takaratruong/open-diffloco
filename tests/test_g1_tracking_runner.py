@@ -84,6 +84,37 @@ class G1TrackingRunnerTest(unittest.TestCase):
         self.assertEqual(kwargs["action_noise_std_start"], 1.0)
         self.assertEqual(kwargs["action_noise_std_end"], 1.0)
 
+    def test_native_rmr_runner_transports_gradient_accumulation(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        kwargs = build_train_kwargs(
+            steps=1_572_864,
+            num_envs=256,
+            seed=3,
+            checkpoint_interval=122_880,
+            unroll_length=12,
+            gradient_accumulation_steps=4,
+        )
+
+        self.assertEqual(kwargs["num_envs"], 256)
+        self.assertEqual(kwargs["gradient_accumulation_steps"], 4)
+
+    def test_native_rmr_runner_rejects_invalid_gradient_accumulation(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        for accumulation_steps in (0, -1, 1.5, True):
+            with self.subTest(accumulation_steps=accumulation_steps):
+                with self.assertRaisesRegex(
+                    ValueError, "gradient_accumulation_steps"
+                ):
+                    build_train_kwargs(
+                        steps=49_152,
+                        num_envs=256,
+                        seed=3,
+                        checkpoint_interval=12_288,
+                        gradient_accumulation_steps=accumulation_steps,
+                    )
+
     def test_native_rmr_runner_can_select_linear_unbounded_action_support(self):
         from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
 
