@@ -191,7 +191,7 @@ independent environments. Record all three values in `hparams.json`.
 
 ```bash
 PYTHONPATH=. /home/ubuntu/miniconda3/envs/rl/bin/python -m unittest \
-  tests.test_g1_tracking_runner tests.test_shac_checkpointing -v
+  tests.test_g1_tracking_runner tests.test_shac_checkpoint_archival -v
 git add tools/run_g1_tracking_rmr50_shac.py tests/test_g1_tracking_runner.py \
   src/algorithms/shac/algorithm.py
 git commit -m "feat: configure SHAC gradient accumulation"
@@ -255,7 +255,7 @@ PYTHONPATH=. /home/ubuntu/miniconda3/envs/rl/bin/python -m unittest \
   tests.test_shac_microbatch \
   tests.test_shac_gradient_aggregation \
   tests.test_g1_tracking_runner \
-  tests.test_shac_checkpointing -v
+  tests.test_shac_checkpoint_archival -v
 git add src/algorithms/shac/algorithm.py tests/test_shac_accumulated_update.py
 git commit -m "feat: accumulate SHAC gradients across microbatches"
 ```
