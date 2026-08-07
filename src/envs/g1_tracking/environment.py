@@ -451,7 +451,6 @@ class G1TrackingEnv:
             "rew_body_angular_velocity": zero,
             "rew_action_rate": zero,
             "rew_joint_limit": zero,
-            "rew_termination_margin": zero,
             # Compatibility names for the current SHAC logger.
             "vel_x": zero,
             "vel_y": zero,
@@ -613,43 +612,42 @@ class G1TrackingEnv:
                 soft_joint_upper=self.soft_joint_upper,
             )
         )
-        phase = pre_reset_info["phase"]
-        anchor_z_error = jp.abs(
-            self.body_pos_reference[phase, 0, 2] - body_pos[0, 2]
-        )
-        anchor_xy_error = jp.linalg.norm(
-            self.body_pos_reference[phase, 0, :2] - body_pos[0, :2]
-        )
-        world_down = jp.array([0.0, 0.0, -1.0])
-        target_down = _quat_apply(
-            _quat_inv(self.body_quat_reference[phase, 0]), world_down
-        )
-        actual_down = _quat_apply(_quat_inv(body_quat[0]), world_down)
-        gravity_z_error = jp.abs(target_down[2] - actual_down[2])
-        distal_z_error = jp.max(
-            jp.abs(
-                self.body_pos_reference[
-                    phase, jp.array(self.distal_body_slots), 2
-                ]
-                - body_pos[jp.array(self.distal_body_slots), 2]
+        reward = reward + regularization_reward
+        if self.termination_margin_weight > 0.0:
+            phase = pre_reset_info["phase"]
+            anchor_z_error = jp.abs(
+                self.body_pos_reference[phase, 0, 2] - body_pos[0, 2]
             )
-        )
-        margin_penalty = termination_margin_penalty(
-            anchor_z_error=anchor_z_error,
-            anchor_xy_error=anchor_xy_error,
-            gravity_z_error=gravity_z_error,
-            distal_z_error=distal_z_error,
-        )
-        reward = self.reward_scale * (
-            reward
-            + regularization_reward
-            + self.termination_margin_weight * margin_penalty
-        )
-        components = {
-            **components,
-            **regularization_components,
-            "termination_margin": margin_penalty,
-        }
+            anchor_xy_error = jp.linalg.norm(
+                self.body_pos_reference[phase, 0, :2] - body_pos[0, :2]
+            )
+            world_down = jp.array([0.0, 0.0, -1.0])
+            target_down = _quat_apply(
+                _quat_inv(self.body_quat_reference[phase, 0]), world_down
+            )
+            actual_down = _quat_apply(
+                _quat_inv(body_quat[0]), world_down
+            )
+            gravity_z_error = jp.abs(target_down[2] - actual_down[2])
+            distal_z_error = jp.max(
+                jp.abs(
+                    self.body_pos_reference[
+                        phase, jp.array(self.distal_body_slots), 2
+                    ]
+                    - body_pos[jp.array(self.distal_body_slots), 2]
+                )
+            )
+            reward = reward + (
+                self.termination_margin_weight
+                * termination_margin_penalty(
+                    anchor_z_error=anchor_z_error,
+                    anchor_xy_error=anchor_xy_error,
+                    gravity_z_error=gravity_z_error,
+                    distal_z_error=distal_z_error,
+                )
+            )
+        reward = self.reward_scale * reward
+        components = {**components, **regularization_components}
         done, terminal = self._termination(
             data, pre_reset_info, body_pos, body_quat
         )
@@ -753,7 +751,6 @@ class G1TrackingEnv:
             "rew_body_angular_velocity": components["body_angular_velocity"],
             "rew_action_rate": components["action_rate"],
             "rew_joint_limit": components["joint_limit"],
-            "rew_termination_margin": components["termination_margin"],
             # Current SHAC logger compatibility: these carry errors, not velocity.
             "vel_x": anchor_position_error,
             "vel_y": body_position_error,
