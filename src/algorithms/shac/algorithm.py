@@ -26,6 +26,12 @@ from src.envs.go2.environment import Go2Env
 from src.envs.go2.terrain import differentiated_ou_foot_forces
 from src.core.utils import compute_grad_norm
 from src.algorithms.shac.gradients import aggregate_per_env_gradients
+from src.algorithms.shac.microbatch import (
+    flatten_population,
+    mean_shard_trees,
+    reshape_population,
+    summarize_shard_stats,
+)
 from src.algorithms.shac.initialization import (
     canonicalize_normalizer_dtype,
     canonicalize_step_dtype,
@@ -668,6 +674,31 @@ def train(
 
         return jp.mean(jp.square(values - jax.lax.stop_gradient(targets)))
 
+    def aggregate_env_gradients(per_env_grads, max_norm):
+        """Aggregates one equal-sized environment shard."""
+        if max_norm is not None:
+            return aggregate_per_env_gradients(
+                per_env_grads, max_norm=max_norm
+            )
+
+        leaves = jax.tree_util.tree_leaves(per_env_grads)
+        shard_size = leaves[0].shape[0]
+        grads = jax.tree_util.tree_map(
+            lambda grad: jp.nanmean(grad, axis=0), per_env_grads
+        )
+        grads = jax.tree_util.tree_map(
+            lambda grad: jp.where(jp.isfinite(grad), grad, 0.0), grads
+        )
+        return grads, {
+            "finite_fraction": jp.array(1.0, dtype=jp.float32),
+            "raw_norm_median": jp.array(jp.nan, dtype=jp.float32),
+            "raw_norm_max": jp.array(jp.nan, dtype=jp.float32),
+            "finite_by_env": jp.ones((shard_size,), dtype=jp.bool_),
+            "raw_norm_by_env": jp.full(
+                (shard_size,), jp.nan, dtype=jp.float32
+            ),
+        }
+
     @jax.jit
     def train_step(state: TrainState):
         key, noise_key, push_key, bump_key, diff_mask_key, _ = jax.random.split(
@@ -726,32 +757,86 @@ def train(
 
         # Actor update
         actor_grad_fn = jax.value_and_grad(actor_loss, has_aux=True)
-        (losses, (trajs, final_states)), grads = jax.vmap(
-            actor_grad_fn, in_axes=(None, None, None, None, 0, 0, None)
-        )(
-            state.actor_params,
-            state.target_critic_params,
-            state.normalizer,
-            state.critic_normalizer,
-            updated_env_state,
-            all_randomization,
-            current_noise_std,
-        )
-
-        if actor_per_env_grad_clip is None:
-            grads = jax.tree_util.tree_map(lambda g: jp.nanmean(g, axis=0), grads)
-            grads = jax.tree_util.tree_map(
-                lambda g: jp.where(jp.isfinite(g), g, 0.0), grads
+        if gradient_accumulation_steps == 1:
+            (losses, (trajs, final_states)), per_env_grads = jax.vmap(
+                actor_grad_fn,
+                in_axes=(None, None, None, None, 0, 0, None),
+            )(
+                state.actor_params,
+                state.target_critic_params,
+                state.normalizer,
+                state.critic_normalizer,
+                updated_env_state,
+                all_randomization,
+                current_noise_std,
             )
-            actor_grad_stats = {
-                "finite_fraction": jp.array(1.0, dtype=jp.float32),
-                "raw_norm_median": jp.array(jp.nan, dtype=jp.float32),
-                "raw_norm_max": jp.array(jp.nan, dtype=jp.float32),
-            }
+            grads, actor_grad_stats = aggregate_env_gradients(
+                per_env_grads, actor_per_env_grad_clip
+            )
         else:
-            grads, actor_grad_stats = aggregate_per_env_gradients(
-                grads, max_norm=actor_per_env_grad_clip
+            sharded_env_state = reshape_population(
+                updated_env_state,
+                accumulation_steps=gradient_accumulation_steps,
+                microbatch_size=num_envs,
             )
+            sharded_randomization = reshape_population(
+                all_randomization,
+                accumulation_steps=gradient_accumulation_steps,
+                microbatch_size=num_envs,
+            )
+
+            def actor_microbatch_step(_, inputs):
+                shard_env_state, shard_randomization = inputs
+                (
+                    shard_losses,
+                    (shard_trajs, shard_final_states),
+                ), shard_per_env_grads = jax.vmap(
+                    actor_grad_fn,
+                    in_axes=(None, None, None, None, 0, 0, None),
+                )(
+                    state.actor_params,
+                    state.target_critic_params,
+                    state.normalizer,
+                    state.critic_normalizer,
+                    shard_env_state,
+                    shard_randomization,
+                    current_noise_std,
+                )
+                shard_grads, shard_grad_stats = aggregate_env_gradients(
+                    shard_per_env_grads, actor_per_env_grad_clip
+                )
+                return None, (
+                    shard_losses,
+                    shard_trajs,
+                    shard_final_states,
+                    shard_grads,
+                    {
+                        "finite_by_env": shard_grad_stats[
+                            "finite_by_env"
+                        ],
+                        "raw_norm_by_env": shard_grad_stats[
+                            "raw_norm_by_env"
+                        ],
+                    },
+                )
+
+            _, actor_shard_outputs = jax.lax.scan(
+                actor_microbatch_step,
+                None,
+                (sharded_env_state, sharded_randomization),
+            )
+            (
+                shard_losses,
+                shard_trajs,
+                shard_final_states,
+                shard_grads,
+                shard_grad_stats,
+            ) = actor_shard_outputs
+            losses = flatten_population(shard_losses)
+            trajs = flatten_population(shard_trajs)
+            final_states = flatten_population(shard_final_states)
+            grads = mean_shard_trees(shard_grads)
+            actor_grad_stats = summarize_shard_stats(shard_grad_stats)
 
         actor_grad_norm = compute_grad_norm(grads)
 
@@ -794,36 +879,97 @@ def train(
         def critic_update_step(carry, _):
             c_params, c_opt_state = carry
 
-            c_losses, c_grads = jax.vmap(
-                jax.value_and_grad(single_env_critic_loss, argnums=0),
-                in_axes=(None, None, None, 0, 0, 0, 0, 0, 0),
-            )(
-                c_params,
-                state.target_critic_params,
-                state.critic_normalizer,
-                all_obs,
-                all_rewards,
-                all_dones,
-                all_terminals,
-                all_bootstrap_obs,
-                all_final_obs,
+            critic_grad_fn = jax.value_and_grad(
+                single_env_critic_loss, argnums=0
             )
-
-            if critic_per_env_grad_clip is None:
-                c_grads = jax.tree_util.tree_map(
-                    lambda g: jp.nanmean(g, axis=0), c_grads
+            if gradient_accumulation_steps == 1:
+                c_losses, c_per_env_grads = jax.vmap(
+                    critic_grad_fn,
+                    in_axes=(None, None, None, 0, 0, 0, 0, 0, 0),
+                )(
+                    c_params,
+                    state.target_critic_params,
+                    state.critic_normalizer,
+                    all_obs,
+                    all_rewards,
+                    all_dones,
+                    all_terminals,
+                    all_bootstrap_obs,
+                    all_final_obs,
                 )
-                c_grads = jax.tree_util.tree_map(
-                    lambda g: jp.where(jp.isfinite(g), g, 0.0), c_grads
+                c_grads, critic_grad_stats = aggregate_env_gradients(
+                    c_per_env_grads, critic_per_env_grad_clip
                 )
-                critic_grad_stats = {
-                    "finite_fraction": jp.array(1.0, dtype=jp.float32),
-                    "raw_norm_median": jp.array(jp.nan, dtype=jp.float32),
-                    "raw_norm_max": jp.array(jp.nan, dtype=jp.float32),
-                }
             else:
-                c_grads, critic_grad_stats = aggregate_per_env_gradients(
-                    c_grads, max_norm=critic_per_env_grad_clip
+                sharded_critic_inputs = reshape_population(
+                    (
+                        all_obs,
+                        all_rewards,
+                        all_dones,
+                        all_terminals,
+                        all_bootstrap_obs,
+                        all_final_obs,
+                    ),
+                    accumulation_steps=gradient_accumulation_steps,
+                    microbatch_size=num_envs,
+                )
+
+                def critic_microbatch_step(_, shard_inputs):
+                    (
+                        shard_obs,
+                        shard_rewards,
+                        shard_dones,
+                        shard_terminals,
+                        shard_bootstrap_obs,
+                        shard_final_obs,
+                    ) = shard_inputs
+                    shard_losses, shard_per_env_grads = jax.vmap(
+                        critic_grad_fn,
+                        in_axes=(None, None, None, 0, 0, 0, 0, 0, 0),
+                    )(
+                        c_params,
+                        state.target_critic_params,
+                        state.critic_normalizer,
+                        shard_obs,
+                        shard_rewards,
+                        shard_dones,
+                        shard_terminals,
+                        shard_bootstrap_obs,
+                        shard_final_obs,
+                    )
+                    shard_grads, shard_grad_stats = (
+                        aggregate_env_gradients(
+                            shard_per_env_grads,
+                            critic_per_env_grad_clip,
+                        )
+                    )
+                    return None, (
+                        shard_losses,
+                        shard_grads,
+                        {
+                            "finite_by_env": shard_grad_stats[
+                                "finite_by_env"
+                            ],
+                            "raw_norm_by_env": shard_grad_stats[
+                                "raw_norm_by_env"
+                            ],
+                        },
+                    )
+
+                _, critic_shard_outputs = jax.lax.scan(
+                    critic_microbatch_step,
+                    None,
+                    sharded_critic_inputs,
+                )
+                (
+                    shard_c_losses,
+                    shard_c_grads,
+                    shard_critic_grad_stats,
+                ) = critic_shard_outputs
+                c_losses = flatten_population(shard_c_losses)
+                c_grads = mean_shard_trees(shard_c_grads)
+                critic_grad_stats = summarize_shard_stats(
+                    shard_critic_grad_stats
                 )
 
             c_updates, new_c_opt = critic_opt.update(c_grads, c_opt_state)
