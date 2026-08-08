@@ -467,6 +467,10 @@ class G1TrackingEnv:
             "body_orientation_error": zero,
             "body_linear_velocity_error": zero,
             "body_angular_velocity_error": zero,
+            "termination_anchor_z_error": zero,
+            "termination_anchor_xy_error": zero,
+            "termination_gravity_z_error": zero,
+            "termination_distal_z_error": zero,
             "rew_anchor_position": zero,
             "rew_anchor_orientation": zero,
             "rew_body_position": zero,
@@ -757,6 +761,11 @@ class G1TrackingEnv:
                 axis=-1,
             )
         )
+        termination_errors = self.termination_errors(
+            phase=next_phase,
+            body_pos=body_pos,
+            body_quat=body_quat,
+        )
         contact_force = jp.sum(jp.abs(data.qfrc_constraint[:6]))
         metrics = {
             "contact_force": contact_force,
@@ -766,6 +775,18 @@ class G1TrackingEnv:
             "body_orientation_error": body_orientation_error,
             "body_linear_velocity_error": body_linear_velocity_error,
             "body_angular_velocity_error": body_angular_velocity_error,
+            "termination_anchor_z_error": termination_errors[
+                "anchor_z_error"
+            ],
+            "termination_anchor_xy_error": termination_errors[
+                "anchor_xy_error"
+            ],
+            "termination_gravity_z_error": termination_errors[
+                "gravity_z_error"
+            ],
+            "termination_distal_z_error": termination_errors[
+                "distal_z_error"
+            ],
             "rew_anchor_position": components["anchor_position"],
             "rew_anchor_orientation": components["anchor_orientation"],
             "rew_body_position": components["body_position"],

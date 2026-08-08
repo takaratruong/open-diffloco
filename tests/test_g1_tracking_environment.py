@@ -297,6 +297,16 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         self.assertAlmostEqual(float(errors["gravity_z_error"]), 0.0, places=6)
         self.assertAlmostEqual(float(errors["distal_z_error"]), 0.0, places=6)
 
+    def test_transition_metrics_reserve_all_pre_reset_termination_errors(self):
+        expected_keys = {
+            "termination_anchor_z_error",
+            "termination_anchor_xy_error",
+            "termination_gravity_z_error",
+            "termination_distal_z_error",
+        }
+
+        self.assertTrue(expected_keys.issubset(self.env._init_metrics()))
+
 
 class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
     @classmethod

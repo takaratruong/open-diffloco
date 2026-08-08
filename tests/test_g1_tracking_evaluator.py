@@ -12,10 +12,13 @@ import numpy as np
 from src.core.networks import Actor
 from tools.evaluate_g1_tracking import (
     _load_policy,
+    build_parser,
     configure_jax,
     load_rmr_policy,
     make_evaluation_env,
+    remaining_reference_transitions,
     scale_policy_action,
+    summarize_stability_errors,
 )
 
 RMR_CHECKPOINT = Path(
@@ -28,6 +31,42 @@ RMR_ACTIONS = Path(
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    def test_parser_defaults_to_complete_named_reference_suffix(self):
+        args = build_parser().parse_args(
+            [
+                "--output-dir",
+                "/tmp/g1-evaluation",
+                "--reference-path",
+                "/tmp/dance.npz",
+                "--reference-stride",
+                "1",
+            ]
+        )
+
+        self.assertIsNone(args.max_steps)
+        self.assertEqual(args.reference_path, Path("/tmp/dance.npz"))
+        self.assertEqual(args.reference_stride, 1)
+
+    def test_complete_suffix_uses_every_carried_reference_transition(self):
+        self.assertEqual(remaining_reference_transitions(500, 0, 1), 499)
+        self.assertEqual(remaining_reference_transitions(500, 120, 1), 379)
+        self.assertEqual(remaining_reference_transitions(121, 0, 2), 60)
+
+    def test_stability_summary_reports_maximum_termination_errors(self):
+        summary = summarize_stability_errors(
+            {
+                "anchor_z_error": np.asarray([0.01, 0.12]),
+                "anchor_xy_error": np.asarray([0.04, 0.08]),
+                "gravity_z_error": np.asarray([0.10, 0.31]),
+                "distal_z_error": np.asarray([0.03, 0.09]),
+            }
+        )
+
+        self.assertEqual(summary["max_anchor_z_error"], 0.12)
+        self.assertEqual(summary["max_anchor_xy_error"], 0.08)
+        self.assertEqual(summary["max_gravity_z_error"], 0.31)
+        self.assertEqual(summary["max_distal_z_error"], 0.09)
+
     def test_checkpoint_loader_infers_compact_actor_architecture(self):
         env = SimpleNamespace(
             action_dim=3,
