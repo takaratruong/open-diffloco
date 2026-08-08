@@ -25,7 +25,8 @@ observation noise, pushes, terrain randomization, and adaptive phase sampling.
   joints
 - Selected inclusive source frames: 122 through 422
 - Selected duration: 10.0 seconds from 301 source samples
-- Expected RMR output: 500 samples at 50 Hz
+- Expected RMR output: 500 states at 50 Hz, yielding 499 carried control
+  transitions because RMR excludes the ten-second endpoint
 - Dataset source:
   <https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset>
 
@@ -93,13 +94,13 @@ the existing 100 Hz `X`/`V` reference remains stride two. Validate that
 `reference_stride / reference_fps` equals the 20 ms control interval.
 
 Do not hard-code a 60-step episode for the new reference. Clip-end completion
-is 500 carried control steps. Training environments continue across 12-step
+is 499 carried control transitions. Training environments continue across 12-step
 gradient windows and reset only at a true terminal or the actual reference end.
 
 Use seed zero only. Evaluate fixed actor updates 10, 20, 30, 40, 50, and 128
 without simulator-state replay. Select first by full-reference carried
 survival, then reward and reference-relative tracking errors. Publish the
-selected full 500-step trajectory, summary, video, and contact sheet.
+selected full 499-transition trajectory, summary, video, and contact sheet.
 
 ## Evidence Gates
 
@@ -124,7 +125,8 @@ selected full 500-step trajectory, summary, video, and contact sheet.
 
 ### Behavioral gate
 
-The selected actor must carry simulator state for all 500 control steps with:
+The selected actor must carry simulator state for all 499 control transitions
+with:
 
 - zero true terminals and zero intermediate resets;
 - mean anchor-position error no greater than 0.15 m;
