@@ -4,9 +4,38 @@ import unittest
 import numpy as np
 
 from tools.analyze_g1_collocation_transfer import build_parser, summarize_warm_start
+from tools.validate_g1_carried_reset_bank import validate_bank_arrays
 
 
 class G1CollocationTransferTest(unittest.TestCase):
+    def test_named_reference_bank_accepts_stride_one_carried_prefix(self):
+        rows = 4
+        arrays = {
+            "qpos": np.zeros((rows, 36), dtype=np.float64),
+            "qvel": np.zeros((rows, 35), dtype=np.float64),
+            "phase": np.arange(rows, dtype=np.int32),
+            "action": np.zeros((rows, 29), dtype=np.float64),
+            "records": np.zeros((rows, 8), dtype=np.float64),
+            "termination_errors": np.zeros((rows, 4), dtype=np.float64),
+            "termination_thresholds": np.array(
+                [0.25, 1.3, 0.8, 0.4], dtype=np.float64
+            ),
+        }
+        arrays["qpos"][:, 3] = 1.0
+
+        summary = validate_bank_arrays(
+            arrays,
+            expected_rows=rows,
+            phase_start=0,
+            phase_stride=1,
+            bank_start=2,
+        )
+
+        self.assertEqual(summary["bank_rows"], 2)
+        self.assertEqual(summary["phase_first"], 0)
+        self.assertEqual(summary["phase_last"], 3)
+        self.assertEqual(summary["bank_phase_first"], 2)
+
     def test_capture_cli_transports_explicit_reference_contract(self):
         args = build_parser().parse_args(
             [
