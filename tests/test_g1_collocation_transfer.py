@@ -1,11 +1,29 @@
+from pathlib import Path
 import unittest
 
 import numpy as np
 
-from tools.analyze_g1_collocation_transfer import summarize_warm_start
+from tools.analyze_g1_collocation_transfer import build_parser, summarize_warm_start
 
 
 class G1CollocationTransferTest(unittest.TestCase):
+    def test_capture_cli_transports_explicit_reference_contract(self):
+        args = build_parser().parse_args(
+            [
+                "--checkpoint",
+                "/tmp/actor.pkl",
+                "--output-dir",
+                "/tmp/output",
+                "--reference-path",
+                "/tmp/dance.npz",
+                "--reference-stride",
+                "1",
+            ]
+        )
+
+        self.assertEqual(args.reference_path, Path("/tmp/dance.npz"))
+        self.assertEqual(args.reference_stride, 1)
+
     def test_complete_finite_rollout_is_admitted_as_warm_start(self):
         records = np.array(
             [

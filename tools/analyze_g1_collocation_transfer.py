@@ -127,6 +127,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--phase", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=60)
+    parser.add_argument("--reference-path", type=Path)
+    parser.add_argument("--reference-stride", type=int)
     parser.add_argument("--solver-iterations", type=int, default=4)
     parser.add_argument("--solver-ls-iterations", type=int, default=5)
     return parser
@@ -152,6 +154,8 @@ def main() -> None:
         "g1_tracking_rmr_50hz_validated",
         solver_iterations=args.solver_iterations,
         solver_ls_iterations=args.solver_ls_iterations,
+        reference_path=args.reference_path,
+        reference_stride=args.reference_stride,
     )
     if args.phase < 0 or args.phase >= env.reference_length:
         raise SystemExit("--phase must index the reference")
