@@ -23,7 +23,7 @@ from src.envs.g1_tracking.failure_collocation import (
     corrected_episode_mapping,
     failure_objective,
     multiple_shooting_equalities,
-    physical_path_slack_groups,
+    physical_path_slack_components,
     rollout_segment,
     stateless_physics_step,
     world_body_kinematics,
@@ -239,9 +239,9 @@ def _run_smoke(args: argparse.Namespace) -> dict:
             segment_steps=2,
         )
 
-    def slack_group_fn(current_decision):
+    def slack_component_fn(current_decision):
         knot_qpos, knot_qvel = knots(current_decision)
-        return physical_path_slack_groups(
+        return physical_path_slack_components(
             env,
             knot_qpos,
             knot_qvel,
@@ -260,8 +260,8 @@ def _run_smoke(args: argparse.Namespace) -> dict:
             (current_decision,),
             (current_direction,),
         )
-        slack_groups, slack_group_jvp = jax.jvp(
-            slack_group_fn,
+        slack_components, slack_component_jvp = jax.jvp(
+            slack_component_fn,
             (current_decision,),
             (current_direction,),
         )
@@ -270,8 +270,8 @@ def _run_smoke(args: argparse.Namespace) -> dict:
             objective_gradient,
             equalities,
             equality_jvp,
-            slack_groups,
-            slack_group_jvp,
+            slack_components,
+            slack_component_jvp,
         )
 
     (
@@ -279,23 +279,38 @@ def _run_smoke(args: argparse.Namespace) -> dict:
         objective_gradient,
         equalities,
         equality_jvp,
-        slack_groups,
-        slack_group_jvp,
+        slack_components,
+        slack_component_jvp,
     ) = derivative_probe(decision, direction)
-    differentiable_slacks, contact_slacks = slack_groups
-    differentiable_slack_jvp, contact_slack_jvp = slack_group_jvp
     equality_array = np.asarray(equalities)
-    differentiable_slack_array = np.asarray(differentiable_slacks)
-    contact_slack_array = np.asarray(contact_slacks)
-    contact_slack_jvp_array = np.asarray(contact_slack_jvp)
+    slack_arrays = {
+        name: np.asarray(value) for name, value in slack_components.items()
+    }
+    slack_jvp_arrays = {
+        name: np.asarray(value)
+        for name, value in slack_component_jvp.items()
+    }
     if not np.isfinite(float(objective)):
         raise ValueError("physical objective must be finite")
     if not np.isfinite(equality_array).all():
         raise ValueError("physical equalities must be finite")
-    if not np.isfinite(differentiable_slack_array).all():
-        raise ValueError("differentiable physical slacks must be finite")
-    if not np.isfinite(contact_slack_array).all():
-        raise ValueError("contact diagnostic values must be finite")
+    for name, values in slack_arrays.items():
+        if not np.isfinite(values).all():
+            raise ValueError(f"{name} physical slack values must be finite")
+    for name in ("terminal", "action", "torque"):
+        if not np.isfinite(slack_jvp_arrays[name]).all():
+            raise ValueError(f"{name} physical slack JVP must be finite")
+    differentiable_slack_array = np.concatenate(
+        tuple(slack_arrays[name] for name in ("terminal", "action", "torque"))
+    )
+    differentiable_slack_jvp_array = np.concatenate(
+        tuple(
+            slack_jvp_arrays[name]
+            for name in ("terminal", "action", "torque")
+        )
+    )
+    contact_slack_array = slack_arrays["contact"]
+    contact_slack_jvp_array = slack_jvp_arrays["contact"]
 
     full_knot_phases = np.asarray(window.knot_phases, dtype=np.int32)
     full_knot_qpos = jnp.asarray(env.qpos_reference[full_knot_phases])
@@ -486,7 +501,13 @@ def _run_smoke(args: argparse.Namespace) -> dict:
         ),
         "objective_gradient": summarize_derivative(objective_gradient),
         "equality_jvp": summarize_derivative(equality_jvp),
-        "constraint_jvp": summarize_derivative(differentiable_slack_jvp),
+        "constraint_jvp": summarize_derivative(
+            differentiable_slack_jvp_array
+        ),
+        "constraint_component_jvps": {
+            name: summarize_derivative(slack_jvp_arrays[name])
+            for name in ("terminal", "action", "torque")
+        },
         "contact_jvp_finite": bool(
             np.isfinite(contact_slack_jvp_array).all()
         ),

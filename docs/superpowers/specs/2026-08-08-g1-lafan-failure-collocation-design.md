@@ -85,12 +85,15 @@ The feasibility merit adds squared equality defects and squared violations of:
 
 Contact dynamics themselves remain inside the validated MJX segment map. The
 penetration diagnostic is not a substitute contact model. The first physical
-probe found non-finite derivatives in the combined path vector, so the smoke
-now returns hard/task/action/torque slacks and contact-penetration slacks as
-separate groups. Contact values and active indices remain mandatory evidence;
-non-finite contact derivatives are reported and excluded from the candidate
-solve without smoothing. A later differentiable contact surrogate requires a
-separate preregistered formulation choice.
+probe found non-finite derivatives in the combined path vector; removing only
+penetration still left a non-finite derivative because terminal body poses had
+been obtained through a full contact solve. The smoke now evaluates those
+qpos-only terminal poses with MJX kinematics and returns terminal, action,
+torque, and contact-penetration slacks as separate groups. Contact values and
+active indices remain mandatory evidence; non-finite contact derivatives are
+reported and excluded from the candidate solve without smoothing. A later
+differentiable contact surrogate requires a separate preregistered formulation
+choice.
 
 ## Initialization and first vertical slice
 
