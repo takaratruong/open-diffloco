@@ -305,33 +305,73 @@ def _run_smoke(args: argparse.Namespace) -> dict:
         ),
         dtype=jnp.float64,
     )
-    full_decision = (
-        full_knot_qpos[1:],
-        full_knot_qvel[1:],
-        full_source_actions,
-    )
-    full_direction = tuple(
-        jnp.full_like(value, 1e-5) for value in full_decision
-    )
-
     @jax.jit
-    def full_equality_probe(current_decision, current_direction):
-        values = equality_fn(current_decision)
+    def segment_equality_probe(segment_inputs, segment_direction):
+        def segment_values(current_inputs):
+            (
+                start_qpos,
+                start_qvel,
+                end_qpos,
+                end_qvel,
+                segment_actions,
+            ) = current_inputs
+            return multiple_shooting_equalities(
+                step_fn,
+                jnp.stack((start_qpos, end_qpos)),
+                jnp.stack((start_qvel, end_qvel)),
+                segment_actions,
+                segment_steps=window.segment_steps,
+            )
+
+        values = segment_values(segment_inputs)
         _, directional_derivative = jax.jvp(
-            equality_fn,
-            (current_decision,),
-            (current_direction,),
+            segment_values,
+            (segment_inputs,),
+            (segment_direction,),
         )
         return values, directional_derivative
 
-    full_equalities, full_equality_jvp = full_equality_probe(
-        full_decision, full_direction
-    )
-    full_equality_array = np.asarray(full_equalities)
+    segment_equality_arrays = []
+    segment_equality_jvp_arrays = []
+    segment_equality_jvp_norms = []
+    for segment in range(window.segments):
+        action_start = segment * window.segment_steps
+        segment_inputs = (
+            full_knot_qpos[segment],
+            full_knot_qvel[segment],
+            full_knot_qpos[segment + 1],
+            full_knot_qvel[segment + 1],
+            full_source_actions[
+                action_start : action_start + window.segment_steps
+            ],
+        )
+        segment_direction = tuple(
+            jnp.zeros_like(value) if segment == 0 and index < 2
+            else jnp.full_like(value, 1e-5)
+            for index, value in enumerate(segment_inputs)
+        )
+        segment_equalities, segment_equality_jvp = segment_equality_probe(
+            segment_inputs, segment_direction
+        )
+        segment_equality_array = np.asarray(segment_equalities)
+        segment_equality_jvp_array = np.asarray(segment_equality_jvp)
+        if not np.isfinite(segment_equality_array).all():
+            raise ValueError(
+                f"segment {segment} physical equalities must be finite"
+            )
+        if not np.isfinite(segment_equality_jvp_array).all():
+            raise ValueError(
+                f"segment {segment} physical equality JVP must be finite"
+            )
+        segment_equality_arrays.append(segment_equality_array)
+        segment_equality_jvp_arrays.append(segment_equality_jvp_array)
+        segment_equality_jvp_norms.append(
+            float(np.linalg.norm(segment_equality_jvp_array))
+        )
+    full_equality_array = np.concatenate(segment_equality_arrays)
+    full_equality_jvp_array = np.concatenate(segment_equality_jvp_arrays)
     if full_equality_array.shape != (window.equality_size,):
         raise ValueError("full-window equality count does not match design")
-    if not np.isfinite(full_equality_array).all():
-        raise ValueError("full-window equalities must be finite")
     active_contact_segments = active_contact_rows(
         env.mj_model,
         np.asarray(full_knot_qpos[:-1]),
@@ -341,8 +381,9 @@ def _run_smoke(args: argparse.Namespace) -> dict:
         raise ValueError("full-window probe must include active contact")
 
     export_phases = range(initial_phase, initial_phase + 13)
-    export_qpos = np.asarray(env.qpos_reference[list(export_phases)])
-    export_qvel = np.asarray(env.qvel_reference[list(export_phases)])
+    export_indices = np.fromiter(export_phases, dtype=np.int32)
+    export_qpos = np.asarray(env.qpos_reference)[export_indices]
+    export_qvel = np.asarray(env.qvel_reference)[export_indices]
     export_actions = np.stack(
         [_model_reference_action(env, phase) for phase in export_phases]
     )
@@ -421,8 +462,9 @@ def _run_smoke(args: argparse.Namespace) -> dict:
             np.max(np.abs(full_equality_array))
         ),
         "full_window_equality_jvp": summarize_derivative(
-            full_equality_jvp
+            full_equality_jvp_array
         ),
+        "segment_equality_jvp_l2_norms": segment_equality_jvp_norms,
         "active_contact_segment_indices": list(active_contact_segments),
         "active_contact_segment_count": len(active_contact_segments),
         "objective": float(objective),

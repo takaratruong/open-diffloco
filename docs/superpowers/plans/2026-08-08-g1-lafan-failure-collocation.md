@@ -4,7 +4,7 @@
 
 **Goal:** Build and smoke-test a 24-transition, two-step multiple-shooting transcription around the pinned LAFAN pelvis-height collapse without running an optimizer.
 
-**Architecture:** A small scientific module owns fixed window dimensions, quaternion-aware physical-state defects, segment rollout, path constraints, and the scalar feasibility merit. The existing G1 environment exposes its already-validated PD/MJX physics advance so both strict evaluation and transcription call the same plant primitive. A CLI runs one complete physical derivative probe plus a full-window equality/JVP probe and emits a fail-closed JSON report for dimensions, identity defects, contact activity, constraint values, directional derivatives, and the shapes of a thin framework-neutral episode mapping.
+**Architecture:** A small scientific module owns fixed window dimensions, quaternion-aware physical-state defects, segment rollout, path constraints, and the scalar feasibility merit. The existing G1 environment exposes its already-validated PD/MJX physics advance so both strict evaluation and transcription call the same plant primitive. A CLI runs one complete physical derivative probe, then compiles one fixed-shape segment equality/JVP kernel and evaluates it across all 12 segments. It emits a fail-closed JSON report for dimensions, identity defects, contact activity, constraint values, directional derivatives, and the shapes of a thin framework-neutral episode mapping.
 
 **Tech Stack:** Python 3.11, JAX float64, MuJoCo MJX 3.9, NumPy, `unittest`.
 

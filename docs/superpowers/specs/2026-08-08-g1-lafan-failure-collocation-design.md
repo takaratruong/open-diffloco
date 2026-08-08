@@ -106,8 +106,9 @@ Before any solve, the vertical slice must prove:
 3. the scalar objective, equality directional derivative, and constraint
    directional derivative are finite on a one-segment physical smoke case;
 4. the complete 12-segment/852-residual map and its directional derivative are
-   finite, with at least one probed segment explicitly verified to begin in
-   active contact;
+   finite when one fixed-shape two-step kernel is compiled once and evaluated
+   across every physical segment, with at least one probed segment explicitly
+   verified to begin in active contact;
 5. direct plant calls are exactly deterministic, while the separately compiled
    checkpointed task step remains within declared `3e-6` qpos and `3e-4` qvel
    compiler-path bounds;
