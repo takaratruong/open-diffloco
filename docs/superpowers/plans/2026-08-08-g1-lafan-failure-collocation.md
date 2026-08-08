@@ -221,6 +221,13 @@ direct segment assembly and adding a hard `1e-8` identity check, the final run
 failed closed at that check. Do not run a solve or treat the ignored diagnostic
 JSON as a completed smoke artifact.
 
+Follow-up boundary result: a `custom_jvp` wrapper with the exact direct plant
+as primal and ordinary JAX JVP as tangent passed the contact-free CPU MJX
+microcase (bitwise primal equality and centered-FD tangent agreement). The real
+G1 rerun still failed the hard `1e-8` identity gate. Conclude this MJX
+collocation path is blocked; do not add more approximation layers or run an
+optimizer.
+
 - [ ] **Step 6: Run focused verification and commit**
 
 Run:

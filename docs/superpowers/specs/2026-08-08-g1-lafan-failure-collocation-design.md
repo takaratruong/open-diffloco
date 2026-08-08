@@ -231,3 +231,11 @@ primals, and agreement between the analytic tangent and centered finite
 differences. Only after all three pass may the same boundary enter the bounded
 G1 smoke. Failure of the repeated identity gate blocks this MJX collocation
 path rather than authorizing another approximation layer.
+
+The CPU boundary passed all three requirements, but the bounded contact-rich
+G1 rerun at commit `f368858b683bdf09051a97283f0da30e4681006f` still failed the
+`1e-8` identity gate. The custom JVP boundary therefore does not preserve the
+required physical primal under the real differentiated MJX graph. This
+failure closes the current slice: the MJX collocation path is blocked, the
+ignored commit-`124850c` JSON remains derivative evidence only, and no solve
+is authorized.

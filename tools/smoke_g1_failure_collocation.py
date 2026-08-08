@@ -71,8 +71,12 @@ def require_identity_equalities(
     values = np.asarray(equalities)
     if not np.isfinite(values).all():
         raise ValueError("identity equalities must be finite")
-    if np.max(np.abs(values), initial=0.0) > atol:
-        raise ValueError("identity equalities exceed the declared tolerance")
+    maximum = float(np.max(np.abs(values), initial=0.0))
+    if maximum > atol:
+        raise ValueError(
+            "identity equalities exceed the declared tolerance: "
+            f"{maximum} > {atol}"
+        )
 
 
 def active_contact_rows(
