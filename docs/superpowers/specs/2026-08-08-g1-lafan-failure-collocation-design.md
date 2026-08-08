@@ -43,8 +43,9 @@ full-trajectory direction, or require a monolithic long-horizon adjoint.
 
 Use a failure window beginning at phase 111 and ending at phase 135. Divide its
 24 control transitions into 12 independent two-step shooting segments.
-Assemble those independent segment maps with a single vectorized lowering so
-the full residual/JVP probe does not duplicate twelve large MJX graphs.
+Compile one fixed-shape direct segment kernel and reuse it sequentially across
+the independent segments so the full residual/JVP probe neither changes MJX
+batch lowering nor duplicates twelve large graphs.
 
 For segment `s`, the state knot is physical `x_s = (qpos_s, qvel_s)` with
 dimensions 36 and 35. The initial knot is fixed to the selected actor rollout.
@@ -185,6 +186,12 @@ active-contact assertion. The combined constraint JVP was non-finite. Splitting
 contact penetration from terminal/action/torque slacks proved contact was not
 the only cause; replacing terminal pose `mjx.forward` with kinematics still
 left the terminal group non-finite.
+
+An intermediate vectorized segment assembly also produced a `0.0190165`
+identity defect between an unbatched seed rollout and a batched one-segment
+residual. That is compiler-path mismatch, not a physical defect. The core
+residual therefore uses the same direct fixed-shape segment map as its seed,
+and the smoke now hard-fails above `1e-8` identity error.
 
 A kinematics-free diagnostic at the exact phase-111 reference body state
 isolated the primitive. The four terminal errors were `[0, 0, 0, 0]`; their JVP

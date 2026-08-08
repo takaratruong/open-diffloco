@@ -61,6 +61,19 @@ def summarize_derivative(derivative) -> dict[str, float | int | bool]:
     }
 
 
+def require_identity_equalities(
+    equalities: np.ndarray,
+    *,
+    atol: float = 1e-8,
+) -> None:
+    """Fail closed unless a generated segment has negligible defects."""
+    values = np.asarray(equalities)
+    if not np.isfinite(values).all():
+        raise ValueError("identity equalities must be finite")
+    if np.max(np.abs(values), initial=0.0) > atol:
+        raise ValueError("identity equalities exceed the declared tolerance")
+
+
 def active_contact_rows(
     model: mujoco.MjModel,
     qpos: np.ndarray,
@@ -294,6 +307,7 @@ def _run_smoke(args: argparse.Namespace) -> dict:
         raise ValueError("physical objective must be finite")
     if not np.isfinite(equality_array).all():
         raise ValueError("physical equalities must be finite")
+    require_identity_equalities(equality_array)
     for name, values in slack_arrays.items():
         if not np.isfinite(values).all():
             raise ValueError(f"{name} physical slack values must be finite")

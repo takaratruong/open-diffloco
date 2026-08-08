@@ -10,6 +10,7 @@ import numpy as np
 from tools.smoke_g1_failure_collocation import (
     active_contact_rows,
     build_parser,
+    require_identity_equalities,
     summarize_derivative,
 )
 
@@ -71,6 +72,13 @@ class G1FailureCollocationSmokeTest(unittest.TestCase):
     def test_derivative_summary_hard_fails_nonfinite_leaf(self):
         with self.assertRaisesRegex(ValueError, "finite"):
             summarize_derivative(jnp.array([jnp.nan]))
+
+    def test_identity_gate_rejects_nonzero_physical_defect(self):
+        require_identity_equalities(np.array([0.0, 5e-9]), atol=1e-8)
+        with self.assertRaisesRegex(ValueError, "identity"):
+            require_identity_equalities(
+                np.array([0.0, 1.9e-2]), atol=1e-8
+            )
 
     def test_active_contact_rows_detects_penetrating_free_body(self):
         model = mujoco.MjModel.from_xml_string(

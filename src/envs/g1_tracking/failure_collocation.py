@@ -275,22 +275,27 @@ def multiple_shooting_equalities(
     if actions.shape != (segments * segment_steps, ACTION_DIM):
         raise ValueError("actions do not align with shooting segments")
 
-    segment_actions = actions.reshape(segments, segment_steps, ACTION_DIM)
-    predicted_qpos, predicted_qvel = jax.vmap(
-        lambda qpos, qvel, current_actions: rollout_segment(
-            step_fn, qpos, qvel, current_actions
+    residuals = []
+    for segment in range(segments):
+        action_start = segment * segment_steps
+        predicted_qpos, predicted_qvel = rollout_segment(
+            step_fn,
+            knot_qpos[segment],
+            knot_qvel[segment],
+            actions[action_start : action_start + segment_steps],
         )
-    )(knot_qpos[:-1], knot_qvel[:-1], segment_actions)
-    defects = jax.vmap(physical_state_defect)(
-        predicted_qpos,
-        predicted_qvel,
-        knot_qpos[1:],
-        knot_qvel[1:],
-    )
-    quaternion_norms = (
-        jnp.sum(jnp.square(knot_qpos[1:, 3:7]), axis=1) - 1.0
-    )[:, None]
-    return jnp.concatenate((defects, quaternion_norms), axis=1).reshape(-1)
+        defect = physical_state_defect(
+            predicted_qpos,
+            predicted_qvel,
+            knot_qpos[segment + 1],
+            knot_qvel[segment + 1],
+        )
+        quaternion_norm = jnp.reshape(
+            jnp.sum(jnp.square(knot_qpos[segment + 1, 3:7])) - 1.0,
+            (1,),
+        )
+        residuals.append(jnp.concatenate((defect, quaternion_norm)))
+    return jnp.concatenate(residuals)
 
 
 def feasibility_merit(
