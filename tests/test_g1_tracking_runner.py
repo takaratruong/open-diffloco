@@ -1,7 +1,39 @@
+import hashlib
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
 
 class G1TrackingRunnerTest(unittest.TestCase):
+    def test_reference_hparams_capture_exact_training_artifact(self):
+        from src.algorithms.shac.algorithm import reference_hparams_for_env
+
+        with tempfile.TemporaryDirectory() as directory:
+            reference_path = Path(directory) / "dance.npz"
+            reference_path.write_bytes(b"named reference fixture")
+            env = SimpleNamespace(
+                reference_path=str(reference_path),
+                reference=SimpleNamespace(
+                    fps=50.0,
+                    qpos=SimpleNamespace(shape=(500, 36)),
+                ),
+                reference_stride=1,
+                reference_transitions=499,
+            )
+
+            hparams = reference_hparams_for_env(env)
+
+        self.assertEqual(hparams["reference_path"], str(reference_path.resolve()))
+        self.assertEqual(
+            hparams["reference_sha256"],
+            hashlib.sha256(b"named reference fixture").hexdigest(),
+        )
+        self.assertEqual(hparams["reference_fps"], 50.0)
+        self.assertEqual(hparams["reference_stride"], 1)
+        self.assertEqual(hparams["reference_states"], 500)
+        self.assertEqual(hparams["reference_transitions"], 499)
+
     def test_runner_disables_unregistered_randomization_and_uses_tracking_task(self):
         from tools.run_g1_tracking_shac import build_train_kwargs
 
@@ -30,6 +62,7 @@ class G1TrackingRunnerTest(unittest.TestCase):
         self.assertFalse(kwargs["terrain"])
 
     def test_native_rmr_runner_matches_50hz_rollout_timebase(self):
+        from src.envs.g1_tracking.environment import DEFAULT_REFERENCE_PATH
         from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
 
         kwargs = build_train_kwargs(
@@ -43,8 +76,26 @@ class G1TrackingRunnerTest(unittest.TestCase):
         self.assertEqual(kwargs["gamma"], 0.99)
         self.assertEqual(kwargs["gae_lambda"], 0.95)
         self.assertEqual(kwargs["max_episode_length"], 60)
+        self.assertEqual(kwargs["reference_path"], DEFAULT_REFERENCE_PATH)
+        self.assertEqual(kwargs["reference_stride"], 2)
         self.assertEqual(kwargs["total_steps"], 196608)
         self.assertEqual(kwargs["checkpoint_interval"], 49152)
+
+    def test_native_rmr_runner_transports_named_reference_contract(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        kwargs = build_train_kwargs(
+            steps=393_216,
+            num_envs=256,
+            seed=0,
+            checkpoint_interval=30_720,
+            validated_task=True,
+            reference_path="/tmp/dance.npz",
+            reference_stride=1,
+        )
+
+        self.assertEqual(kwargs["reference_path"], "/tmp/dance.npz")
+        self.assertEqual(kwargs["reference_stride"], 1)
 
     def test_native_rmr_runner_can_match_go2_batch_and_noise_schedule(self):
         from tools.run_g1_tracking_rmr50_shac import build_train_kwargs

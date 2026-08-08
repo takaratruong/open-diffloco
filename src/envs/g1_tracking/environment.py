@@ -1,6 +1,7 @@
 """Differentiable MJX implementation of the RMR G1 tracking task."""
 
 import functools
+import math
 from pathlib import Path
 
 import jax
@@ -183,11 +184,14 @@ class G1TrackingEnv:
         self.mj_model.body_inertia[1:] *= self.body_mass_scale
         self.mjx_model = mjx.put_model(self.mj_model)
 
-        self.reference = load_mujoco_reference(
-            self.mj_model, self.reference_path, RMR_G1_BODY_NAMES
-        )
         self.controller = load_rmr_controller(
             self.mj_model, self.controller_path
+        )
+        self.reference = load_mujoco_reference(
+            self.mj_model,
+            self.reference_path,
+            RMR_G1_BODY_NAMES,
+            controller=self.controller,
         )
         self.reference_length = self.reference.qpos.shape[0]
         self.body_ids = tuple(self.reference.body_ids)
@@ -247,6 +251,26 @@ class G1TrackingEnv:
         self.clip_actions = clip_actions
         self.squash_actor_actions = clip_actions
         self.dt = float(self.mj_model.opt.timestep * self.n_frames)
+        self.control_reference_dt = self.dt
+        if self.reference.fps is not None:
+            self.control_reference_dt = (
+                self.reference_stride / self.reference.fps
+            )
+            if not math.isclose(
+                self.control_reference_dt,
+                self.dt,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                raise ValueError(
+                    "reference timebase does not match environment control "
+                    f"period: stride/fps={self.control_reference_dt}, "
+                    f"dt={self.dt}"
+                )
+        self.reference_transitions = math.ceil(
+            (self.reference_length - 1) / self.reference_stride
+        )
+        self.max_episode_length = self.reference_transitions
         self.action_dim = 29
         self.actor_history_len = actor_history_len
         self.actor_frame_obs_dim = 154
@@ -807,10 +831,11 @@ class G1TrackingRMR50HzEnv(G1TrackingEnv):
     """RMR task at its native 50 Hz control and reward-manager timebase."""
 
     def __init__(self, *args, **kwargs):
+        reference_stride = kwargs.pop("reference_stride", 2)
         super().__init__(
             *args,
             physics_substeps=10,
-            reference_stride=2,
+            reference_stride=reference_stride,
             reward_scale=0.02,
             **kwargs,
         )
@@ -840,9 +865,9 @@ class G1TrackingRMR50HzSourceStepEnv(G1TrackingEnv):
         solver_ls_iterations: int = 5,
         **kwargs,
     ):
+        reference_stride = kwargs.pop("reference_stride", 2)
         for option in (
             "physics_substeps",
-            "reference_stride",
             "reward_scale",
             "clip_actions",
             "actor_joint_order",
@@ -852,7 +877,7 @@ class G1TrackingRMR50HzSourceStepEnv(G1TrackingEnv):
         super().__init__(
             *args,
             physics_substeps=4,
-            reference_stride=2,
+            reference_stride=reference_stride,
             reward_scale=0.02,
             clip_actions=False,
             actor_joint_order="source",

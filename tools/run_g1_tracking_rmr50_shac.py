@@ -7,6 +7,7 @@ from pathlib import Path
 
 from src.algorithms.shac.algorithm import train
 from src.core.rmr_policy import rmr_policy_from_state_dict
+from src.envs.g1_tracking.environment import DEFAULT_REFERENCE_PATH
 from src.envs.g1_tracking.fixed_solver import fixed_mjx_solver_outer_loop
 from tools.run_g1_tracking_shac import (
     build_train_kwargs as build_100hz_train_kwargs,
@@ -39,6 +40,8 @@ def build_train_kwargs(
     actor_layer_norm: bool = True,
     actor_zero_output: bool = True,
     gradient_accumulation_steps: int = 1,
+    reference_path: str | Path = DEFAULT_REFERENCE_PATH,
+    reference_stride: int = 2,
 ) -> dict:
     if (
         isinstance(gradient_accumulation_steps, bool)
@@ -56,6 +59,12 @@ def build_train_kwargs(
         raise ValueError(
             "actor_bootstrap_delay_steps must be a non-negative integer"
         )
+    if (
+        isinstance(reference_stride, bool)
+        or not isinstance(reference_stride, int)
+        or reference_stride < 1
+    ):
+        raise ValueError("reference_stride must be a positive integer")
     if (
         source_actor_policy is not None
         and initial_full_actor_policy is not None
@@ -133,6 +142,8 @@ def build_train_kwargs(
             "actor_zero_output": actor_zero_output,
             "gradient_accumulation_steps": gradient_accumulation_steps,
             "actor_bootstrap_delay_steps": actor_bootstrap_delay_steps,
+            "reference_path": str(reference_path),
+            "reference_stride": reference_stride,
         }
     )
     return kwargs
@@ -165,6 +176,12 @@ def main() -> None:
     parser.add_argument("--actor-bootstrap-scale", type=float, default=1.0)
     parser.add_argument("--actor-bootstrap-delay-steps", type=int, default=0)
     parser.add_argument("--unroll-length", type=int, default=24)
+    parser.add_argument(
+        "--reference-path",
+        type=Path,
+        default=Path(DEFAULT_REFERENCE_PATH),
+    )
+    parser.add_argument("--reference-stride", type=int, default=2)
     parser.add_argument(
         "--gradient-accumulation-steps", type=int, default=1
     )
@@ -252,6 +269,8 @@ def main() -> None:
                 gradient_accumulation_steps=(
                     args.gradient_accumulation_steps
                 ),
+                reference_path=args.reference_path,
+                reference_stride=args.reference_stride,
             )
         )
 

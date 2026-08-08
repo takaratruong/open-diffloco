@@ -1,4 +1,5 @@
 import math
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -308,6 +309,28 @@ class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
             controller_path=str(CONTROLLER),
             actor_history_len=1,
         )
+        cls.temporary_directory = tempfile.TemporaryDirectory()
+        cls.named_50hz_reference = (
+            Path(cls.temporary_directory.name) / "named_50hz.npz"
+        )
+        model_to_source = cls.env.controller.model_to_actor_permutation
+        np.savez(
+            cls.named_50hz_reference,
+            fps=np.asarray([50], dtype=np.int32),
+            joint_pos=cls.env.reference.qpos[:3, 7:][:, model_to_source],
+            joint_vel=cls.env.reference.qvel[:3, 6:][:, model_to_source],
+            body_pos_w=cls.env.reference.body_pos[:3, :1],
+            body_quat_w=cls.env.reference.body_quat[:3, :1],
+            body_lin_vel_w=cls.env.reference.body_lin_vel[:3, :1],
+            body_ang_vel_w=cls.env.reference.body_ang_vel[:3, :1],
+            joint_names=np.asarray(cls.env.controller.actor_joint_names),
+            root_body_name=np.asarray("pelvis"),
+            root_body_index=np.asarray(0, dtype=np.int32),
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary_directory.cleanup()
 
     def test_control_reference_and_reward_timebase_match_rmr(self):
         env = self.env
@@ -326,6 +349,19 @@ class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
 
         next_state = env.step(state, jnp.zeros(env.action_dim))
         self.assertEqual(int(next_state.info["phase"]), 2)
+
+    def test_environment_rejects_reference_timebase_mismatch(self):
+        from src.envs.g1_tracking.environment import (
+            G1TrackingRMR50HzValidatedEnv,
+        )
+
+        with self.assertRaisesRegex(ValueError, "reference timebase"):
+            G1TrackingRMR50HzValidatedEnv(
+                xml_path=str(MODEL),
+                reference_path=str(self.named_50hz_reference),
+                controller_path=str(CONTROLLER),
+                reference_stride=2,
+            )
 
     def test_factory_selects_50hz_rmr_environment(self):
         from src.envs.g1_tracking.environment import G1TrackingRMR50HzEnv

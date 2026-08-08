@@ -1,5 +1,6 @@
 """SHAC training for Go2 locomotion."""
 
+import hashlib
 import os
 import time
 import pickle
@@ -128,6 +129,27 @@ def actor_bootstrap_scale_at_step(
     return jp.where(step >= delay_steps, target, jp.zeros_like(target))
 
 
+def _sha256_file(path: Path, block_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(block_size), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def reference_hparams_for_env(env) -> dict[str, object]:
+    """Returns the immutable G1 reference contract recorded with a run."""
+    reference_path = Path(env.reference_path).resolve()
+    return {
+        "reference_path": str(reference_path),
+        "reference_sha256": _sha256_file(reference_path),
+        "reference_fps": env.reference.fps,
+        "reference_stride": int(env.reference_stride),
+        "reference_states": int(env.reference.qpos.shape[0]),
+        "reference_transitions": int(env.reference_transitions),
+    }
+
+
 def train(
     # General
     total_steps: int = 100_000,
@@ -189,6 +211,8 @@ def train(
     differentiate_source_feedback: bool = True,
     effort_limit_scale: float = 1.0,
     termination_margin_weight: float = 0.0,
+    reference_path: str | None = None,
+    reference_stride: int | None = None,
 ):
     """
     Train a quadruped locomotion policy using SHAC.
@@ -275,6 +299,12 @@ def train(
         raise ValueError(
             "termination_margin_weight must be non-negative and finite"
         )
+    if reference_stride is not None and (
+        isinstance(reference_stride, bool)
+        or not isinstance(reference_stride, int)
+        or reference_stride < 1
+    ):
+        raise ValueError("reference_stride must be a positive integer")
     effective_num_envs = num_envs * gradient_accumulation_steps
     steps_per_actor_update = effective_num_envs * unroll_length
 
@@ -320,6 +350,12 @@ def train(
             )
             xml_path = resumed_hparams.get("xml_path", xml_path)
             env_variant = resumed_hparams.get("env_variant", env_variant)
+            reference_path = resumed_hparams.get(
+                "reference_path", reference_path
+            )
+            reference_stride = resumed_hparams.get(
+                "reference_stride", reference_stride
+            )
             if "kp_range" in resumed_hparams:
                 kp_range = tuple(resumed_hparams["kp_range"])
             if "kd_range" in resumed_hparams:
@@ -370,6 +406,19 @@ def train(
     _curriculum_grace_jax = jp.array(curriculum_grace, dtype=jp.int32)
     _curriculum_steps_jax = jp.array(_curriculum_steps, dtype=jp.float32)
 
+    g1_environment_kwargs = {}
+    if env_variant.startswith("g1_tracking"):
+        g1_environment_kwargs.update(
+            {
+                "effort_limit_scale": effort_limit_scale,
+                "termination_margin_weight": termination_margin_weight,
+            }
+        )
+        if reference_path is not None:
+            g1_environment_kwargs["reference_path"] = str(reference_path)
+        if reference_stride is not None:
+            g1_environment_kwargs["reference_stride"] = reference_stride
+
     env = Go2Env(
         variant=env_variant,
         xml_path=xml_path,
@@ -388,15 +437,12 @@ def train(
         terrain_slope_max=terrain_slope_max if terrain else 0.0,
         max_episode_length=max_episode_length,
         actor_history_len=actor_history_len,
-        **(
-            {
-                "effort_limit_scale": effort_limit_scale,
-                "termination_margin_weight": termination_margin_weight,
-            }
-            if env_variant.startswith("g1_tracking")
-            else {}
-        ),
+        **g1_environment_kwargs,
     )
+    reference_hparams = {}
+    if env_variant.startswith("g1_tracking"):
+        max_episode_length = env.reference_transitions
+        reference_hparams = reference_hparams_for_env(env)
     actor_norm = Normalizer(env.actor_frame_obs_dim)
     critic_norm = Normalizer(env.critic_obs_dim)
 
@@ -1466,6 +1512,7 @@ def train(
         "differentiate_source_feedback": differentiate_source_feedback,
         "env_variant": env_variant,
         "squash_actor_actions": squash_actor_actions,
+        **reference_hparams,
     }
     with open(f"{save_dir}/hparams.json", "w") as f:
         json.dump(hparams, f, indent=2)
