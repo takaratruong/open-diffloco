@@ -28,7 +28,10 @@ from src.envs.g1_tracking.action_shooting import (
     support_trace_from_states,
 )
 from src.envs.g1_tracking.fixed_solver import (
+    CONVERGENCE_SCAN,
+    FIXED_SOLVER_AND_LINESEARCH_SCAN,
     _solve_with_fixed_outer_loop,
+    active_solver_gradient_semantic,
     fixed_mjx_solver_outer_loop,
 )
 from tools.evaluate_g1_tracking import (
@@ -85,6 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--horizon", type=int, default=12)
     parser.add_argument("--solver-iterations", type=int, default=4)
     parser.add_argument("--solver-ls-iterations", type=int, default=5)
+    parser.add_argument(
+        "--solver-gradient-semantic",
+        choices=(CONVERGENCE_SCAN, FIXED_SOLVER_AND_LINESEARCH_SCAN),
+        default=CONVERGENCE_SCAN,
+    )
     parser.add_argument("--gradient-repeat-count", type=int, default=2)
     parser.add_argument("--finite-difference-epsilon", type=float, default=1e-3)
     parser.add_argument("--action-deviation-weight", type=float, default=1e-3)
@@ -415,6 +423,10 @@ class G1PhysicalRuntime:
             raise ValueError("JAX float64 must be enabled")
         if _mjx_solver.solve is not _solve_with_fixed_outer_loop:
             raise ValueError("fixed MJX solver outer loop is not active")
+        if active_solver_gradient_semantic() != self.args.solver_gradient_semantic:
+            raise ValueError(
+                "active solver gradient semantic does not match the request"
+            )
 
         env = make_evaluation_env(
             "g1_tracking_rmr_50hz_validated",
@@ -480,6 +492,7 @@ class G1PhysicalRuntime:
             "jax_backend": jax.default_backend(),
             "jax_enable_x64": True,
             "fixed_solver_outer_loop": True,
+            "solver_gradient_semantic": self.args.solver_gradient_semantic,
             "reference_path": str(self.args.reference_path.resolve()),
             "reference_sha256": reference_sha,
             "checkpoint_path": str(self.args.checkpoint_path.resolve()),
@@ -813,7 +826,7 @@ def main() -> None:
     args = build_parser().parse_args()
     output_preexisting = args.output_dir.is_symlink() or args.output_dir.exists()
     try:
-        with fixed_mjx_solver_outer_loop():
+        with fixed_mjx_solver_outer_loop(semantic=args.solver_gradient_semantic):
             summary = execute_gate(args, runtime=G1PhysicalRuntime(args))
     except Exception as error:
         failure = {

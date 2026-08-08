@@ -2,21 +2,38 @@
 
 from contextlib import contextmanager
 
+import jax
 from mujoco.mjx._src import solver as _solver
+
+CONVERGENCE_SCAN = "convergence-scan-v1"
+FIXED_SOLVER_AND_LINESEARCH_SCAN = "fixed-solver-and-linesearch-scan-v1"
+_SUPPORTED_SEMANTICS = frozenset((CONVERGENCE_SCAN, FIXED_SOLVER_AND_LINESEARCH_SCAN))
+_ACTIVE_SEMANTIC: str | None = None
+
+
+def _fixed_loop_scan(_cond_fun, body_fun, init_val, max_iter):
+    """Execute exactly ``max_iter`` loop bodies with a differentiable scan."""
+    return jax.lax.scan(
+        lambda current, _: (body_fun(current), None),
+        init_val,
+        xs=None,
+        length=max_iter,
+    )[0]
+
+
+def active_solver_gradient_semantic() -> str | None:
+    """Return the process-local semantic active inside the scoped context."""
+    return _ACTIVE_SEMANTIC
 
 
 def _solve_with_fixed_outer_loop(model, data):
     """Match stock MJX solve while expressing its bounded outer loop as scan."""
     if not isinstance(model.opt._impl, _solver.OptionJAX):
-        raise ValueError("solve requires JAX backend implementation")
+        raise TypeError("solve requires JAX backend implementation")
 
     def cond(ctx):
-        improvement = _solver._rescale(
-            model, ctx.prev_cost - ctx.cost
-        )
-        gradient = _solver._rescale(
-            model, _solver.math.norm(ctx.grad)
-        )
+        improvement = _solver._rescale(model, ctx.prev_cost - ctx.cost)
+        gradient = _solver._rescale(model, _solver.math.norm(ctx.grad))
         done = ctx.solver_niter >= model.opt.iterations
         done |= improvement < model.opt.tolerance
         done |= gradient < model.opt.tolerance
@@ -31,9 +48,7 @@ def _solve_with_fixed_outer_loop(model, data):
         if model.opt.solver == _solver.SolverType.NEWTON:
             search = -ctx.Mgrad
         else:
-            beta = _solver.jp.dot(
-                ctx.grad, ctx.Mgrad - prev_mgrad
-            )
+            beta = _solver.jp.dot(ctx.grad, ctx.Mgrad - prev_mgrad)
             beta /= _solver.jp.maximum(
                 _solver.mujoco.mjMINVAL,
                 _solver.jp.dot(prev_grad, prev_mgrad),
@@ -81,11 +96,22 @@ def _solve_with_fixed_outer_loop(model, data):
 
 
 @contextmanager
-def fixed_mjx_solver_outer_loop():
-    """Temporarily replace only MJX solve; never patch global JAX control flow."""
+def fixed_mjx_solver_outer_loop(*, semantic: str = CONVERGENCE_SCAN):
+    """Temporarily install one explicit reverse-mode-safe solver semantic."""
+    global _ACTIVE_SEMANTIC
+    if semantic not in _SUPPORTED_SEMANTICS:
+        raise ValueError(f"unsupported solver gradient semantic: {semantic}")
+    if _ACTIVE_SEMANTIC is not None:
+        raise RuntimeError("MJX solver gradient context is already active")
     original = _solver.solve
+    original_loop = _solver._while_loop_scan
     _solver.solve = _solve_with_fixed_outer_loop
+    if semantic == FIXED_SOLVER_AND_LINESEARCH_SCAN:
+        _solver._while_loop_scan = _fixed_loop_scan
+    _ACTIVE_SEMANTIC = semantic
     try:
         yield
     finally:
         _solver.solve = original
+        _solver._while_loop_scan = original_loop
+        _ACTIVE_SEMANTIC = None

@@ -14,6 +14,7 @@ from src.envs.g1_tracking.action_shooting import (
     ForwardGradientReport,
     support_trace_from_states,
 )
+from src.envs.g1_tracking.fixed_solver import CONVERGENCE_SCAN
 from tools.run_g1_action_shooting_gate import (
     CHECKPOINT_SHA256,
     CONFIG_SHA256,
@@ -44,6 +45,7 @@ class G1ActionShootingRunnerTest(unittest.TestCase):
         self.assertEqual(args.horizon, 12)
         self.assertEqual(args.solver_iterations, 4)
         self.assertEqual(args.solver_ls_iterations, 5)
+        self.assertEqual(args.solver_gradient_semantic, CONVERGENCE_SCAN)
         self.assertEqual(args.gradient_repeat_count, 2)
         self.assertEqual(args.finite_difference_epsilon, 1e-3)
         self.assertEqual(args.action_deviation_weight, 1e-3)
