@@ -112,6 +112,35 @@ def archive_periodic_checkpoint_if_due(
     return step, checkpoint_path
 
 
+def resolve_action_noise_schedule_steps(
+    *,
+    total_steps: int,
+    resumed_step: int,
+    resumed_hparams: dict | None,
+) -> int:
+    """Keep a resumed run on the checkpoint's original noise schedule."""
+    if total_steps < resumed_step:
+        raise ValueError(
+            "total_steps must be at least the resumed checkpoint step"
+        )
+    if resumed_hparams is None:
+        return total_steps
+    schedule_steps = int(
+        resumed_hparams.get(
+            "action_noise_schedule_steps",
+            resumed_hparams.get("total_steps", total_steps),
+        )
+    )
+    if schedule_steps <= 0:
+        raise ValueError("action-noise schedule steps must be positive")
+    return schedule_steps
+
+
+def select_initial_training_state(*, initialized_state, resumed_state):
+    """Select the full saved state for an exact continuation."""
+    return resumed_state if resumed_state is not None else initialized_state
+
+
 def squeeze_value_head(values):
     """Remove only the critic output axis, preserving batch/time axes."""
     return jp.squeeze(values, axis=-1)
@@ -394,6 +423,12 @@ def train(
                 ]
             if "actor_bootstrap_scale" in resumed_hparams:
                 actor_bootstrap_scale = resumed_hparams["actor_bootstrap_scale"]
+
+    action_noise_schedule_steps = resolve_action_noise_schedule_steps(
+        total_steps=total_steps,
+        resumed_step=resumed_step,
+        resumed_hparams=resumed_hparams,
+    )
 
     # Compute curriculum defaults relative to total_steps
     if curriculum_grace is None:
@@ -848,8 +883,10 @@ def train(
             all_terrain_bump_innovations,
         )
 
-        # Linear noise schedule: start -> end over [0, total_steps]
-        progress = jp.clip(state.step / total_steps, 0.0, 1.0)
+        # Preserve the checkpoint's original schedule on exact continuation.
+        progress = jp.clip(
+            state.step / action_noise_schedule_steps, 0.0, 1.0
+        )
         current_noise_std = action_noise_std_start + progress * (
             action_noise_std_end - action_noise_std_start
         )
@@ -1175,36 +1212,28 @@ def train(
 
         return new_state, metrics
 
+    initialized_state = TrainState(
+        key=key,
+        env_state=env_state,
+        actor_params=actor_params,
+        critic_params=critic_params,
+        target_critic_params=target_critic_params,
+        normalizer=actor_normalizer,
+        critic_normalizer=critic_normalizer,
+        actor_opt=actor_opt_state,
+        critic_opt=critic_opt_state,
+        step=canonicalize_step_dtype(0),
+    )
     if resumed_state is not None:
-        # Restore learned params and optimizer states
         print(
-            f"Restoring learned parameters and optimizer states from step {resumed_step}"
+            "Restoring complete training state from step "
+            f"{resumed_step} (PRNG, environments, parameters, optimizers, "
+            "and normalizers)"
         )
-        state = TrainState(
-            key=key,
-            env_state=env_state,
-            actor_params=resumed_state.actor_params,
-            critic_params=resumed_state.critic_params,
-            target_critic_params=resumed_state.target_critic_params,
-            normalizer=resumed_state.normalizer,
-            critic_normalizer=resumed_state.critic_normalizer,
-            actor_opt=resumed_state.actor_opt,
-            critic_opt=resumed_state.critic_opt,
-            step=canonicalize_step_dtype(resumed_step),
-        )
-    else:
-        state = TrainState(
-            key=key,
-            env_state=env_state,
-            actor_params=actor_params,
-            critic_params=critic_params,
-            target_critic_params=target_critic_params,
-            normalizer=actor_normalizer,
-            critic_normalizer=critic_normalizer,
-            actor_opt=actor_opt_state,
-            critic_opt=critic_opt_state,
-            step=canonicalize_step_dtype(0),
-        )
+    state = select_initial_training_state(
+        initialized_state=initialized_state,
+        resumed_state=resumed_state,
+    )
 
     # JAX distinguishes uncommitted and explicitly placed arrays in its JIT
     # cache key.  Commit the initial state before warm-up so the warm-up output
@@ -1218,12 +1247,15 @@ def train(
     compile_time = time.perf_counter() - start_comp_time
     print(f"Compilation took {compile_time:.1f}s")
 
-    # Warm up normalizer from the compilation step.
+    # Match compiled dtypes/placement without consuming a logical update. Fresh
+    # runs retain the established one-step normalizer warm-up; exact resumes
+    # preserve the saved normalizers byte-for-byte.
     state = canonicalize_tree_like(state, warmup_state)
-    state = state.replace(
-        normalizer=warmup_state.normalizer,
-        critic_normalizer=warmup_state.critic_normalizer,
-    )
+    if resumed_state is None:
+        state = state.replace(
+            normalizer=warmup_state.normalizer,
+            critic_normalizer=warmup_state.critic_normalizer,
+        )
 
     print("Training...")
 
@@ -1472,6 +1504,7 @@ def train(
         "cmd_ctrl_interval_range": list(cmd_ctrl_interval_range),
         "action_noise_std_start": action_noise_std_start,
         "action_noise_std_end": action_noise_std_end,
+        "action_noise_schedule_steps": action_noise_schedule_steps,
         "friction_range": list(friction_range),
         "mass_range": list(mass_range),
         "effort_limit_scale": effort_limit_scale,

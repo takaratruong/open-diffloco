@@ -40,6 +40,7 @@ def build_train_kwargs(
     actor_layer_norm: bool = True,
     actor_zero_output: bool = True,
     gradient_accumulation_steps: int = 1,
+    resume_from: str | Path | None = None,
     reference_path: str | Path = DEFAULT_REFERENCE_PATH,
     reference_stride: int = 2,
 ) -> dict:
@@ -141,6 +142,9 @@ def build_train_kwargs(
             "actor_layer_norm": actor_layer_norm,
             "actor_zero_output": actor_zero_output,
             "gradient_accumulation_steps": gradient_accumulation_steps,
+            "resume_from": (
+                None if resume_from is None else str(resume_from)
+            ),
             "actor_bootstrap_delay_steps": actor_bootstrap_delay_steps,
             "reference_path": str(reference_path),
             "reference_stride": reference_stride,
@@ -185,6 +189,7 @@ def main() -> None:
     parser.add_argument(
         "--gradient-accumulation-steps", type=int, default=1
     )
+    parser.add_argument("--resume", type=Path)
     parser.add_argument("--unbounded-actions", action="store_true")
     parser.add_argument("--validated-task", action="store_true")
     parser.add_argument("--source-policy-checkpoint", type=Path)
@@ -269,6 +274,7 @@ def main() -> None:
                 gradient_accumulation_steps=(
                     args.gradient_accumulation_steps
                 ),
+                resume_from=args.resume,
                 reference_path=args.reference_path,
                 reference_stride=args.reference_stride,
             )

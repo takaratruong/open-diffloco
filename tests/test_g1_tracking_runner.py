@@ -97,6 +97,22 @@ class G1TrackingRunnerTest(unittest.TestCase):
         self.assertEqual(kwargs["reference_path"], "/tmp/dance.npz")
         self.assertEqual(kwargs["reference_stride"], 1)
 
+    def test_native_rmr_runner_transports_exact_resume_checkpoint(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        kwargs = build_train_kwargs(
+            steps=589_824,
+            num_envs=256,
+            seed=0,
+            checkpoint_interval=30_720,
+            validated_task=True,
+            reference_path="/tmp/dance.npz",
+            reference_stride=1,
+            resume_from="/tmp/policy_final.pkl",
+        )
+
+        self.assertEqual(kwargs["resume_from"], "/tmp/policy_final.pkl")
+
     def test_native_rmr_runner_can_match_go2_batch_and_noise_schedule(self):
         from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
 
