@@ -175,3 +175,29 @@ Contact active-set derivative failure causes a bounded formulation review, not
 automatic smoothing or policy optimization. This slice adds no framework,
 generic optimizer family, critic, policy fitting, reset distribution, or new
 reward term to the strict evaluator.
+
+## Smoke outcome and remaining formulation blocker
+
+The bounded physical smoke compiled one two-step equality/JVP kernel and
+evaluated it across all 12 segments. All 852 equality values and their
+directional derivatives were finite, and the window passed the required
+active-contact assertion. The combined constraint JVP was non-finite. Splitting
+contact penetration from terminal/action/torque slacks proved contact was not
+the only cause; replacing terminal pose `mjx.forward` with kinematics still
+left the terminal group non-finite.
+
+A kinematics-free diagnostic at the exact phase-111 reference body state
+isolated the primitive. The four terminal errors were `[0, 0, 0, 0]`; their JVP
+along the fixed `1e-5` probe direction was
+`[-1e-5, NaN, 1.585610715009816e-5, -1e-5]`. Only
+`anchor_xy_error = norm(reference_xy - actual_xy)` failed because the Euclidean
+norm has an undefined derivative at zero.
+
+The follow-up formulation review preregistered and implemented the exactly
+equivalent feasible-set slack
+`1.3^2 - ||reference_xy - actual_xy||^2`; this is an algebraic hard-constraint
+rewrite, not epsilon smoothing. Unit tests prove the factorization
+`(1.3 - distance) * (1.3 + distance)` and identical inside/boundary/outside
+signs. Contact penetration remains a value-only diagnostic until a separate
+differentiable contact formulation is chosen. No optimizer run is authorized
+until the repeated bounded physical gate passes.

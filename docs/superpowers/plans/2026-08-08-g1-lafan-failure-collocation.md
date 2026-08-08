@@ -204,6 +204,15 @@ equalities and their finite JVP, at least one active-contact segment, finite
 objective gradient, finite constraint JVP, solver 4/5, float64 true, and exact
 reference/checkpoint/config/model/GRAIL/code identities.
 
+Observed: all 12 physical segment equality/JVP probes were finite and the
+active-contact assertion passed, but the CLI failed closed before writing the
+artifact because the terminal constraint JVP was non-finite. A separate direct
+probe isolated only `anchor_xy_error`: at zero error its `norm` JVP was NaN.
+The exact feasible-set squared slack rewrite was then preregistered,
+implemented, and covered by algebraic-equivalence and boundary-sign tests. No
+solve is permitted until its bounded physical rerun passes; contact remains a
+value-only diagnostic.
+
 - [ ] **Step 6: Run focused verification and commit**
 
 Run:

@@ -12,6 +12,7 @@ from src.envs.g1_tracking.failure_collocation import (
     TML_BODY_NAMES,
     TML_DEFAULT_JOINT_POS,
     TML_JOINT_NAMES,
+    anchor_xy_squared_slack,
     corrected_episode_mapping,
     feasibility_merit,
     multiple_shooting_equalities,
@@ -23,6 +24,36 @@ from src.envs.g1_tracking.failure_collocation import (
 
 
 class G1FailureCollocationTest(unittest.TestCase):
+    def test_anchor_xy_squared_slack_is_algebraically_equivalent(self):
+        reference_xy = jnp.array([0.5, -0.25], dtype=jnp.float64)
+        actual_xy = jnp.array([-0.1, 0.4], dtype=jnp.float64)
+        distance = jnp.linalg.norm(reference_xy - actual_xy)
+
+        squared_slack = anchor_xy_squared_slack(
+            reference_xy, actual_xy, limit=1.3
+        )
+
+        np.testing.assert_allclose(
+            squared_slack,
+            (1.3 - distance) * (1.3 + distance),
+            atol=1e-12,
+        )
+
+    def test_anchor_xy_squared_slack_preserves_boundary_sign(self):
+        reference_xy = jnp.zeros(2, dtype=jnp.float64)
+        for actual_xy, expected_sign in (
+            (jnp.array([1.2, 0.0]), 1),
+            (jnp.array([1.3, 0.0]), 0),
+            (jnp.array([1.4, 0.0]), -1),
+        ):
+            with self.subTest(actual_xy=np.asarray(actual_xy)):
+                slack = float(
+                    anchor_xy_squared_slack(
+                        reference_xy, actual_xy, limit=1.3
+                    )
+                )
+                self.assertEqual(int(np.sign(slack)), expected_sign)
+
     def test_default_failure_window_has_fixed_small_dimensions(self):
         window = FailureWindow()
 

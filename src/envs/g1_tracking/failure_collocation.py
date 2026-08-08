@@ -371,6 +371,23 @@ def failure_objective(
     )
 
 
+def anchor_xy_squared_slack(
+    reference_xy: jax.Array,
+    actual_xy: jax.Array,
+    *,
+    limit: float = 1.3,
+) -> jax.Array:
+    """Return an exact-feasible-set squared XY-distance slack."""
+    reference_xy = jnp.asarray(reference_xy)
+    actual_xy = jnp.asarray(actual_xy)
+    if reference_xy.shape != (2,) or actual_xy.shape != (2,):
+        raise ValueError("anchor XY positions must have shape (2,)")
+    if limit <= 0.0:
+        raise ValueError("anchor XY limit must be positive")
+    delta = reference_xy - actual_xy
+    return jnp.asarray(limit) ** 2 - jnp.sum(jnp.square(delta))
+
+
 def physical_path_slack_components(
     env,
     knot_qpos: jax.Array,
@@ -418,15 +435,21 @@ def physical_path_slack_components(
             body_pos=body_pos,
             body_quat=body_quat,
         )
-        error_vector = jnp.stack(
-            (
-                errors["anchor_z_error"],
-                errors["anchor_xy_error"],
-                errors["gravity_z_error"],
-                errors["distal_z_error"],
+        anchor_xy_slack = anchor_xy_squared_slack(
+            env.body_pos_reference[knot_phases[knot], 0, :2],
+            body_pos[0, :2],
+            limit=float(TERMINATION_LIMITS[1]),
+        )
+        terminal_slacks.append(
+            jnp.stack(
+                (
+                    TERMINATION_LIMITS[0] - errors["anchor_z_error"],
+                    anchor_xy_slack,
+                    TERMINATION_LIMITS[2] - errors["gravity_z_error"],
+                    TERMINATION_LIMITS[3] - errors["distal_z_error"],
+                )
             )
         )
-        terminal_slacks.append(TERMINATION_LIMITS - error_vector)
         contact_data = mjx.forward(env.mjx_model, data)
         contact_slacks.append(
             jnp.reshape(
