@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -12,6 +13,9 @@ MODEL = Path(
 REFERENCE = Path(
     "/home/ubuntu/projects/diffsim2real/outputs/w02_rmrspec_grounded.npz"
 )
+CONTROLLER = Path(
+    "/home/ubuntu/projects/diffsim2real/outputs/rmr_torques_iter4999.npz"
+)
 
 
 class G1TrackingReferenceTest(unittest.TestCase):
@@ -21,11 +25,19 @@ class G1TrackingReferenceTest(unittest.TestCase):
             RMR_G1_BODY_NAMES,
             load_mujoco_reference,
         )
+        from src.envs.g1_tracking.controller import load_rmr_controller
 
         cls.model = mujoco.MjModel.from_xml_path(str(MODEL))
+        cls.controller = load_rmr_controller(cls.model, CONTROLLER)
         cls.reference = load_mujoco_reference(
             cls.model, REFERENCE, RMR_G1_BODY_NAMES
         )
+
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
 
     def test_body_order_matches_upstream_rmr_g1_task(self):
         from src.envs.g1_tracking.reference import RMR_G1_BODY_NAMES
@@ -101,6 +113,88 @@ class G1TrackingReferenceTest(unittest.TestCase):
     def test_body_quaternions_are_unit_length(self):
         norms = np.linalg.norm(self.reference.body_quat, axis=-1)
         np.testing.assert_allclose(norms, 1.0, atol=1e-6)
+
+    def test_named_rmr_reference_maps_joints_and_recovers_root_velocity(self):
+        from src.envs.g1_tracking.reference import load_mujoco_reference
+
+        frames = 5
+        source_joint_pos = (
+            np.arange(frames * 29, dtype=np.float32).reshape(frames, 29)
+            / 1000.0
+        )
+        source_joint_vel = source_joint_pos / 10.0
+        root_pos = np.zeros((frames, 1, 3), dtype=np.float32)
+        root_pos[:, 0, 2] = 0.8
+        root_quat = np.zeros((frames, 1, 4), dtype=np.float32)
+        root_quat[..., 0] = 1.0
+        root_lin_vel = np.tile(
+            np.asarray([0.2, -0.1, 0.05], dtype=np.float32),
+            (frames, 1, 1),
+        )
+        root_ang_vel = np.tile(
+            np.asarray([0.1, 0.2, -0.15], dtype=np.float32),
+            (frames, 1, 1),
+        )
+        fixture = Path(self.temporary_directory.name) / "named_rmr.npz"
+        np.savez(
+            fixture,
+            fps=np.asarray([50], dtype=np.int32),
+            joint_pos=source_joint_pos,
+            joint_vel=source_joint_vel,
+            body_pos_w=root_pos,
+            body_quat_w=root_quat,
+            body_lin_vel_w=root_lin_vel,
+            body_ang_vel_w=root_ang_vel,
+            joint_names=np.asarray(self.controller.actor_joint_names),
+            root_body_name=np.asarray("pelvis"),
+            root_body_index=np.asarray(0, dtype=np.int32),
+        )
+
+        reference = load_mujoco_reference(
+            self.model,
+            fixture,
+            controller=self.controller,
+        )
+
+        self.assertEqual(reference.fps, 50.0)
+        source_to_model = self.controller.actor_to_model_permutation
+        np.testing.assert_allclose(
+            reference.qpos[:, 7:], source_joint_pos[:, source_to_model], atol=0.0
+        )
+        np.testing.assert_allclose(
+            reference.qvel[:, 6:], source_joint_vel[:, source_to_model], atol=0.0
+        )
+        np.testing.assert_allclose(
+            reference.body_pos[:, 0], root_pos[:, 0], atol=2e-5, rtol=0.0
+        )
+        np.testing.assert_allclose(
+            reference.body_lin_vel[:, 0],
+            root_lin_vel[:, 0],
+            atol=2e-5,
+            rtol=0.0,
+        )
+        np.testing.assert_allclose(
+            reference.body_ang_vel[:, 0],
+            root_ang_vel[:, 0],
+            atol=2e-5,
+            rtol=0.0,
+        )
+
+    def test_legacy_xv_reference_remains_unchanged(self):
+        from src.envs.g1_tracking.reference import load_mujoco_reference
+
+        actual = load_mujoco_reference(self.model, REFERENCE)
+        with np.load(REFERENCE, allow_pickle=False) as archive:
+            expected_qpos = np.array(archive["X"], dtype=np.float64, copy=True)
+            expected_qpos[:, 3:7] /= np.linalg.norm(
+                expected_qpos[:, 3:7], axis=-1, keepdims=True
+            )
+            np.testing.assert_array_equal(actual.qpos, expected_qpos)
+            np.testing.assert_array_equal(
+                actual.qvel,
+                np.asarray(archive["V"], dtype=np.float64),
+            )
+        self.assertIsNone(actual.fps)
 
 
 if __name__ == "__main__":
