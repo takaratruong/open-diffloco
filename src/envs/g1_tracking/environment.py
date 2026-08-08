@@ -134,6 +134,9 @@ class G1TrackingEnv:
         effort_limit_scale: float = 1.0,
         termination_margin_weight: float = 0.0,
         reference_reset_noise_scale: float = 0.0,
+        carried_reset_bank_path: str | None = None,
+        carried_reset_probability: float = 0.0,
+        carried_reset_bank_start: int = 0,
         **_unused_go2_options,
     ):
         if actor_history_len < 1:
@@ -176,6 +179,50 @@ class G1TrackingEnv:
                 "reference_reset_noise_scale must be non-negative and finite"
             )
         self.reference_reset_noise_scale = float(reference_reset_noise_scale)
+        if (
+            isinstance(carried_reset_probability, bool)
+            or not np.isfinite(carried_reset_probability)
+            or not 0.0 <= carried_reset_probability <= 1.0
+        ):
+            raise ValueError(
+                "carried_reset_probability must be finite and in [0, 1]"
+            )
+        if (
+            isinstance(carried_reset_bank_start, bool)
+            or not isinstance(carried_reset_bank_start, int)
+            or carried_reset_bank_start < 0
+        ):
+            raise ValueError(
+                "carried_reset_bank_start must be a non-negative integer"
+            )
+        if carried_reset_probability > 0.0 and carried_reset_bank_path is None:
+            raise ValueError(
+                "carried_reset_bank_path is required when "
+                "carried_reset_probability is positive"
+            )
+        if carried_reset_bank_path is not None and carried_reset_probability == 0.0:
+            raise ValueError(
+                "carried_reset_probability must be positive when "
+                "carried_reset_bank_path is set"
+            )
+        if (
+            carried_reset_bank_path is not None
+            and self.reference_reset_noise_scale > 0.0
+        ):
+            raise ValueError(
+                "carried reset banks and reference reset noise are mutually exclusive"
+            )
+        self.carried_reset_bank_path = (
+            None
+            if carried_reset_bank_path is None
+            else str(Path(carried_reset_bank_path).resolve())
+        )
+        self.carried_reset_probability = float(carried_reset_probability)
+        self.carried_reset_bank_start = carried_reset_bank_start
+        self.carried_reset_bank_size = 0
+        self.carried_reset_qpos = None
+        self.carried_reset_qvel = None
+        self.carried_reset_phase = None
         mass_values = np.asarray(mass_range, dtype=np.float64)
         if (
             mass_values.shape != (2,)
@@ -226,6 +273,68 @@ class G1TrackingEnv:
 
         self.qpos_reference = jp.asarray(self.reference.qpos)
         self.qvel_reference = jp.asarray(self.reference.qvel)
+        if self.carried_reset_bank_path is not None:
+            bank_path = Path(self.carried_reset_bank_path)
+            if not bank_path.is_file():
+                raise ValueError(
+                    f"carried_reset_bank_path does not exist: {bank_path}"
+                )
+            try:
+                with np.load(bank_path, allow_pickle=False) as archive:
+                    carried_qpos = np.asarray(archive["qpos"], dtype=np.float64)
+                    carried_qvel = np.asarray(archive["qvel"], dtype=np.float64)
+                    carried_phase_raw = np.asarray(archive["phase"])
+            except (KeyError, OSError, ValueError) as error:
+                raise ValueError(
+                    "carried reset bank must be a readable NPZ with "
+                    "qpos, qvel, and phase"
+                ) from error
+            if carried_phase_raw.ndim != 1:
+                raise ValueError("carried reset bank phase must be a vector")
+            carried_phase = carried_phase_raw.astype(np.int32)
+            if not np.array_equal(carried_phase_raw, carried_phase):
+                raise ValueError("carried reset bank phase must be integer-valued")
+            if (
+                carried_qpos.ndim != 2
+                or carried_qpos.shape[1] != self.mj_model.nq
+                or carried_qvel.ndim != 2
+                or carried_qvel.shape[1] != self.mj_model.nv
+                or carried_qpos.shape[0] != carried_qvel.shape[0]
+                or carried_qpos.shape[0] != carried_phase.shape[0]
+            ):
+                raise ValueError(
+                    "carried reset bank qpos/qvel/phase shapes do not align"
+                )
+            if (
+                carried_qpos.shape[0] == 0
+                or not np.isfinite(carried_qpos).all()
+                or not np.isfinite(carried_qvel).all()
+            ):
+                raise ValueError(
+                    "carried reset bank states must be nonempty and finite"
+                )
+            if np.any(carried_phase < 0) or np.any(
+                carried_phase >= self.reference_length - 1
+            ):
+                raise ValueError(
+                    "carried reset bank phase lies outside the training range"
+                )
+            quaternion_norm = np.linalg.norm(carried_qpos[:, 3:7], axis=1)
+            if not np.allclose(quaternion_norm, 1.0, atol=1e-5, rtol=0.0):
+                raise ValueError(
+                    "carried reset bank root quaternions must be normalized"
+                )
+            if self.carried_reset_bank_start >= carried_qpos.shape[0]:
+                raise ValueError(
+                    "carried_reset_bank_start must leave at least one state"
+                )
+            bank_slice = slice(self.carried_reset_bank_start, None)
+            self.carried_reset_qpos = jp.asarray(carried_qpos[bank_slice])
+            self.carried_reset_qvel = jp.asarray(carried_qvel[bank_slice])
+            self.carried_reset_phase = jp.asarray(carried_phase[bank_slice])
+            self.carried_reset_bank_size = int(
+                self.carried_reset_qpos.shape[0]
+            )
         self.body_pos_reference = jp.asarray(self.reference.body_pos)
         self.body_quat_reference = jp.asarray(self.reference.body_quat)
         self.body_lin_vel_reference = jp.asarray(
@@ -576,6 +685,48 @@ class G1TrackingEnv:
         )
 
     def reset(self, rng: jax.Array, difficulty: jax.Array) -> EnvState:
+        if self.carried_reset_bank_path is not None:
+            rng, phase_key, bank_key, choice_key = jax.random.split(rng, 4)
+            reference_phase = jax.random.randint(
+                phase_key,
+                (),
+                minval=0,
+                maxval=self.reference_length - 2,
+                dtype=jp.int32,
+            )
+            bank_index = jax.random.randint(
+                bank_key,
+                (),
+                minval=0,
+                maxval=self.carried_reset_bank_size,
+                dtype=jp.int32,
+            )
+            use_carried = jax.random.bernoulli(
+                choice_key, self.carried_reset_probability
+            )
+            phase = jp.where(
+                use_carried,
+                self.carried_reset_phase[bank_index],
+                reference_phase,
+            )
+            qpos = jp.where(
+                use_carried,
+                self.carried_reset_qpos[bank_index],
+                self.qpos_reference[reference_phase],
+            )
+            qvel = jp.where(
+                use_carried,
+                self.carried_reset_qvel[bank_index],
+                self.qvel_reference[reference_phase],
+            )
+            data = mjx.make_data(self.mjx_model).replace(qpos=qpos, qvel=qvel)
+            data = mjx.forward(self.mjx_model, data)
+            return self._initial_state_from_data(
+                data=data,
+                rng=rng,
+                difficulty=difficulty,
+                phase=phase,
+            )
         if self.reference_reset_noise_scale == 0.0:
             rng, phase_key = jax.random.split(rng)
             phase = jax.random.randint(

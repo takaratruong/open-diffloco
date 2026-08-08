@@ -37,6 +37,9 @@ def build_train_kwargs(
     effort_limit_scale: float = 1.0,
     termination_margin_weight: float = 0.0,
     reference_reset_noise_scale: float = 0.0,
+    carried_reset_bank_path: str | Path | None = None,
+    carried_reset_probability: float = 0.0,
+    carried_reset_bank_start: int = 0,
     actor_hidden: tuple[int, ...] = (512, 256, 128),
     actor_layer_norm: bool = True,
     actor_zero_output: bool = True,
@@ -111,6 +114,36 @@ def build_train_kwargs(
         raise ValueError(
             "reference_reset_noise_scale must be non-negative and finite"
         )
+    if (
+        isinstance(carried_reset_probability, bool)
+        or not math.isfinite(carried_reset_probability)
+        or not 0.0 <= carried_reset_probability <= 1.0
+    ):
+        raise ValueError(
+            "carried_reset_probability must be finite and in [0, 1]"
+        )
+    if (
+        isinstance(carried_reset_bank_start, bool)
+        or not isinstance(carried_reset_bank_start, int)
+        or carried_reset_bank_start < 0
+    ):
+        raise ValueError(
+            "carried_reset_bank_start must be a non-negative integer"
+        )
+    if carried_reset_probability > 0.0 and carried_reset_bank_path is None:
+        raise ValueError(
+            "carried_reset_bank_path is required when "
+            "carried_reset_probability is positive"
+        )
+    if carried_reset_bank_path is not None and carried_reset_probability == 0.0:
+        raise ValueError(
+            "carried_reset_probability must be positive when "
+            "carried_reset_bank_path is set"
+        )
+    if carried_reset_bank_path is not None and reference_reset_noise_scale > 0.0:
+        raise ValueError(
+            "carried reset banks and reference reset noise are mutually exclusive"
+        )
     kwargs = build_100hz_train_kwargs(
         steps=steps,
         num_envs=num_envs,
@@ -148,6 +181,13 @@ def build_train_kwargs(
             "effort_limit_scale": effort_limit_scale,
             "termination_margin_weight": termination_margin_weight,
             "reference_reset_noise_scale": reference_reset_noise_scale,
+            "carried_reset_bank_path": (
+                None
+                if carried_reset_bank_path is None
+                else str(carried_reset_bank_path)
+            ),
+            "carried_reset_probability": carried_reset_probability,
+            "carried_reset_bank_start": carried_reset_bank_start,
             "actor_hidden": actor_hidden,
             "actor_layer_norm": actor_layer_norm,
             "actor_zero_output": actor_zero_output,
@@ -212,6 +252,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--reference-reset-noise-scale", type=float, default=0.0
+    )
+    parser.add_argument("--carried-reset-bank", type=Path)
+    parser.add_argument(
+        "--carried-reset-probability", type=float, default=0.0
+    )
+    parser.add_argument(
+        "--carried-reset-bank-start", type=int, default=0
     )
     parser.add_argument(
         "--actor-hidden",
@@ -284,6 +331,9 @@ def main() -> None:
                 reference_reset_noise_scale=(
                     args.reference_reset_noise_scale
                 ),
+                carried_reset_bank_path=args.carried_reset_bank,
+                carried_reset_probability=args.carried_reset_probability,
+                carried_reset_bank_start=args.carried_reset_bank_start,
                 actor_hidden=tuple(args.actor_hidden),
                 actor_layer_norm=not args.no_actor_layer_norm,
                 actor_zero_output=not args.random_actor_output_head,

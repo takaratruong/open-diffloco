@@ -169,7 +169,7 @@ def _sha256_file(path: Path, block_size: int = 1024 * 1024) -> str:
 def reference_hparams_for_env(env) -> dict[str, object]:
     """Returns the immutable G1 reference contract recorded with a run."""
     reference_path = Path(env.reference_path).resolve()
-    return {
+    hparams = {
         "reference_path": str(reference_path),
         "reference_sha256": _sha256_file(reference_path),
         "reference_fps": env.reference.fps,
@@ -177,6 +177,17 @@ def reference_hparams_for_env(env) -> dict[str, object]:
         "reference_states": int(env.reference.qpos.shape[0]),
         "reference_transitions": int(env.reference_transitions),
     }
+    if getattr(env, "carried_reset_bank_path", None) is not None:
+        bank_path = Path(env.carried_reset_bank_path).resolve()
+        hparams.update(
+            {
+                "carried_reset_bank_path": str(bank_path),
+                "carried_reset_bank_sha256": _sha256_file(bank_path),
+                "carried_reset_bank_start": int(env.carried_reset_bank_start),
+                "carried_reset_bank_size": int(env.carried_reset_bank_size),
+            }
+        )
+    return hparams
 
 
 def train(
@@ -241,6 +252,9 @@ def train(
     effort_limit_scale: float = 1.0,
     termination_margin_weight: float = 0.0,
     reference_reset_noise_scale: float = 0.0,
+    carried_reset_bank_path: str | None = None,
+    carried_reset_probability: float = 0.0,
+    carried_reset_bank_start: int = 0,
     reference_path: str | None = None,
     reference_stride: int | None = None,
 ):
@@ -273,6 +287,9 @@ def train(
                                    margin surrogate weight.
         reference_reset_noise_scale: Scale of upstream RMR reference-reset
                                      perturbations; zero preserves exact RSI.
+        carried_reset_bank_path: Optional NPZ containing rollout qpos/qvel/phase.
+        carried_reset_probability: Fraction of resets sampled from that bank.
+        carried_reset_bank_start: Leading bank rows excluded from sampling.
         kp_range: (lo, hi) absolute range for actuator position gain per episode
         kd_range: (lo, hi) absolute range for actuator velocity gain per episode
         push_velocity_range: Interval root x/y velocity disturbance range.
@@ -339,6 +356,36 @@ def train(
         raise ValueError(
             "reference_reset_noise_scale must be non-negative and finite"
         )
+    if (
+        isinstance(carried_reset_probability, bool)
+        or not math.isfinite(carried_reset_probability)
+        or not 0.0 <= carried_reset_probability <= 1.0
+    ):
+        raise ValueError(
+            "carried_reset_probability must be finite and in [0, 1]"
+        )
+    if (
+        isinstance(carried_reset_bank_start, bool)
+        or not isinstance(carried_reset_bank_start, int)
+        or carried_reset_bank_start < 0
+    ):
+        raise ValueError(
+            "carried_reset_bank_start must be a non-negative integer"
+        )
+    if carried_reset_probability > 0.0 and carried_reset_bank_path is None:
+        raise ValueError(
+            "carried_reset_bank_path is required when "
+            "carried_reset_probability is positive"
+        )
+    if carried_reset_bank_path is not None and carried_reset_probability == 0.0:
+        raise ValueError(
+            "carried_reset_probability must be positive when "
+            "carried_reset_bank_path is set"
+        )
+    if carried_reset_bank_path is not None and reference_reset_noise_scale > 0.0:
+        raise ValueError(
+            "carried reset banks and reference reset noise are mutually exclusive"
+        )
     if reference_stride is not None and (
         isinstance(reference_stride, bool)
         or not isinstance(reference_stride, int)
@@ -398,6 +445,15 @@ def train(
             )
             reference_reset_noise_scale = resumed_hparams.get(
                 "reference_reset_noise_scale", reference_reset_noise_scale
+            )
+            carried_reset_bank_path = resumed_hparams.get(
+                "carried_reset_bank_path", carried_reset_bank_path
+            )
+            carried_reset_probability = resumed_hparams.get(
+                "carried_reset_probability", carried_reset_probability
+            )
+            carried_reset_bank_start = resumed_hparams.get(
+                "carried_reset_bank_start", carried_reset_bank_start
             )
             if "kp_range" in resumed_hparams:
                 kp_range = tuple(resumed_hparams["kp_range"])
@@ -462,6 +518,9 @@ def train(
                 "effort_limit_scale": effort_limit_scale,
                 "termination_margin_weight": termination_margin_weight,
                 "reference_reset_noise_scale": reference_reset_noise_scale,
+                "carried_reset_bank_path": carried_reset_bank_path,
+                "carried_reset_probability": carried_reset_probability,
+                "carried_reset_bank_start": carried_reset_bank_start,
             }
         )
         if reference_path is not None:
@@ -1525,6 +1584,9 @@ def train(
         "effort_limit_scale": effort_limit_scale,
         "termination_margin_weight": termination_margin_weight,
         "reference_reset_noise_scale": reference_reset_noise_scale,
+        "carried_reset_bank_path": carried_reset_bank_path,
+        "carried_reset_probability": carried_reset_probability,
+        "carried_reset_bank_start": carried_reset_bank_start,
         "kp_range": list(kp_range),
         "kd_range": list(kd_range),
         "com_offset_range": list(com_offset_range),

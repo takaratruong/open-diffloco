@@ -246,6 +246,63 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
             atol=1e-7,
         )
 
+    def test_carried_reset_bank_samples_actual_states_and_phases(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        with tempfile.TemporaryDirectory() as directory:
+            bank_path = Path(directory) / "carried_reset_bank.npz"
+            phases = np.array([21, 37], dtype=np.int32)
+            qpos = np.asarray(self.env.qpos_reference[phases]).copy()
+            qvel = np.asarray(self.env.qvel_reference[phases]).copy()
+            qpos[:, 2] -= np.array([0.03, 0.08])
+            qvel[:, 2] -= np.array([0.1, 0.2])
+            np.savez_compressed(
+                bank_path,
+                phase=phases,
+                qpos=qpos,
+                qvel=qvel,
+            )
+            env = G1TrackingEnv(
+                xml_path=str(MODEL),
+                reference_path=str(REFERENCE),
+                controller_path=str(CONTROLLER),
+                actor_history_len=1,
+                carried_reset_bank_path=str(bank_path),
+                carried_reset_probability=1.0,
+                carried_reset_bank_start=1,
+            )
+
+            state = env.reset(jax.random.PRNGKey(29), jnp.array(0.0))
+
+        self.assertEqual(int(state.info["phase"]), 37)
+        np.testing.assert_allclose(state.data.qpos, qpos[1], atol=1e-7)
+        np.testing.assert_allclose(state.data.qvel, qvel[1], atol=1e-7)
+        self.assertEqual(env.carried_reset_bank_size, 1)
+
+    def test_carried_reset_bank_is_default_off_and_validated(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        self.assertIsNone(self.env.carried_reset_bank_path)
+        self.assertEqual(self.env.carried_reset_probability, 0.0)
+        self.assertEqual(self.env.carried_reset_bank_start, 0)
+        for probability in (-0.1, 1.1, float("nan"), True):
+            with self.subTest(probability=probability):
+                with self.assertRaisesRegex(
+                    ValueError, "carried_reset_probability"
+                ):
+                    G1TrackingEnv(
+                        carried_reset_bank_path="/tmp/missing.npz",
+                        carried_reset_probability=probability,
+                    )
+        with self.assertRaisesRegex(ValueError, "carried_reset_bank_path"):
+            G1TrackingEnv(carried_reset_probability=0.5)
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            G1TrackingEnv(
+                carried_reset_bank_path="/tmp/missing.npz",
+                carried_reset_probability=0.5,
+                reference_reset_noise_scale=1.0,
+            )
+
     def test_fixed_phase_reset_supports_paired_evaluation(self):
         env = self.env
         state = env.reset_at_phase(

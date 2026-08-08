@@ -331,6 +331,48 @@ class G1TrackingRunnerTest(unittest.TestCase):
 
         self.assertEqual(kwargs["reference_reset_noise_scale"], 1.0)
 
+    def test_native_rmr_runner_transports_carried_reset_bank(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        kwargs = build_train_kwargs(
+            steps=65_536,
+            num_envs=256,
+            seed=3,
+            checkpoint_interval=16_384,
+            validated_task=True,
+            carried_reset_bank_path="/tmp/carried_states.npz",
+            carried_reset_probability=0.5,
+            carried_reset_bank_start=64,
+        )
+
+        self.assertEqual(
+            kwargs["carried_reset_bank_path"], "/tmp/carried_states.npz"
+        )
+        self.assertEqual(kwargs["carried_reset_probability"], 0.5)
+        self.assertEqual(kwargs["carried_reset_bank_start"], 64)
+
+    def test_native_rmr_runner_rejects_invalid_carried_reset_options(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        with self.assertRaisesRegex(ValueError, "carried_reset_bank_path"):
+            build_train_kwargs(
+                steps=65_536,
+                num_envs=256,
+                seed=3,
+                checkpoint_interval=16_384,
+                carried_reset_probability=0.5,
+            )
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            build_train_kwargs(
+                steps=65_536,
+                num_envs=256,
+                seed=3,
+                checkpoint_interval=16_384,
+                reference_reset_noise_scale=1.0,
+                carried_reset_bank_path="/tmp/carried_states.npz",
+                carried_reset_probability=0.5,
+            )
+
     def test_native_rmr_runner_rejects_invalid_reference_reset_noise_scale(self):
         from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
 
