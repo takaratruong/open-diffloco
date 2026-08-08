@@ -438,7 +438,7 @@ def physical_path_slack_components(
         anchor_xy_slack = anchor_xy_squared_slack(
             env.body_pos_reference[knot_phases[knot], 0, :2],
             body_pos[0, :2],
-            limit=float(TERMINATION_LIMITS[1]),
+            limit=1.3,
         )
         terminal_slacks.append(
             jnp.stack(

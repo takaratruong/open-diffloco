@@ -54,6 +54,22 @@ class G1FailureCollocationTest(unittest.TestCase):
                 )
                 self.assertEqual(int(np.sign(slack)), expected_sign)
 
+    def test_anchor_xy_squared_slack_jvp_is_finite_at_zero_error(self):
+        reference_xy = jnp.array([0.5, -0.25], dtype=jnp.float64)
+
+        value, directional_derivative = jax.jvp(
+            jax.jit(
+                lambda actual_xy: anchor_xy_squared_slack(
+                    reference_xy, actual_xy, limit=1.3
+                )
+            ),
+            (reference_xy,),
+            (jnp.full_like(reference_xy, 1e-5),),
+        )
+
+        self.assertAlmostEqual(float(value), 1.3**2)
+        self.assertEqual(float(directional_derivative), 0.0)
+
     def test_default_failure_window_has_fixed_small_dimensions(self):
         window = FailureWindow()
 
