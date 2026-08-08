@@ -317,6 +317,38 @@ class G1TrackingRunnerTest(unittest.TestCase):
 
         self.assertEqual(kwargs["termination_margin_weight"], 0.5)
 
+    def test_native_rmr_runner_transports_reference_reset_noise_scale(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        kwargs = build_train_kwargs(
+            steps=65_536,
+            num_envs=256,
+            seed=3,
+            checkpoint_interval=16_384,
+            validated_task=True,
+            reference_reset_noise_scale=1.0,
+        )
+
+        self.assertEqual(kwargs["reference_reset_noise_scale"], 1.0)
+
+    def test_native_rmr_runner_rejects_invalid_reference_reset_noise_scale(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        for scale in (-1.0, float("nan"), float("inf"), True):
+            with self.subTest(scale=scale):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "reference_reset_noise_scale",
+                ):
+                    build_train_kwargs(
+                        steps=65_536,
+                        num_envs=256,
+                        seed=3,
+                        checkpoint_interval=16_384,
+                        validated_task=True,
+                        reference_reset_noise_scale=scale,
+                    )
+
     def test_native_rmr_runner_rejects_invalid_termination_margin_weight(self):
         from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
 

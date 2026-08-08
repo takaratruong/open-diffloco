@@ -240,6 +240,7 @@ def train(
     differentiate_source_feedback: bool = True,
     effort_limit_scale: float = 1.0,
     termination_margin_weight: float = 0.0,
+    reference_reset_noise_scale: float = 0.0,
     reference_path: str | None = None,
     reference_stride: int | None = None,
 ):
@@ -270,6 +271,8 @@ def train(
         effort_limit_scale: Fixed G1 controller torque-limit multiplier.
         termination_margin_weight: Optional differentiable G1 termination-
                                    margin surrogate weight.
+        reference_reset_noise_scale: Scale of upstream RMR reference-reset
+                                     perturbations; zero preserves exact RSI.
         kp_range: (lo, hi) absolute range for actuator position gain per episode
         kd_range: (lo, hi) absolute range for actuator velocity gain per episode
         push_velocity_range: Interval root x/y velocity disturbance range.
@@ -328,6 +331,14 @@ def train(
         raise ValueError(
             "termination_margin_weight must be non-negative and finite"
         )
+    if (
+        isinstance(reference_reset_noise_scale, bool)
+        or not math.isfinite(reference_reset_noise_scale)
+        or reference_reset_noise_scale < 0.0
+    ):
+        raise ValueError(
+            "reference_reset_noise_scale must be non-negative and finite"
+        )
     if reference_stride is not None and (
         isinstance(reference_stride, bool)
         or not isinstance(reference_stride, int)
@@ -384,6 +395,9 @@ def train(
             )
             reference_stride = resumed_hparams.get(
                 "reference_stride", reference_stride
+            )
+            reference_reset_noise_scale = resumed_hparams.get(
+                "reference_reset_noise_scale", reference_reset_noise_scale
             )
             if "kp_range" in resumed_hparams:
                 kp_range = tuple(resumed_hparams["kp_range"])
@@ -447,6 +461,7 @@ def train(
             {
                 "effort_limit_scale": effort_limit_scale,
                 "termination_margin_weight": termination_margin_weight,
+                "reference_reset_noise_scale": reference_reset_noise_scale,
             }
         )
         if reference_path is not None:
@@ -1509,6 +1524,7 @@ def train(
         "mass_range": list(mass_range),
         "effort_limit_scale": effort_limit_scale,
         "termination_margin_weight": termination_margin_weight,
+        "reference_reset_noise_scale": reference_reset_noise_scale,
         "kp_range": list(kp_range),
         "kd_range": list(kd_range),
         "com_offset_range": list(com_offset_range),

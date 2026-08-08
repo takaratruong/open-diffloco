@@ -36,6 +36,7 @@ def build_train_kwargs(
     body_mass_scale: float = 1.0,
     effort_limit_scale: float = 1.0,
     termination_margin_weight: float = 0.0,
+    reference_reset_noise_scale: float = 0.0,
     actor_hidden: tuple[int, ...] = (512, 256, 128),
     actor_layer_norm: bool = True,
     actor_zero_output: bool = True,
@@ -102,6 +103,14 @@ def build_train_kwargs(
         raise ValueError(
             "termination_margin_weight must be non-negative and finite"
         )
+    if (
+        isinstance(reference_reset_noise_scale, bool)
+        or not math.isfinite(reference_reset_noise_scale)
+        or reference_reset_noise_scale < 0.0
+    ):
+        raise ValueError(
+            "reference_reset_noise_scale must be non-negative and finite"
+        )
     kwargs = build_100hz_train_kwargs(
         steps=steps,
         num_envs=num_envs,
@@ -138,6 +147,7 @@ def build_train_kwargs(
             "mass_range": (body_mass_scale, body_mass_scale),
             "effort_limit_scale": effort_limit_scale,
             "termination_margin_weight": termination_margin_weight,
+            "reference_reset_noise_scale": reference_reset_noise_scale,
             "actor_hidden": actor_hidden,
             "actor_layer_norm": actor_layer_norm,
             "actor_zero_output": actor_zero_output,
@@ -199,6 +209,9 @@ def main() -> None:
     parser.add_argument("--effort-limit-scale", type=float, default=1.0)
     parser.add_argument(
         "--termination-margin-weight", type=float, default=0.0
+    )
+    parser.add_argument(
+        "--reference-reset-noise-scale", type=float, default=0.0
     )
     parser.add_argument(
         "--actor-hidden",
@@ -267,6 +280,9 @@ def main() -> None:
                 effort_limit_scale=args.effort_limit_scale,
                 termination_margin_weight=(
                     args.termination_margin_weight
+                ),
+                reference_reset_noise_scale=(
+                    args.reference_reset_noise_scale
                 ),
                 actor_hidden=tuple(args.actor_hidden),
                 actor_layer_norm=not args.no_actor_layer_norm,
