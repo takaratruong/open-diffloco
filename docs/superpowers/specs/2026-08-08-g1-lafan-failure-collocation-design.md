@@ -103,7 +103,13 @@ Before any solve, the vertical slice must prove:
    floating-point-near-zero defects and unit-quaternion residuals;
 3. the scalar objective, equality directional derivative, and constraint
    directional derivative are finite on a one-segment physical smoke case;
-4. all phase, state, action, reference, model, solver, and precision identities
+4. the complete 12-segment/852-residual map and its directional derivative are
+   finite, with at least one probed segment explicitly verified to begin in
+   active contact;
+5. direct plant calls are exactly deterministic, while the separately compiled
+   checkpointed task step remains within declared `3e-6` qpos and `3e-4` qvel
+   compiler-path bounds;
+6. all phase, state, action, reference, model, solver, and precision identities
    are reported.
 
 No multi-minute or multi-iteration optimizer may run until these gates pass.
@@ -124,6 +130,32 @@ The first material gate is strict survival of at least 161 transitions: 25
 beyond the selected actor's immutable 136-transition baseline. Completion of
 all 499 transitions is a stronger outcome. Anything shorter than 161 is
 nonmaterial even if transcription defects or local pelvis height improve.
+
+## Framework-neutral corrected episode adapter
+
+The transcription output must not depend on JAX, Flax, or Torch checkpoints.
+Expose one thin local mapping containing exact 0.02-second timing, reference
+chronology, root pose, tracked-body pose and velocity, normalized
+29-dimensional PD-target actions, canonical joint/body orders, hashes, and
+source/correction provenance.
+
+The offline-diffusion lane owns canonical schema
+`sonic_grail_rollout_npz_v1`. The local adapter returns its exact raw fields:
+root position/rotation and world-frame angular velocity; all 30 non-world body
+positions, WXYZ rotations, and world-frame linear velocities; 29 canonical
+joint positions, velocities, normalized PD-target actions, joint names,
+defaults, and action scales; and canonical body names. It preserves pre-action
+state/action chronology without the TML P2/+1 interpretation or a storage
+shift. Source actions are reordered by joint name and converted by preserving
+the physical PD target before applying TML's frozen defaults and scales.
+
+The adapter requires at least 13 state/action rows, exact 0.005-second
+simulation and 0.02-second control timing with decimation four, complete qdot
+and actions, and the frozen raw-action semantics. DiffSim outputs additionally
+bind correction method, run ID, source hash, 40-hex code commit, dynamics model
+hash/backend, `trajectory_source: diffsim_corrected`, and positive episode
+weight, plus the standard clip/origin/checkpoint/config/motion/terrain/GRAIL
+provenance. No direct Torch-through-JAX bridge is required.
 
 ## Failure handling and scope
 

@@ -856,15 +856,24 @@ class G1TrackingEnv:
         ).astype(jp.float64)
         return jp.maximum(terminal, clip_end), terminal
 
-    @functools.partial(jax.checkpoint, static_argnums=(0,))
-    def step(self, state: EnvState, action: jax.Array) -> EnvState:
+    def advance_physics(
+        self, data: mjx.Data, action: jax.Array
+    ) -> tuple[mjx.Data, jax.Array, jax.Array]:
+        """Advance the validated PD/MJX plant without task reset logic."""
         action = self._prepare_action(action)
         position_target = self.default_joints + action * self.action_scales
 
-        def physics_step(data, _):
+        def raw_torque(current_data: mjx.Data) -> jax.Array:
+            return (
+                self.kp * (position_target - current_data.qpos[7:])
+                - self.kd * current_data.qvel[6:]
+            )
+
+        initial_raw_torque = raw_torque(data)
+
+        def physics_step(current_data, _):
             torque = jp.clip(
-                self.kp * (position_target - data.qpos[7:])
-                - self.kd * data.qvel[6:],
+                raw_torque(current_data),
                 -self.effort_limit,
                 self.effort_limit,
             )
@@ -872,14 +881,19 @@ class G1TrackingEnv:
             return (
                 mjx.step(
                     self.mjx_model,
-                    data.replace(qfrc_applied=applied),
+                    current_data.replace(qfrc_applied=applied),
                 ),
                 None,
             )
 
-        data, _ = jax.lax.scan(
-            physics_step, state.data, None, length=self.n_frames
+        advanced, _ = jax.lax.scan(
+            physics_step, data, None, length=self.n_frames
         )
+        return advanced, action, initial_raw_torque
+
+    @functools.partial(jax.checkpoint, static_argnums=(0,))
+    def step(self, state: EnvState, action: jax.Array) -> EnvState:
+        data, action, _ = self.advance_physics(state.data, action)
         next_phase = jp.minimum(
             state.info["phase"] + self.reference_stride,
             self.reference_length - 1,

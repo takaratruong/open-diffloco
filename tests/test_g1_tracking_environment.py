@@ -359,6 +359,50 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         self.assertTrue(np.isfinite(np.asarray(next_state.data.qpos)).all())
         self.assertTrue(np.isfinite(float(next_state.reward)))
 
+    def test_advance_physics_matches_nonterminal_checkpointed_step_data(self):
+        from src.envs.g1_tracking.fixed_solver import (
+            fixed_mjx_solver_outer_loop,
+        )
+
+        env = self.env
+        state = env.reset_at_phase(
+            jax.random.PRNGKey(31), jnp.array(0.0), jnp.array(0)
+        )
+        action = jnp.linspace(-0.2, 0.2, env.action_dim)
+
+        with fixed_mjx_solver_outer_loop():
+            data, prepared_action, raw_torque = env.advance_physics(
+                state.data, action
+            )
+            repeated_data, _, _ = env.advance_physics(state.data, action)
+            stepped = env.step(state, action)
+
+        self.assertEqual(float(stepped.done), 0.0)
+        # JAX lowers the checkpointed whole-task step differently from the
+        # direct plant call.  The fixed-solver patch bounds that compiler-path
+        # difference; direct plant calls are deterministic with one another.
+        np.testing.assert_allclose(
+            data.qpos, stepped.data.qpos, atol=3e-6, rtol=0.0
+        )
+        np.testing.assert_allclose(
+            data.qvel, stepped.data.qvel, atol=3e-4, rtol=0.0
+        )
+        np.testing.assert_array_equal(data.qpos, repeated_data.qpos)
+        np.testing.assert_array_equal(data.qvel, repeated_data.qvel)
+        np.testing.assert_allclose(
+            prepared_action, env._prepare_action(action), atol=0.0
+        )
+        expected_raw_torque = (
+            env.kp
+            * (
+                env.default_joints
+                + prepared_action * env.action_scales
+                - state.data.qpos[7:]
+            )
+            - env.kd * state.data.qvel[6:]
+        )
+        np.testing.assert_allclose(raw_torque, expected_raw_torque, atol=1e-12)
+
     def test_termination_thresholds_match_upstream_rmr(self):
         from src.envs.g1_tracking.environment import _quat_mul
 
