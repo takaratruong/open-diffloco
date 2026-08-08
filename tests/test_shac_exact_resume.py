@@ -2,6 +2,24 @@ import unittest
 
 
 class ShacExactResumeTest(unittest.TestCase):
+    def test_margin_change_requires_explicit_resume_treatment(self):
+        from src.algorithms.shac.algorithm import (
+            validate_termination_margin_resume,
+        )
+
+        resumed = {"termination_margin_weight": 0.0}
+        with self.assertRaisesRegex(ValueError, "must match the checkpoint"):
+            validate_termination_margin_resume(
+                resumed,
+                requested_weight=0.5,
+                allow_change=False,
+            )
+        validate_termination_margin_resume(
+            resumed,
+            requested_weight=0.5,
+            allow_change=True,
+        )
+
     def test_legacy_checkpoint_keeps_original_noise_schedule_endpoint(self):
         from src.algorithms.shac.algorithm import (
             resolve_action_noise_schedule_steps,

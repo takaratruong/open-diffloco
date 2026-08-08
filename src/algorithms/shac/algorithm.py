@@ -190,6 +190,29 @@ def reference_hparams_for_env(env) -> dict[str, object]:
     return hparams
 
 
+def validate_termination_margin_resume(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested_weight: float,
+    allow_change: bool,
+) -> None:
+    """Require an explicit treatment flag before changing a resumed objective."""
+    if not isinstance(allow_change, bool):
+        raise ValueError(
+            "allow_resume_termination_margin_change must be boolean"
+        )
+    resumed_weight = (
+        0.0
+        if not resumed_hparams
+        else resumed_hparams.get("termination_margin_weight", 0.0)
+    )
+    if resumed_weight != requested_weight and not allow_change:
+        raise ValueError(
+            "termination_margin_weight must match the checkpoint unless "
+            "allow_resume_termination_margin_change is enabled"
+        )
+
+
 def train(
     # General
     total_steps: int = 100_000,
@@ -251,6 +274,7 @@ def train(
     differentiate_source_feedback: bool = True,
     effort_limit_scale: float = 1.0,
     termination_margin_weight: float = 0.0,
+    allow_resume_termination_margin_change: bool = False,
     reference_reset_noise_scale: float = 0.0,
     carried_reset_bank_path: str | None = None,
     carried_reset_probability: float = 0.0,
@@ -285,6 +309,8 @@ def train(
         effort_limit_scale: Fixed G1 controller torque-limit multiplier.
         termination_margin_weight: Optional differentiable G1 termination-
                                    margin surrogate weight.
+        allow_resume_termination_margin_change: Explicitly permit a resumed
+                                                 objective-treatment change.
         reference_reset_noise_scale: Scale of upstream RMR reference-reset
                                      perturbations; zero preserves exact RSI.
         carried_reset_bank_path: Optional NPZ containing rollout qpos/qvel/phase.
@@ -347,6 +373,10 @@ def train(
     ):
         raise ValueError(
             "termination_margin_weight must be non-negative and finite"
+        )
+    if not isinstance(allow_resume_termination_margin_change, bool):
+        raise ValueError(
+            "allow_resume_termination_margin_change must be boolean"
         )
     if (
         isinstance(reference_reset_noise_scale, bool)
@@ -418,13 +448,11 @@ def train(
                 raise ValueError(
                     "actor_bootstrap_delay_steps must match the checkpoint"
                 )
-            resumed_margin_weight = resumed_hparams.get(
-                "termination_margin_weight", 0.0
+            validate_termination_margin_resume(
+                resumed_hparams,
+                requested_weight=termination_margin_weight,
+                allow_change=allow_resume_termination_margin_change,
             )
-            if resumed_margin_weight != termination_margin_weight:
-                raise ValueError(
-                    "termination_margin_weight must match the checkpoint"
-                )
             print(
                 f"  Loaded hparams: action_scale={resumed_hparams.get('action_scale')}"
             )
@@ -1583,6 +1611,9 @@ def train(
         "mass_range": list(mass_range),
         "effort_limit_scale": effort_limit_scale,
         "termination_margin_weight": termination_margin_weight,
+        "allow_resume_termination_margin_change": (
+            allow_resume_termination_margin_change
+        ),
         "reference_reset_noise_scale": reference_reset_noise_scale,
         "carried_reset_bank_path": carried_reset_bank_path,
         "carried_reset_probability": carried_reset_probability,

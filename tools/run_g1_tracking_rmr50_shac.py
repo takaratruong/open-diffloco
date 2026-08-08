@@ -36,6 +36,7 @@ def build_train_kwargs(
     body_mass_scale: float = 1.0,
     effort_limit_scale: float = 1.0,
     termination_margin_weight: float = 0.0,
+    allow_resume_termination_margin_change: bool = False,
     reference_reset_noise_scale: float = 0.0,
     carried_reset_bank_path: str | Path | None = None,
     carried_reset_probability: float = 0.0,
@@ -105,6 +106,10 @@ def build_train_kwargs(
     ):
         raise ValueError(
             "termination_margin_weight must be non-negative and finite"
+        )
+    if not isinstance(allow_resume_termination_margin_change, bool):
+        raise ValueError(
+            "allow_resume_termination_margin_change must be boolean"
         )
     if (
         isinstance(reference_reset_noise_scale, bool)
@@ -180,6 +185,9 @@ def build_train_kwargs(
             "mass_range": (body_mass_scale, body_mass_scale),
             "effort_limit_scale": effort_limit_scale,
             "termination_margin_weight": termination_margin_weight,
+            "allow_resume_termination_margin_change": (
+                allow_resume_termination_margin_change
+            ),
             "reference_reset_noise_scale": reference_reset_noise_scale,
             "carried_reset_bank_path": (
                 None
@@ -249,6 +257,10 @@ def main() -> None:
     parser.add_argument("--effort-limit-scale", type=float, default=1.0)
     parser.add_argument(
         "--termination-margin-weight", type=float, default=0.0
+    )
+    parser.add_argument(
+        "--allow-resume-termination-margin-change",
+        action="store_true",
     )
     parser.add_argument(
         "--reference-reset-noise-scale", type=float, default=0.0
@@ -327,6 +339,9 @@ def main() -> None:
                 effort_limit_scale=args.effort_limit_scale,
                 termination_margin_weight=(
                     args.termination_margin_weight
+                ),
+                allow_resume_termination_margin_change=(
+                    args.allow_resume_termination_margin_change
                 ),
                 reference_reset_noise_scale=(
                     args.reference_reset_noise_scale
