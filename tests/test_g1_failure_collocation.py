@@ -135,6 +135,38 @@ class G1FailureCollocationTest(unittest.TestCase):
         self.assertEqual(equalities.shape, (71,))
         np.testing.assert_allclose(equalities, 0.0, atol=1e-12)
 
+    def test_full_window_equalities_and_jvp_are_finite(self):
+        window = FailureWindow()
+        knot_qpos = jnp.zeros(
+            (window.segments + 1, 36), dtype=jnp.float64
+        ).at[:, 3].set(1.0)
+        knot_qvel = jnp.zeros(
+            (window.segments + 1, 35), dtype=jnp.float64
+        )
+        actions = jnp.zeros(
+            (window.transitions, 29), dtype=jnp.float64
+        )
+
+        def step_fn(qpos, qvel, action):
+            return qpos.at[0].add(action[0]), qvel.at[0].add(action[1])
+
+        def equality_fn(current_actions):
+            return multiple_shooting_equalities(
+                step_fn,
+                knot_qpos,
+                knot_qvel,
+                current_actions,
+                segment_steps=window.segment_steps,
+            )
+
+        equalities, equality_jvp = jax.jvp(
+            equality_fn, (actions,), (jnp.full_like(actions, 1e-5),)
+        )
+
+        self.assertEqual(equalities.shape, (window.equality_size,))
+        self.assertTrue(np.isfinite(np.asarray(equalities)).all())
+        self.assertTrue(np.isfinite(np.asarray(equality_jvp)).all())
+
     def test_quadratic_merit_gradient_is_finite(self):
         decision = jnp.array([0.2, -0.3], dtype=jnp.float64)
 

@@ -43,6 +43,8 @@ full-trajectory direction, or require a monolithic long-horizon adjoint.
 
 Use a failure window beginning at phase 111 and ending at phase 135. Divide its
 24 control transitions into 12 independent two-step shooting segments.
+Assemble those independent segment maps with a single vectorized lowering so
+the full residual/JVP probe does not duplicate twelve large MJX graphs.
 
 For segment `s`, the state knot is physical `x_s = (qpos_s, qvel_s)` with
 dimensions 36 and 35. The initial knot is fixed to the selected actor rollout.
