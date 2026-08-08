@@ -1,5 +1,7 @@
 import unittest
 from pathlib import Path
+import subprocess
+import sys
 
 import jax.numpy as jnp
 import mujoco
@@ -13,6 +15,23 @@ from tools.smoke_g1_failure_collocation import (
 
 
 class G1FailureCollocationSmokeTest(unittest.TestCase):
+    def test_cli_help_runs_outside_repository_working_directory(self):
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "tools"
+            / "smoke_g1_failure_collocation.py"
+        )
+
+        result = subprocess.run(
+            [sys.executable, str(script), "--help"],
+            cwd="/tmp",
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+
     def test_cli_requires_pinned_reference_contract(self):
         args = build_parser().parse_args(
             [
