@@ -41,7 +41,7 @@ full-trajectory direction, or require a monolithic long-horizon adjoint.
 
 ## Formulation
 
-Use a failure window beginning at phase 112 and ending at phase 136. Divide its
+Use a failure window beginning at phase 111 and ending at phase 135. Divide its
 24 control transitions into 12 independent two-step shooting segments.
 
 For segment `s`, the state knot is physical `x_s = (qpos_s, qvel_s)` with
@@ -89,8 +89,11 @@ branch must be reported rather than hidden by smoothing.
 ## Initialization and first vertical slice
 
 Capture the selected actor's qpos, qvel, actions, phases, and hard-limit errors
-through phase 136 using the existing rollout-capture path bound to the pinned
-reference. Subsample every second state as knots and retain every action.
+through pre-action phase 135 using the existing rollout-capture path bound to
+the pinned reference. This is the last physical state exposed before the
+strict evaluator's failing transition resets its returned data. Subsample every
+second state from phase 111 as knots and retain every action; do not invent a
+post-reset phase-136 terminal knot.
 
 Before any solve, the vertical slice must prove:
 
