@@ -213,6 +213,14 @@ implemented, and covered by algebraic-equivalence and boundary-sign tests. No
 solve is permitted until its bounded physical rerun passes; contact remains a
 value-only diagnostic.
 
+Final result: terminal/action/torque/contact directional derivatives were all
+finite in the pre-gate diagnostic, with 10 active-contact segments and all 852
+full-window equality JVP entries finite. The artifact is not passing because
+its one-segment identity maximum was `0.019016480604575836`. After restoring
+direct segment assembly and adding a hard `1e-8` identity check, the final run
+failed closed at that check. Do not run a solve or treat the ignored diagnostic
+JSON as a completed smoke artifact.
+
 - [ ] **Step 6: Run focused verification and commit**
 
 Run:

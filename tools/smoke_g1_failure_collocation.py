@@ -24,6 +24,7 @@ from src.envs.g1_tracking.failure_collocation import (
     failure_objective,
     multiple_shooting_equalities,
     physical_path_slack_components,
+    primal_preserving_linearization,
     rollout_segment,
     stateless_physics_step,
     world_body_kinematics,
@@ -198,8 +199,10 @@ def _run_smoke(args: argparse.Namespace) -> dict:
         dtype=jnp.float64,
     )
 
-    def step_fn(qpos, qvel, action):
+    def direct_step_fn(qpos, qvel, action):
         return stateless_physics_step(env, qpos, qvel, action)
+
+    step_fn = primal_preserving_linearization(direct_step_fn)
 
     compiled_rollout = jax.jit(
         lambda qpos, qvel, actions: rollout_segment(

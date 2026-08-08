@@ -193,6 +193,14 @@ residual. That is compiler-path mismatch, not a physical defect. The core
 residual therefore uses the same direct fixed-shape segment map as its seed,
 and the smoke now hard-fails above `1e-8` identity error.
 
+The final hard-gated rerun still exceeded `1e-8` after restoring direct segment
+assembly. The remaining mismatch is therefore transformation-dependent MJX
+primal behavior between the separately compiled seed rollout and the primal
+inside the combined JVP graph, not vectorization alone. A prior diagnostic
+artifact from commit `124850c98dfbfe432f5c256095d909a1f785a225` records finite
+derivatives but is explicitly non-passing because its identity maximum was
+`0.019016480604575836`.
+
 A kinematics-free diagnostic at the exact phase-111 reference body state
 isolated the primitive. The four terminal errors were `[0, 0, 0, 0]`; their JVP
 along the fixed `1e-5` probe direction was
@@ -207,4 +215,19 @@ rewrite, not epsilon smoothing. Unit tests prove the factorization
 `(1.3 - distance) * (1.3 + distance)` and identical inside/boundary/outside
 signs. Contact penetration remains a value-only diagnostic until a separate
 differentiable contact formulation is chosen. No optimizer run is authorized
-until the repeated bounded physical gate passes.
+until both the identity gate and the repeated bounded physical derivative gate
+pass in one invocation.
+
+## Primal-preserving linearization boundary
+
+The bounded follow-up introduces a `custom_jvp` boundary around the exact
+direct stateless physical step. Its primal rule calls that direct step without
+modification; its tangent rule calls the ordinary JAX JVP of the same step. It
+does not substitute finite differences, smooth contact, or change the plant.
+
+Before use on G1, a CPU-only contact-free MJX hinge test requires direct primal
+agreement within `1e-8`, bitwise equality between direct and transformed
+primals, and agreement between the analytic tangent and centered finite
+differences. Only after all three pass may the same boundary enter the bounded
+G1 smoke. Failure of the repeated identity gate blocks this MJX collocation
+path rather than authorizing another approximation layer.

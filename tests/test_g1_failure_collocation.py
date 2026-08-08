@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 import mujoco
 import numpy as np
+from mujoco import mjx
 
 from src.envs.g1_tracking.failure_collocation import (
     FailureWindow,
@@ -17,6 +18,7 @@ from src.envs.g1_tracking.failure_collocation import (
     feasibility_merit,
     multiple_shooting_equalities,
     physical_state_defect,
+    primal_preserving_linearization,
     rollout_segment,
     select_failure_window,
     world_body_kinematics,
@@ -24,6 +26,68 @@ from src.envs.g1_tracking.failure_collocation import (
 
 
 class G1FailureCollocationTest(unittest.TestCase):
+    def test_primal_preserving_linearization_matches_contact_free_fd(self):
+        model = mujoco.MjModel.from_xml_string(
+            "<mujoco><option timestep='.005'/><worldbody>"
+            "<body><joint name='hinge' type='hinge'/>"
+            "<geom type='capsule' size='.05 .2' mass='1'/>"
+            "</body></worldbody><actuator>"
+            "<motor joint='hinge'/></actuator></mujoco>"
+        )
+        mjx_model = mjx.put_model(model)
+
+        def direct_step(qpos, qvel, action):
+            data = mjx.make_data(mjx_model).replace(
+                qpos=qpos, qvel=qvel, ctrl=action
+            )
+            advanced = mjx.step(mjx_model, data)
+            return advanced.qpos, advanced.qvel
+
+        transformed_step = primal_preserving_linearization(direct_step)
+        primals = (
+            jnp.array([0.2], dtype=jnp.float64),
+            jnp.array([-0.1], dtype=jnp.float64),
+            jnp.array([0.3], dtype=jnp.float64),
+        )
+        tangents = (
+            jnp.array([0.4], dtype=jnp.float64),
+            jnp.array([-0.2], dtype=jnp.float64),
+            jnp.array([0.1], dtype=jnp.float64),
+        )
+
+        direct_primal = direct_step(*primals)
+        transformed_primal, tangent = jax.jvp(
+            transformed_step, primals, tangents
+        )
+
+        for direct, transformed in zip(direct_primal, transformed_primal):
+            np.testing.assert_allclose(
+                transformed, direct, atol=1e-8, rtol=0.0
+            )
+            np.testing.assert_array_equal(transformed, direct)
+
+        epsilon = 1e-5
+        plus = direct_step(
+            *(
+                value + epsilon * direction
+                for value, direction in zip(primals, tangents)
+            )
+        )
+        minus = direct_step(
+            *(
+                value - epsilon * direction
+                for value, direction in zip(primals, tangents)
+            )
+        )
+        centered_fd = tuple(
+            (plus_value - minus_value) / (2.0 * epsilon)
+            for plus_value, minus_value in zip(plus, minus)
+        )
+        for actual, expected in zip(tangent, centered_fd):
+            np.testing.assert_allclose(
+                actual, expected, atol=1e-8, rtol=1e-5
+            )
+
     def test_anchor_xy_squared_slack_is_algebraically_equivalent(self):
         reference_xy = jnp.array([0.5, -0.25], dtype=jnp.float64)
         actual_xy = jnp.array([-0.1, 0.4], dtype=jnp.float64)

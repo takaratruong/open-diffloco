@@ -246,6 +246,30 @@ def rollout_segment(
     return qpos, qvel
 
 
+def primal_preserving_linearization(
+    step_fn: Callable[
+        [jax.Array, jax.Array, jax.Array],
+        tuple[jax.Array, jax.Array],
+    ],
+) -> Callable[
+    [jax.Array, jax.Array, jax.Array],
+    tuple[jax.Array, jax.Array],
+]:
+    """Keep the direct plant as primal while exposing its ordinary JVP."""
+
+    @jax.custom_jvp
+    def wrapped(qpos, qvel, action):
+        return step_fn(qpos, qvel, action)
+
+    @wrapped.defjvp
+    def wrapped_jvp(primals, tangents):
+        primal_output = step_fn(*primals)
+        _, tangent_output = jax.jvp(step_fn, primals, tangents)
+        return primal_output, tangent_output
+
+    return wrapped
+
+
 def multiple_shooting_equalities(
     step_fn: Callable[
         [jax.Array, jax.Array, jax.Array],
