@@ -84,9 +84,13 @@ The feasibility merit adds squared equality defects and squared violations of:
 - a declared maximum contact penetration diagnostic.
 
 Contact dynamics themselves remain inside the validated MJX segment map. The
-penetration diagnostic is not a substitute contact model and may be removed
-from the solve if its derivative crosses an active-set discontinuity; that
-branch must be reported rather than hidden by smoothing.
+penetration diagnostic is not a substitute contact model. The first physical
+probe found non-finite derivatives in the combined path vector, so the smoke
+now returns hard/task/action/torque slacks and contact-penetration slacks as
+separate groups. Contact values and active indices remain mandatory evidence;
+non-finite contact derivatives are reported and excluded from the candidate
+solve without smoothing. A later differentiable contact surrogate requires a
+separate preregistered formulation choice.
 
 ## Initialization and first vertical slice
 

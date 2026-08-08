@@ -23,7 +23,7 @@ from src.envs.g1_tracking.failure_collocation import (
     corrected_episode_mapping,
     failure_objective,
     multiple_shooting_equalities,
-    physical_path_slacks,
+    physical_path_slack_groups,
     rollout_segment,
     stateless_physics_step,
     world_body_kinematics,
@@ -239,9 +239,9 @@ def _run_smoke(args: argparse.Namespace) -> dict:
             segment_steps=2,
         )
 
-    def slack_fn(current_decision):
+    def slack_group_fn(current_decision):
         knot_qpos, knot_qvel = knots(current_decision)
-        return physical_path_slacks(
+        return physical_path_slack_groups(
             env,
             knot_qpos,
             knot_qvel,
@@ -260,8 +260,8 @@ def _run_smoke(args: argparse.Namespace) -> dict:
             (current_decision,),
             (current_direction,),
         )
-        slacks, slack_jvp = jax.jvp(
-            slack_fn,
+        slack_groups, slack_group_jvp = jax.jvp(
+            slack_group_fn,
             (current_decision,),
             (current_direction,),
         )
@@ -270,8 +270,8 @@ def _run_smoke(args: argparse.Namespace) -> dict:
             objective_gradient,
             equalities,
             equality_jvp,
-            slacks,
-            slack_jvp,
+            slack_groups,
+            slack_group_jvp,
         )
 
     (
@@ -279,17 +279,23 @@ def _run_smoke(args: argparse.Namespace) -> dict:
         objective_gradient,
         equalities,
         equality_jvp,
-        slacks,
-        slack_jvp,
+        slack_groups,
+        slack_group_jvp,
     ) = derivative_probe(decision, direction)
+    differentiable_slacks, contact_slacks = slack_groups
+    differentiable_slack_jvp, contact_slack_jvp = slack_group_jvp
     equality_array = np.asarray(equalities)
-    slack_array = np.asarray(slacks)
+    differentiable_slack_array = np.asarray(differentiable_slacks)
+    contact_slack_array = np.asarray(contact_slacks)
+    contact_slack_jvp_array = np.asarray(contact_slack_jvp)
     if not np.isfinite(float(objective)):
         raise ValueError("physical objective must be finite")
     if not np.isfinite(equality_array).all():
         raise ValueError("physical equalities must be finite")
-    if not np.isfinite(slack_array).all():
-        raise ValueError("physical slacks must be finite")
+    if not np.isfinite(differentiable_slack_array).all():
+        raise ValueError("differentiable physical slacks must be finite")
+    if not np.isfinite(contact_slack_array).all():
+        raise ValueError("contact diagnostic values must be finite")
 
     full_knot_phases = np.asarray(window.knot_phases, dtype=np.int32)
     full_knot_qpos = jnp.asarray(env.qpos_reference[full_knot_phases])
@@ -468,11 +474,28 @@ def _run_smoke(args: argparse.Namespace) -> dict:
         "active_contact_segment_indices": list(active_contact_segments),
         "active_contact_segment_count": len(active_contact_segments),
         "objective": float(objective),
-        "minimum_slack": float(np.min(slack_array)),
-        "violated_slack_count": int(np.count_nonzero(slack_array < 0.0)),
+        "minimum_differentiable_slack": float(
+            np.min(differentiable_slack_array)
+        ),
+        "violated_differentiable_slack_count": int(
+            np.count_nonzero(differentiable_slack_array < 0.0)
+        ),
+        "minimum_contact_slack": float(np.min(contact_slack_array)),
+        "violated_contact_slack_count": int(
+            np.count_nonzero(contact_slack_array < 0.0)
+        ),
         "objective_gradient": summarize_derivative(objective_gradient),
         "equality_jvp": summarize_derivative(equality_jvp),
-        "constraint_jvp": summarize_derivative(slack_jvp),
+        "constraint_jvp": summarize_derivative(differentiable_slack_jvp),
+        "contact_jvp_finite": bool(
+            np.isfinite(contact_slack_jvp_array).all()
+        ),
+        "contact_jvp_nonfinite_indices": np.flatnonzero(
+            ~np.isfinite(contact_slack_jvp_array)
+        ).tolist(),
+        "contact_derivative_disposition": (
+            "value_only_diagnostic_no_smoothing"
+        ),
         "episode_schema_version": episode["schema_version"],
         "episode_trajectory_source": episode["trajectory_source"],
         "episode_correction_method": episode["correction_method"],

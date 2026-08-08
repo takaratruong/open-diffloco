@@ -371,7 +371,7 @@ def failure_objective(
     )
 
 
-def physical_path_slacks(
+def physical_path_slack_groups(
     env,
     knot_qpos: jax.Array,
     knot_qvel: jax.Array,
@@ -380,8 +380,8 @@ def physical_path_slacks(
     *,
     segment_steps: int,
     contact_penetration_allowance: float = 0.005,
-) -> jax.Array:
-    """Evaluate direct hard-limit, action, torque, and contact slacks."""
+) -> tuple[jax.Array, jax.Array]:
+    """Separate differentiable hard slacks from contact diagnostics."""
     knot_qpos = jnp.asarray(knot_qpos)
     knot_qvel = jnp.asarray(knot_qvel)
     knot_phases = jnp.asarray(knot_phases, dtype=jnp.int32)
@@ -398,7 +398,8 @@ def physical_path_slacks(
     if actions.shape != (segments * segment_steps, ACTION_DIM):
         raise ValueError("slack actions do not align with segments")
 
-    slacks = []
+    differentiable_slacks = []
+    contact_slacks = []
     for knot in range(segments + 1):
         data = mjx.make_data(env.mjx_model).replace(
             qpos=knot_qpos[knot], qvel=knot_qvel[knot]
@@ -418,8 +419,8 @@ def physical_path_slacks(
                 errors["distal_z_error"],
             )
         )
-        slacks.append(TERMINATION_LIMITS - error_vector)
-        slacks.append(
+        differentiable_slacks.append(TERMINATION_LIMITS - error_vector)
+        contact_slacks.append(
             jnp.reshape(
                 jnp.min(data.contact.dist) + contact_penetration_allowance,
                 (1,),
@@ -436,9 +437,37 @@ def physical_path_slacks(
             data, prepared_action, raw_torque = env.advance_physics(
                 data, action
             )
-            slacks.append(1.0 - jnp.abs(prepared_action))
-            slacks.append(env.effort_limit - jnp.abs(raw_torque))
-    return jnp.concatenate(slacks)
+            differentiable_slacks.append(1.0 - jnp.abs(prepared_action))
+            differentiable_slacks.append(
+                env.effort_limit - jnp.abs(raw_torque)
+            )
+    return (
+        jnp.concatenate(differentiable_slacks),
+        jnp.concatenate(contact_slacks),
+    )
+
+
+def physical_path_slacks(
+    env,
+    knot_qpos: jax.Array,
+    knot_qvel: jax.Array,
+    knot_phases: jax.Array,
+    actions: jax.Array,
+    *,
+    segment_steps: int,
+    contact_penetration_allowance: float = 0.005,
+) -> jax.Array:
+    """Evaluate all path slacks, retaining contact as a value diagnostic."""
+    differentiable, contact = physical_path_slack_groups(
+        env,
+        knot_qpos,
+        knot_qvel,
+        knot_phases,
+        actions,
+        segment_steps=segment_steps,
+        contact_penetration_allowance=contact_penetration_allowance,
+    )
+    return jnp.concatenate((differentiable, contact))
 
 
 def world_body_kinematics(

@@ -173,7 +173,7 @@ Expected: imports fail for the new functions.
 
 - [x] **Step 3: Implement only the scalar objective, explicit residuals, and slacks**
 
-The objective is pelvis-height tracking plus `1e-3` joint tracking, actor-action deviation, and action-rate cost. Equality residuals concatenate every 70-coordinate segment defect with free-knot quaternion norm. Inequality slacks concatenate the four exact RMR hard limits, action support, raw torque authority, and contact penetration allowance. `feasibility_merit` adds squared equality residuals and squared negative-slack violations; it does not solve.
+The objective is pelvis-height tracking plus `1e-3` joint tracking, actor-action deviation, and action-rate cost. Equality residuals concatenate every 70-coordinate segment defect with free-knot quaternion norm. Differentiable inequality slacks concatenate the four exact RMR hard limits, action support, and raw torque authority. Contact penetration is returned as a separate value diagnostic because its active-set JVP was non-finite in the first physical probe; preserve and report that failure without smoothing. `feasibility_merit` adds squared equality residuals and squared negative-slack violations; it does not solve.
 
 - [x] **Step 4: Run GREEN unit tests**
 
