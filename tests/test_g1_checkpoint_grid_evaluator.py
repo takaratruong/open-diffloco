@@ -3,20 +3,20 @@ from pathlib import Path
 
 
 class G1CheckpointGridEvaluatorTest(unittest.TestCase):
-    def test_requires_exact_ordered_checkpoint_steps_and_unique_gpus(self):
+    def test_requires_four_ordered_checkpoint_steps_and_unique_gpus(self):
         from tools.evaluate_g1_checkpoint_grid import validate_grid
 
         checkpoints = tuple(Path(f"/tmp/{step}.pkl") for step in (1, 2, 3, 4))
         validate_grid(
             checkpoints=checkpoints,
-            checkpoint_steps=(442368, 491520, 540672, 589824),
+            checkpoint_steps=(638976, 688128, 737280, 786432),
             checkpoint_sha256=("a", "b", "c", "d"),
             gpu_ids=("1", "2", "3", "4"),
         )
         for steps, gpus in (
-            ((491520, 442368, 540672, 589824), ("1", "2", "3", "4")),
-            ((442368, 491520, 540672), ("1", "2", "3", "4")),
-            ((442368, 491520, 540672, 589824), ("1", "1", "3", "4")),
+            ((688128, 638976, 737280, 786432), ("1", "2", "3", "4")),
+            ((638976, 688128, 737280), ("1", "2", "3", "4")),
+            ((638976, 688128, 737280, 786432), ("1", "1", "3", "4")),
         ):
             with self.subTest(steps=steps, gpus=gpus):
                 with self.assertRaises(ValueError):
@@ -27,13 +27,14 @@ class G1CheckpointGridEvaluatorTest(unittest.TestCase):
                         gpu_ids=gpus,
                     )
 
-    def test_classification_uses_fixed_material_gain_gate(self):
+    def test_classification_uses_requested_material_gate(self):
         from tools.evaluate_g1_checkpoint_grid import classify_checkpoint_grid
 
         self.assertEqual(
             classify_checkpoint_grid(
                 survival={442368: 90, 491520: 121, 540672: 100, 589824: 99},
                 completed={step: False for step in (442368, 491520, 540672, 589824)},
+                material_survival=120,
             ),
             "material-continuation-gain",
         )
@@ -41,6 +42,7 @@ class G1CheckpointGridEvaluatorTest(unittest.TestCase):
             classify_checkpoint_grid(
                 survival={442368: 90, 491520: 100, 540672: 119, 589824: 99},
                 completed={step: False for step in (442368, 491520, 540672, 589824)},
+                material_survival=120,
             ),
             "no-material-continuation-gain",
         )
@@ -53,6 +55,7 @@ class G1CheckpointGridEvaluatorTest(unittest.TestCase):
                     540672: True,
                     589824: False,
                 },
+                material_survival=120,
             ),
             "complete-long-reference-tracking",
         )

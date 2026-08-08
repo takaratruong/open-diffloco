@@ -22,7 +22,6 @@ from tools.evaluate_g1_phase_grid import (
 )
 
 
-CHECKPOINT_STEPS = (442368, 491520, 540672, 589824)
 REFERENCE_SHA256 = (
     "bf8c8b407062d1b309440f4c1787c345b04d79501ea75f615e5b41c0c5ebb6db"
 )
@@ -37,6 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference-sha256", default=REFERENCE_SHA256)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--gpu-ids", nargs=4, required=True)
+    parser.add_argument("--baseline-survival", type=int, default=80)
+    parser.add_argument("--material-survival", type=int, default=120)
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument(
         "--evaluator",
@@ -53,14 +54,21 @@ def validate_grid(
     checkpoint_sha256: tuple[str, ...],
     gpu_ids: tuple[str, ...],
 ) -> None:
-    """Require the fixed continuation grid and one unique GPU per actor."""
-    if len(checkpoints) != len(CHECKPOINT_STEPS):
+    """Require four ordered checkpoints and one unique GPU per actor."""
+    if len(checkpoints) != 4:
         raise ValueError("exactly four checkpoints are required")
-    if checkpoint_steps != CHECKPOINT_STEPS:
-        raise ValueError(f"checkpoint steps must be exactly {CHECKPOINT_STEPS}")
-    if len(checkpoint_sha256) != len(CHECKPOINT_STEPS):
+    if (
+        len(checkpoint_steps) != 4
+        or any(step <= 0 for step in checkpoint_steps)
+        or tuple(sorted(checkpoint_steps)) != checkpoint_steps
+        or len(set(checkpoint_steps)) != 4
+    ):
+        raise ValueError(
+            "checkpoint steps must be four unique increasing positive values"
+        )
+    if len(checkpoint_sha256) != 4:
         raise ValueError("exactly four checkpoint SHA-256 values are required")
-    if len(gpu_ids) != len(CHECKPOINT_STEPS):
+    if len(gpu_ids) != 4:
         raise ValueError("exactly four GPU IDs are required")
     if len(set(gpu_ids)) != len(gpu_ids):
         raise ValueError("GPU IDs must be unique")
@@ -69,26 +77,29 @@ def validate_grid(
 
 
 def classify_checkpoint_grid(
-    survival: dict[int, int], completed: dict[int, bool]
+    survival: dict[int, int],
+    completed: dict[int, bool],
+    *,
+    material_survival: int,
 ) -> str:
-    """Classify the preregistered 50-percent survival-gain boundary."""
-    if set(survival) != set(CHECKPOINT_STEPS) or set(completed) != set(
-        CHECKPOINT_STEPS
-    ):
-        raise ValueError("results must contain the fixed checkpoint grid")
+    """Classify a checkpoint grid against a registered survival boundary."""
+    if not survival or set(survival) != set(completed):
+        raise ValueError("survival and completion results must share a grid")
+    if material_survival <= 0:
+        raise ValueError("material survival must be positive")
     if any(completed.values()):
         return "complete-long-reference-tracking"
-    if max(survival.values()) >= 120:
+    if max(survival.values()) >= material_survival:
         return "material-continuation-gain"
     return "no-material-continuation-gain"
 
 
 def select_checkpoint(summaries: dict[int, dict[str, Any]]) -> int:
     """Select by survival, then reward, then earliest global step."""
-    if set(summaries) != set(CHECKPOINT_STEPS):
-        raise ValueError("summaries must contain the fixed checkpoint grid")
+    if len(summaries) != 4:
+        raise ValueError("summaries must contain four checkpoints")
     return max(
-        CHECKPOINT_STEPS,
+        summaries,
         key=lambda step: (
             int(summaries[step]["steps"]),
             float(summaries[step]["mean_reward"]),
@@ -122,6 +133,8 @@ def main() -> None:
     checkpoint_steps = tuple(args.checkpoint_steps)
     checkpoint_sha256 = tuple(args.checkpoint_sha256)
     gpu_ids = tuple(args.gpu_ids)
+    if args.baseline_survival <= 0:
+        raise ValueError("baseline survival must be positive")
     validate_grid(
         checkpoints=checkpoints,
         checkpoint_steps=checkpoint_steps,
@@ -152,7 +165,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=False)
     children = []
     for step, checkpoint, gpu_id in zip(
-        CHECKPOINT_STEPS, checkpoints, gpu_ids
+        checkpoint_steps, checkpoints, gpu_ids
     ):
         output = args.output_dir / f"checkpoint_{step:06d}_phase0"
         command = build_evaluator_command(
@@ -199,7 +212,7 @@ def main() -> None:
         raise RuntimeError(f"checkpoint evaluators failed: {failures}")
 
     summaries = {}
-    for step in CHECKPOINT_STEPS:
+    for step in checkpoint_steps:
         output = args.output_dir / f"checkpoint_{step:06d}_phase0"
         summary = json.loads((output / "summary.json").read_text())
         validate_phase_summary(
@@ -211,27 +224,33 @@ def main() -> None:
             output / "contact_sheet.png",
         )
 
-    survival = {step: int(summaries[step]["steps"]) for step in CHECKPOINT_STEPS}
+    survival = {
+        step: int(summaries[step]["steps"]) for step in checkpoint_steps
+    }
     completed = {
         step: bool(summaries[step]["completed_reference_suffix"])
-        for step in CHECKPOINT_STEPS
+        for step in checkpoint_steps
     }
     selected_step = select_checkpoint(summaries)
     payload = {
-        "checkpoint_steps": list(CHECKPOINT_STEPS),
+        "checkpoint_steps": list(checkpoint_steps),
         "checkpoint_sha256": {
             str(step): digest
-            for step, digest in zip(CHECKPOINT_STEPS, checkpoint_sha256)
+            for step, digest in zip(checkpoint_steps, checkpoint_sha256)
         },
-        "steps": {str(step): survival[step] for step in CHECKPOINT_STEPS},
+        "steps": {str(step): survival[step] for step in checkpoint_steps},
         "completed_suffix": {
-            str(step): completed[step] for step in CHECKPOINT_STEPS
+            str(step): completed[step] for step in checkpoint_steps
         },
-        "decision": classify_checkpoint_grid(survival, completed),
+        "decision": classify_checkpoint_grid(
+            survival,
+            completed,
+            material_survival=args.material_survival,
+        ),
         "selected_checkpoint_step": selected_step,
         "reference_sha256": reference_sha256,
         "summaries": {
-            str(step): summaries[step] for step in CHECKPOINT_STEPS
+            str(step): summaries[step] for step in checkpoint_steps
         },
     }
     output_json = args.output_dir / "checkpoint_grid_summary.json"
@@ -241,17 +260,27 @@ def main() -> None:
     )
     temporary_json.replace(output_json)
 
-    values = [survival[step] for step in CHECKPOINT_STEPS]
+    values = [survival[step] for step in checkpoint_steps]
     figure, axis = plt.subplots(figsize=(8, 4.8), constrained_layout=True)
-    axis.plot(CHECKPOINT_STEPS, values, marker="o", color="#7c3aed")
-    axis.axhline(80, color="#dc2626", linestyle="--", label="E000 final")
-    axis.axhline(120, color="#16a34a", linestyle="--", label="material gate")
-    for step, value in zip(CHECKPOINT_STEPS, values):
+    axis.plot(checkpoint_steps, values, marker="o", color="#7c3aed")
+    axis.axhline(
+        args.baseline_survival,
+        color="#dc2626",
+        linestyle="--",
+        label="registered baseline",
+    )
+    axis.axhline(
+        args.material_survival,
+        color="#16a34a",
+        linestyle="--",
+        label="material gate",
+    )
+    for step, value in zip(checkpoint_steps, values):
         axis.text(step, value + 2, str(value), ha="center")
     axis.set(
         xlabel="Global training transitions",
         ylabel="Strict phase-zero transitions survived",
-        title="G1 LAFAN exact-continuation checkpoint grid",
+        title="G1 LAFAN continuation checkpoint grid",
     )
     axis.legend(frameon=False)
     figure.savefig(args.output_dir / "checkpoint_grid_survival.png", dpi=180)
