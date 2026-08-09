@@ -294,7 +294,14 @@ class RunAuditTest(unittest.TestCase):
                 self.assertTrue(solver_context_active[0])
                 shard_calls.append(seed)
                 result = self._gradient_result(seed)
-                receipt = {"seed": str(seed), "identity": "same"}
+                receipt = {
+                    "seed": str(seed),
+                    "identity": "same",
+                    "numeric_equivalence_metrics": {
+                        "score_gradient_relative_l2_error": 0.004,
+                        "score_gradient_cosine": 0.99999,
+                    },
+                }
                 return EstimatorShardEvidence(result, receipt, receipt)
 
             def stochastic_rollout(actor_params, action_noise):
@@ -408,6 +415,15 @@ class RunAuditTest(unittest.TestCase):
             )
             self.assertTrue(loaded_manifest["runtime_provenance"]["git_clean"])
             self.assertTrue(loaded_manifest["heldout_stochastic_finite_complete"])
+            receipt_artifact = json.loads(
+                (output / "estimator_receipts.json").read_text()
+            )
+            self.assertEqual(
+                receipt_artifact["per_shard"]["0"]["pathwise"][
+                    "numeric_equivalence_metrics"
+                ]["score_gradient_relative_l2_error"],
+                0.004,
+            )
             self.assertEqual(
                 loaded_manifest["solver_trace_context"],
                 {
@@ -524,6 +540,70 @@ class RunAuditTest(unittest.TestCase):
 
             self.assertEqual(rendered, [])
             self.assertFalse((output / "manifest.json").exists())
+
+    def test_receipt_mismatch_aborts_before_publishing_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "audit"
+            contract = SimpleNamespace(
+                checkpoint=root / "checkpoint.pkl",
+                checkpoint_sha256="a" * 64,
+                reference=root / "reference.npz",
+                reference_sha256="b" * 64,
+                hparams_path=root / "hparams.json",
+                output_dir=output,
+                shard_seeds=(0, 1, 2, 3),
+                held_out_seeds=(4, 5, 6, 7),
+                phases=(0, 100, 200, 300, 400),
+                horizon=48,
+                population=64,
+                sigma=0.1,
+                gamma=0.99,
+                per_env_clip=1.0,
+                functional_rms=0.01,
+                solver_iterations=4,
+                solver_ls_iterations=5,
+            )
+            for path in (
+                contract.checkpoint,
+                contract.reference,
+                contract.hparams_path,
+            ):
+                path.write_bytes(b"input")
+
+            def must_not_run(*_args, **_kwargs):
+                self.fail("downstream evaluation ran after a receipt mismatch")
+
+            prepared = PreparedAuditExecution(
+                checkpoint_state=FakeTrainState(
+                    actor_params={"w": jnp.array([1.0])},
+                    untouched=jnp.array([7.0]),
+                ),
+                actor_apply=lambda params, observations: (
+                    observations * params["w"]
+                ),
+                normalizer_state={},
+                estimate_shard=lambda seed: EstimatorShardEvidence(
+                    self._gradient_result(seed),
+                    {"identity": "pathwise"},
+                    {"identity": "score"},
+                ),
+                stochastic_rollout=must_not_run,
+                phase_rollout=must_not_run,
+                validated_contract={},
+                algorithmic_validity={},
+                render_phase_zero=must_not_run,
+            )
+            with (
+                patch(
+                    "src.algorithms.shac.g1_gradient_audit_execution._prepare_e064_execution",
+                    return_value=prepared,
+                ),
+                self.assertRaisesRegex(ValueError, "identity receipts differ"),
+            ):
+                run_audit(contract)
+
+            self.assertFalse(output.exists())
 
     def test_rejects_nonfrozen_heldout_seeds_before_preparation(self):
         contract = SimpleNamespace(

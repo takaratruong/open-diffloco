@@ -736,8 +736,8 @@ class ExactE064AuditResult(NamedTuple):
     """Validated numerical output and the two matching identity receipts."""
 
     gradients: SharedGradientResult
-    pathwise_receipt: dict[str, str]
-    score_receipt: dict[str, str]
+    pathwise_receipt: dict[str, Any]
+    score_receipt: dict[str, Any]
     contract: ValidatedE064Contract
 
 
@@ -1171,7 +1171,7 @@ def identity_receipt(
     independent_score_losses: jax.Array | None = None,
     numeric_equivalence_evidence: Mapping[str, Any] | None = None,
     engine_estimator_values: Mapping[str, str] | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Builds the binding identity receipt shared by estimator consumers."""
 
     if len(checkpoint_sha256) != 64:
@@ -1189,9 +1189,14 @@ def identity_receipt(
     if numeric_equivalence_evidence is None:
         numeric_equivalence_evidence = {
             "mean_max_abs_error": 0.0,
+            "mean_rms_error": 0.0,
+            "mean_relative_rms_error": 0.0,
+            "mean_cosine": 1.0,
             "objective_max_abs_error": 0.0,
             "score_loss_max_abs_error": 0.0,
-            "mean_gate_ulps": 4,
+            "mean_max_abs_gate": _ACTOR_RECONSTRUCTION_MAX_ABSOLUTE_ERROR,
+            "mean_rms_gate": _ACTOR_RECONSTRUCTION_MAX_RMS_ERROR,
+            "mean_minimum_cosine": _ACTOR_RECONSTRUCTION_MINIMUM_COSINE,
             "objective_gate_ulps": 16,
             "score_loss_gate_ulps": 256,
         }
@@ -1256,6 +1261,7 @@ def identity_receipt(
         "numeric_equivalence_evidence": stable_mapping_sha256(
             numeric_equivalence_evidence
         ),
+        "numeric_equivalence_metrics": dict(numeric_equivalence_evidence),
         "engine_estimator_values": stable_mapping_sha256(
             engine_estimator_values
         ),
@@ -1291,9 +1297,199 @@ _IDENTITY_RECEIPT_FIELDS = frozenset({
     "score_losses",
     "independent_score_losses",
     "numeric_equivalence_evidence",
+    "numeric_equivalence_metrics",
     "engine_estimator_values",
     "trajectory",
 })
+
+
+_ACTOR_RECONSTRUCTION_MAX_ABSOLUTE_ERROR = 0.005
+_ACTOR_RECONSTRUCTION_MAX_RMS_ERROR = 0.0005
+_ACTOR_RECONSTRUCTION_MINIMUM_COSINE = 0.9999999
+_PATHWISE_CLIPPING_GATE_ULPS = 256
+_SCORE_GRADIENT_MAX_RELATIVE_L2_ERROR = 0.005
+_SCORE_GRADIENT_MINIMUM_COSINE = 0.99998
+_SCORE_MEAN_GRADIENT_MAX_RELATIVE_L2_ERROR = 0.02
+_SCORE_MEAN_GRADIENT_MINIMUM_COSINE = 0.9998
+
+
+def _numeric_equivalence_metrics(actual: Any, expected: Any) -> dict[str, float]:
+    """Return finite host metrics for two nonempty same-shaped arrays."""
+
+    actual_array = np.asarray(jax.device_get(actual), dtype=np.float64)
+    expected_array = np.asarray(jax.device_get(expected), dtype=np.float64)
+    if actual_array.shape != expected_array.shape:
+        raise ValueError("numeric equivalence arrays have different shape")
+    if actual_array.size == 0:
+        raise ValueError("numeric equivalence arrays must be nonempty")
+    if not np.isfinite(actual_array).all() or not np.isfinite(expected_array).all():
+        raise ValueError("numeric equivalence arrays must be finite")
+    difference = actual_array - expected_array
+    maximum_absolute_error = float(np.max(np.abs(difference)))
+    rms_error = float(np.sqrt(np.mean(np.square(difference))))
+    expected_rms = float(np.sqrt(np.mean(np.square(expected_array))))
+    relative_rms_error = rms_error / max(expected_rms, np.finfo(np.float64).tiny)
+    actual_norm = float(np.linalg.norm(actual_array.ravel()))
+    expected_norm = float(np.linalg.norm(expected_array.ravel()))
+    if actual_norm == 0.0 or expected_norm == 0.0:
+        cosine = 1.0 if np.array_equal(actual_array, expected_array) else 0.0
+    else:
+        cosine = float(
+            np.vdot(actual_array.ravel(), expected_array.ravel()).real
+            / (actual_norm * expected_norm)
+        )
+    metrics = {
+        "maximum_absolute_error": maximum_absolute_error,
+        "rms_error": rms_error,
+        "relative_rms_error": relative_rms_error,
+        "cosine": cosine,
+    }
+    if not all(np.isfinite(value) for value in metrics.values()):
+        raise ValueError("numeric equivalence metrics must be finite")
+    return metrics
+
+
+def _validate_actor_reconstruction(actual: Any, expected: Any) -> dict[str, float]:
+    """Validate standalone actor arithmetic at a functional, not ULP, scale.
+
+    The actor fused into the 64-by-48 differentiable MJX graph and the same
+    float32 actor compiled alone can use different reduction orders on GPU.
+    The RMS bound is five percent of the frozen 0.01 output-RMS audit step; the
+    pointwise bound is half that functional step and five percent of exploration
+    sigma 0.1.  Exact identity between the two in-engine estimator consumers is
+    enforced separately.
+    """
+
+    try:
+        metrics = _numeric_equivalence_metrics(actual, expected)
+    except ValueError as error:
+        raise ValueError(f"independent actor reconstruction {error}") from error
+    if (
+        metrics["maximum_absolute_error"]
+        > _ACTOR_RECONSTRUCTION_MAX_ABSOLUTE_ERROR
+    ):
+        raise ValueError(
+            "independent actor reconstruction maximum absolute error exceeds gate"
+        )
+    if metrics["rms_error"] > _ACTOR_RECONSTRUCTION_MAX_RMS_ERROR:
+        raise ValueError("independent actor reconstruction RMS error exceeds gate")
+    if metrics["cosine"] < _ACTOR_RECONSTRUCTION_MINIMUM_COSINE:
+        raise ValueError("independent actor reconstruction cosine is below gate")
+    return metrics
+
+
+def _numeric_pytree_equivalence_metrics(
+    actual: PyTree,
+    expected: PyTree,
+    *,
+    label: str,
+) -> dict[str, float]:
+    """Returns finite whole-tree geometry without concatenating large leaves."""
+
+    actual_leaves, actual_definition = jax.tree_util.tree_flatten(actual)
+    expected_leaves, expected_definition = jax.tree_util.tree_flatten(expected)
+    if actual_definition != expected_definition or len(actual_leaves) != len(
+        expected_leaves
+    ):
+        raise ValueError(f"{label} have different tree structure")
+    if not actual_leaves:
+        raise ValueError(f"{label} must not be empty")
+
+    maximum_absolute_error = 0.0
+    difference_squared = 0.0
+    actual_squared = 0.0
+    expected_squared = 0.0
+    inner_product = 0.0
+    element_count = 0
+    for actual_leaf, expected_leaf in zip(
+        actual_leaves, expected_leaves, strict=True
+    ):
+        actual_source = np.asarray(jax.device_get(actual_leaf))
+        expected_source = np.asarray(jax.device_get(expected_leaf))
+        if (
+            actual_source.shape != expected_source.shape
+            or actual_source.dtype != expected_source.dtype
+            or actual_source.size == 0
+        ):
+            raise ValueError(f"{label} have incompatible leaves")
+        actual_array = actual_source.astype(np.float64)
+        expected_array = expected_source.astype(np.float64)
+        if not np.isfinite(actual_array).all() or not np.isfinite(
+            expected_array
+        ).all():
+            raise ValueError(f"{label} must be finite")
+        difference = actual_array - expected_array
+        maximum_absolute_error = max(
+            maximum_absolute_error, float(np.max(np.abs(difference)))
+        )
+        difference_squared += float(np.vdot(difference, difference).real)
+        actual_squared += float(np.vdot(actual_array, actual_array).real)
+        expected_squared += float(np.vdot(expected_array, expected_array).real)
+        inner_product += float(np.vdot(actual_array, expected_array).real)
+        element_count += actual_array.size
+
+    actual_norm = float(np.sqrt(actual_squared))
+    expected_norm = float(np.sqrt(expected_squared))
+    difference_norm = float(np.sqrt(difference_squared))
+    if actual_norm == 0.0 or expected_norm == 0.0:
+        cosine = 1.0 if difference_norm == 0.0 else 0.0
+    else:
+        cosine = inner_product / (actual_norm * expected_norm)
+    metrics = {
+        "maximum_absolute_error": maximum_absolute_error,
+        "rms_error": float(np.sqrt(difference_squared / element_count)),
+        "relative_l2_error": difference_norm
+        / max(expected_norm, np.finfo(np.float64).tiny),
+        "cosine": float(cosine),
+        "actual_norm": actual_norm,
+        "expected_norm": expected_norm,
+    }
+    if not all(np.isfinite(value) for value in metrics.values()):
+        raise ValueError(f"{label} metrics must be finite")
+    return metrics
+
+
+def _validate_score_gradient_reconstruction(
+    actual: PyTree,
+    expected: PyTree,
+) -> dict[str, float]:
+    """Validates independent score gradients at measured GPU fusion bounds."""
+
+    full = _numeric_pytree_equivalence_metrics(
+        actual, expected, label="score gradients"
+    )
+    actual_mean = jax.tree_util.tree_map(lambda leaf: jp.mean(leaf, axis=0), actual)
+    expected_mean = jax.tree_util.tree_map(
+        lambda leaf: jp.mean(leaf, axis=0), expected
+    )
+    mean = _numeric_pytree_equivalence_metrics(
+        actual_mean, expected_mean, label="score mean gradients"
+    )
+    if (
+        full["relative_l2_error"] > _SCORE_GRADIENT_MAX_RELATIVE_L2_ERROR
+        or full["cosine"] < _SCORE_GRADIENT_MINIMUM_COSINE
+    ):
+        raise ValueError("score gradients fail independent functional gate")
+    if (
+        mean["relative_l2_error"]
+        > _SCORE_MEAN_GRADIENT_MAX_RELATIVE_L2_ERROR
+        or mean["cosine"] < _SCORE_MEAN_GRADIENT_MINIMUM_COSINE
+    ):
+        raise ValueError("score gradients fail aggregate-mean functional gate")
+    return {
+        "score_gradient_max_abs_error": full["maximum_absolute_error"],
+        "score_gradient_rms_error": full["rms_error"],
+        "score_gradient_relative_l2_error": full["relative_l2_error"],
+        "score_gradient_cosine": full["cosine"],
+        "score_gradient_actual_norm": full["actual_norm"],
+        "score_gradient_expected_norm": full["expected_norm"],
+        "score_mean_gradient_max_abs_error": mean["maximum_absolute_error"],
+        "score_mean_gradient_rms_error": mean["rms_error"],
+        "score_mean_gradient_relative_l2_error": mean["relative_l2_error"],
+        "score_mean_gradient_cosine": mean["cosine"],
+        "score_mean_gradient_actual_norm": mean["actual_norm"],
+        "score_mean_gradient_expected_norm": mean["expected_norm"],
+    }
 
 
 def build_and_validate_estimator_receipts(
@@ -1309,7 +1505,7 @@ def build_and_validate_estimator_receipts(
     gamma: float,
     sigma: float,
     pathwise_clip_norm: float,
-) -> tuple[dict[str, str], dict[str, str]]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Independently receipts both estimator consumers and fails on drift."""
 
     def exact_equal(left, right, *, label):
@@ -1322,8 +1518,52 @@ def build_and_validate_estimator_receipts(
         ):
             raise ValueError(f"estimator identity mismatch for {label}")
 
+    def tree_ulp_gate(actual, expected, *, ulps, label):
+        actual_leaves, actual_definition = jax.tree_util.tree_flatten(actual)
+        expected_leaves, expected_definition = jax.tree_util.tree_flatten(expected)
+        if actual_definition != expected_definition or len(actual_leaves) != len(
+            expected_leaves
+        ):
+            raise ValueError(f"estimator identity mismatch for {label}")
+        return max(
+            (
+                ulp_gate(
+                    actual_leaf,
+                    expected_leaf,
+                    source_dtype=np.asarray(jax.device_get(actual_leaf)).dtype,
+                    ulps=ulps,
+                    label=label,
+                )
+                for actual_leaf, expected_leaf in zip(
+                    actual_leaves, expected_leaves, strict=True
+                )
+            ),
+            default=0.0,
+        )
+
     exact_equal(result.trajectory.noise, action_noise, label="noise")
     exact_equal(result.score_trajectory.noise, action_noise, label="noise")
+    for field_name in SharedTrajectory._fields:
+        exact_equal(
+            getattr(result.trajectory, field_name),
+            getattr(result.score_trajectory, field_name),
+            label=f"engine trajectory {field_name}",
+        )
+    exact_equal(
+        result.trajectory.means,
+        result.score_means,
+        label="engine means",
+    )
+    exact_equal(
+        result.losses,
+        result.score_objectives,
+        label="engine objective_values",
+    )
+    exact_equal(
+        result.pathwise_score_losses,
+        result.score_losses,
+        label="engine score_losses",
+    )
     expected_actions = result.trajectory.means + jp.asarray(
         sigma, dtype=result.trajectory.means.dtype
     ) * result.trajectory.noise.astype(result.trajectory.means.dtype)
@@ -1349,16 +1589,46 @@ def build_and_validate_estimator_receipts(
             )
         )(trajectory.rewards, trajectory.dones)
         losses = jax.vmap(
-            lambda candidate_means, actions, candidate_returns: (
+            lambda canonical_means, actions, candidate_returns: (
                 detached_gaussian_score_loss(
-                    candidate_means,
+                    canonical_means,
                     actions,
                     candidate_returns,
                     std=sigma,
                 )
             )
-        )(means, trajectory.actions, returns)
+        )(
+            jax.lax.stop_gradient(trajectory.means),
+            trajectory.actions,
+            returns,
+        )
         return raw_means, means, returns, objectives, losses
+
+    def independently_reconstruct_score_gradients(trajectory):
+        def score_loss(params, data):
+            rebuilt_means = jax.vmap(
+                lambda observation: actor_apply(params, observation)
+            )(
+                jax.lax.stop_gradient(data.normalized_observations)
+            ).astype(data.means.dtype)
+            # Keep the exact in-engine primal while independently rebuilding
+            # the actor derivative in a small standalone graph.
+            means = rebuilt_means + jax.lax.stop_gradient(
+                data.means - rebuilt_means
+            )
+            returns = discounted_return_to_go(
+                data.rewards, data.dones, gamma=gamma
+            )
+            return detached_gaussian_score_loss(
+                means,
+                jax.lax.stop_gradient(data.actions),
+                jax.lax.stop_gradient(returns),
+                std=sigma,
+            )
+
+        return jax.vmap(jax.grad(score_loss), in_axes=(None, 0))(
+            actor_params, trajectory
+        )
 
     path_rebuilt = independently_reconstruct(result.trajectory)
     score_rebuilt = independently_reconstruct(result.score_trajectory)
@@ -1380,7 +1650,10 @@ def build_and_validate_estimator_receipts(
     def ulp_gate(actual, expected, *, source_dtype, ulps, label):
         actual_array = np.asarray(jax.device_get(actual))
         expected_array = np.asarray(jax.device_get(expected))
-        if actual_array.shape != expected_array.shape:
+        if (
+            actual_array.shape != expected_array.shape
+            or actual_array.dtype != expected_array.dtype
+        ):
             raise ValueError(f"estimator identity mismatch for {label}")
         epsilon = np.finfo(np.dtype(source_dtype)).eps
         errors = np.abs(actual_array.astype(np.float64) - expected_array)
@@ -1389,22 +1662,35 @@ def build_and_validate_estimator_receipts(
             raise ValueError(f"estimator identity mismatch for {label}")
         return float(np.max(errors, initial=0.0))
 
-    mean_dtype = np.asarray(jax.device_get(path_raw_means)).dtype
-    mean_errors = (
-        ulp_gate(
-            result.trajectory.means,
-            path_means,
-            source_dtype=mean_dtype,
-            ulps=4,
-            label="independent means",
+    expected_pathwise_effective, expected_pathwise_norms, expected_clip_scales = (
+        _pathwise_effective_per_environment(
+            result.pathwise_raw_gradients,
+            max_norm=pathwise_clip_norm,
+        )
+    )
+    clipping_errors = (
+        tree_ulp_gate(
+            result.pathwise_effective_gradients,
+            expected_pathwise_effective,
+            ulps=_PATHWISE_CLIPPING_GATE_ULPS,
+            label="pathwise clipping effective gradients",
         ),
-        ulp_gate(
-            result.score_means,
-            score_means,
-            source_dtype=np.asarray(jax.device_get(score_raw_means)).dtype,
-            ulps=4,
-            label="independent means",
+        tree_ulp_gate(
+            result.pathwise_raw_norms,
+            expected_pathwise_norms,
+            ulps=_PATHWISE_CLIPPING_GATE_ULPS,
+            label="pathwise clipping raw norms",
         ),
+        tree_ulp_gate(
+            result.pathwise_clip_scales,
+            expected_clip_scales,
+            ulps=_PATHWISE_CLIPPING_GATE_ULPS,
+            label="pathwise clipping scales",
+        ),
+    )
+    mean_metrics = (
+        _validate_actor_reconstruction(result.trajectory.means, path_means),
+        _validate_actor_reconstruction(result.score_means, score_means),
     )
     exact_equal(
         result.pathwise_returns_to_go,
@@ -1436,25 +1722,54 @@ def build_and_validate_estimator_receipts(
         ulp_gate(
             result.pathwise_score_losses,
             path_losses,
-            source_dtype=mean_dtype,
+            source_dtype=np.asarray(jax.device_get(path_raw_means)).dtype,
             ulps=256,
             label="independent score_losses",
         ),
         ulp_gate(
             result.score_losses,
             score_losses,
-            source_dtype=mean_dtype,
+            source_dtype=np.asarray(jax.device_get(score_raw_means)).dtype,
             ulps=256,
             label="independent score_losses",
         ),
     )
+    independent_score_gradients = independently_reconstruct_score_gradients(
+        result.score_trajectory
+    )
+    score_gradient_evidence = _validate_score_gradient_reconstruction(
+        result.score_gradients,
+        independent_score_gradients,
+    )
     evidence = {
-        "mean_max_abs_error": max(mean_errors),
+        "mean_max_abs_error": max(
+            metrics["maximum_absolute_error"] for metrics in mean_metrics
+        ),
+        "mean_rms_error": max(metrics["rms_error"] for metrics in mean_metrics),
+        "mean_relative_rms_error": max(
+            metrics["relative_rms_error"] for metrics in mean_metrics
+        ),
+        "mean_cosine": min(metrics["cosine"] for metrics in mean_metrics),
         "objective_max_abs_error": max(objective_errors),
         "score_loss_max_abs_error": max(loss_errors),
-        "mean_gate_ulps": 4,
+        "pathwise_clipping_max_abs_error": max(clipping_errors),
+        "mean_max_abs_gate": _ACTOR_RECONSTRUCTION_MAX_ABSOLUTE_ERROR,
+        "mean_rms_gate": _ACTOR_RECONSTRUCTION_MAX_RMS_ERROR,
+        "mean_minimum_cosine": _ACTOR_RECONSTRUCTION_MINIMUM_COSINE,
         "objective_gate_ulps": 16,
         "score_loss_gate_ulps": 256,
+        "pathwise_clipping_gate_ulps": _PATHWISE_CLIPPING_GATE_ULPS,
+        "score_gradient_max_relative_l2_gate": (
+            _SCORE_GRADIENT_MAX_RELATIVE_L2_ERROR
+        ),
+        "score_gradient_minimum_cosine": _SCORE_GRADIENT_MINIMUM_COSINE,
+        "score_mean_gradient_max_relative_l2_gate": (
+            _SCORE_MEAN_GRADIENT_MAX_RELATIVE_L2_ERROR
+        ),
+        "score_mean_gradient_minimum_cosine": (
+            _SCORE_MEAN_GRADIENT_MINIMUM_COSINE
+        ),
+        **score_gradient_evidence,
     }
     engine_values = {
         "pathwise_objectives": stable_pytree_sha256(result.losses),
@@ -1463,6 +1778,20 @@ def build_and_validate_estimator_receipts(
             result.pathwise_score_losses
         ),
         "score_score_losses": stable_pytree_sha256(result.score_losses),
+        "pathwise_raw_gradients": stable_pytree_sha256(
+            result.pathwise_raw_gradients
+        ),
+        "pathwise_effective_gradients": stable_pytree_sha256(
+            result.pathwise_effective_gradients
+        ),
+        "pathwise_raw_norms": stable_pytree_sha256(result.pathwise_raw_norms),
+        "pathwise_clip_scales": stable_pytree_sha256(
+            result.pathwise_clip_scales
+        ),
+        "score_gradients": stable_pytree_sha256(result.score_gradients),
+        "independent_score_gradients": stable_pytree_sha256(
+            independent_score_gradients
+        ),
     }
     pathwise_receipt = identity_receipt(
         checkpoint_sha256=checkpoint_sha256,
@@ -1513,7 +1842,7 @@ def build_and_validate_estimator_receipts(
 
 
 def assert_matching_identity_receipts(
-    left: Mapping[str, str], right: Mapping[str, str]
+    left: Mapping[str, Any], right: Mapping[str, Any]
 ) -> None:
     """Fails closed when any estimator-consumer identity differs."""
 

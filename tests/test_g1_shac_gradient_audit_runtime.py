@@ -36,6 +36,7 @@ from src.algorithms.shac.g1_gradient_audit import (
     pytree_shape_signature,
     rollout_one_environment,
     sha256_file,
+    stable_mapping_sha256,
     stable_pytree_sha256,
     validate_e064_checkpoint_contract,
     validate_e064_checkpoint_shapes,
@@ -121,6 +122,70 @@ class SharedRolloutTest(unittest.TestCase):
             "scale": jnp.array([2.0, 4.0], dtype=jnp.float64),
         }
         self.noise = jnp.array([[1.0], [-2.0], [0.5]], dtype=jnp.float64)
+
+    def test_actor_reconstruction_gate_is_functional_and_fail_closed(self):
+        expected = jnp.linspace(-1.0, 1.0, 100, dtype=jnp.float64)
+        bounded = expected.at[17].add(1.7e-3)
+        evidence = g1_runtime._validate_actor_reconstruction(
+            bounded,
+            expected,
+        )
+        self.assertLessEqual(evidence["maximum_absolute_error"], 0.005)
+        self.assertLessEqual(evidence["rms_error"], 0.0005)
+        self.assertGreaterEqual(evidence["cosine"], 0.9999999)
+
+        with self.assertRaisesRegex(ValueError, "maximum absolute"):
+            g1_runtime._validate_actor_reconstruction(
+                expected.at[17].add(5.1e-3),
+                expected,
+            )
+        with self.assertRaisesRegex(ValueError, "RMS"):
+            g1_runtime._validate_actor_reconstruction(
+                expected + 6e-4,
+                expected,
+            )
+        with self.assertRaisesRegex(ValueError, "shape"):
+            g1_runtime._validate_actor_reconstruction(
+                expected[:-1],
+                expected,
+            )
+
+    def test_score_gradient_gate_is_functional_and_checks_aggregate(self):
+        expected = {"w": jnp.array([[100.0], [-99.0]], dtype=jnp.float64)}
+        evidence = g1_runtime._validate_score_gradient_reconstruction(
+            expected, expected
+        )
+        self.assertEqual(evidence["score_gradient_relative_l2_error"], 0.0)
+        self.assertEqual(evidence["score_mean_gradient_cosine"], 1.0)
+
+        with self.assertRaisesRegex(ValueError, "score gradients"):
+            g1_runtime._validate_score_gradient_reconstruction(
+                jax.tree_util.tree_map(jnp.zeros_like, expected), expected
+            )
+        with self.assertRaisesRegex(ValueError, "score gradients"):
+            g1_runtime._validate_score_gradient_reconstruction(
+                jax.tree_util.tree_map(lambda leaf: 1.006 * leaf, expected),
+                expected,
+            )
+        with self.assertRaisesRegex(ValueError, "aggregate-mean"):
+            g1_runtime._validate_score_gradient_reconstruction(
+                {"w": jnp.array([[100.1], [-99.0]], dtype=jnp.float64)},
+                expected,
+            )
+        with self.assertRaisesRegex(ValueError, "tree structure"):
+            g1_runtime._validate_score_gradient_reconstruction(
+                {"other": expected["w"]}, expected
+            )
+        with self.assertRaisesRegex(ValueError, "finite"):
+            g1_runtime._validate_score_gradient_reconstruction(
+                {"w": expected["w"].at[0, 0].set(jnp.nan)}, expected
+            )
+
+        zeros = jax.tree_util.tree_map(jnp.zeros_like, expected)
+        zero_evidence = g1_runtime._validate_score_gradient_reconstruction(
+            zeros, zeros
+        )
+        self.assertEqual(zero_evidence["score_gradient_cosine"], 1.0)
 
     def test_rollout_materializes_exact_unbounded_actions_and_objective(self):
         trajectory, _ = rollout_one_environment(
@@ -390,6 +455,223 @@ class SharedRolloutTest(unittest.TestCase):
             pathwise_clip_norm=1.0,
         )
         self.assertEqual(receipts[0], receipts[1])
+        self.assertEqual(
+            receipts[0]["numeric_equivalence_metrics"],
+            receipts[1]["numeric_equivalence_metrics"],
+        )
+        self.assertIn(
+            "mean_rms_error",
+            receipts[0]["numeric_equivalence_metrics"],
+        )
+        self.assertEqual(
+            receipts[0]["numeric_equivalence_evidence"],
+            stable_mapping_sha256(receipts[0]["numeric_equivalence_metrics"]),
+        )
+        required_numeric_evidence = {
+            "mean_rms_error",
+            "pathwise_clipping_gate_ulps",
+            "score_gradient_relative_l2_error",
+            "score_gradient_max_relative_l2_gate",
+            "score_gradient_cosine",
+            "score_gradient_minimum_cosine",
+            "score_mean_gradient_relative_l2_error",
+            "score_mean_gradient_max_relative_l2_gate",
+            "score_mean_gradient_cosine",
+            "score_mean_gradient_minimum_cosine",
+        }
+        self.assertTrue(
+            required_numeric_evidence
+            <= receipts[0]["numeric_equivalence_metrics"].keys()
+        )
+        self.assertTrue(
+            all(
+                np.isfinite(value)
+                for value in receipts[0]["numeric_equivalence_metrics"].values()
+            )
+        )
+
+        coherent_raw = jax.tree_util.tree_map(
+            lambda leaf: 0.75 * leaf, result.pathwise_raw_gradients
+        )
+        coherent_effective, coherent_norms, coherent_scales = (
+            g1_runtime._pathwise_effective_per_environment(
+                coherent_raw, max_norm=1.0
+            )
+        )
+        coherent_pathwise = result._replace(
+            pathwise_raw_gradients=coherent_raw,
+            pathwise_effective_gradients=coherent_effective,
+            pathwise_raw_norms=coherent_norms,
+            pathwise_clip_scales=coherent_scales,
+        )
+        coherent_receipts = build_and_validate_estimator_receipts(
+            checkpoint_sha256="a" * 64,
+            hparams=self._complete_hparams(),
+            actor_params=self.params,
+            actor_apply=fake_actor,
+            normalizer_state=self.norm_state,
+            initial_state=initial_states,
+            action_noise=noise,
+            result=coherent_pathwise,
+            gamma=0.5,
+            sigma=0.1,
+            pathwise_clip_norm=1.0,
+        )
+        self.assertNotEqual(
+            coherent_receipts[0]["engine_estimator_values"],
+            receipts[0]["engine_estimator_values"],
+        )
+
+        bounded_score = result._replace(
+            score_gradients=jax.tree_util.tree_map(
+                lambda leaf: 1.001 * leaf, result.score_gradients
+            )
+        )
+        bounded_score_receipts = build_and_validate_estimator_receipts(
+            checkpoint_sha256="a" * 64,
+            hparams=self._complete_hparams(),
+            actor_params=self.params,
+            actor_apply=fake_actor,
+            normalizer_state=self.norm_state,
+            initial_state=initial_states,
+            action_noise=noise,
+            result=bounded_score,
+            gamma=0.5,
+            sigma=0.1,
+            pathwise_clip_norm=1.0,
+        )
+        self.assertNotEqual(
+            bounded_score_receipts[0]["engine_estimator_values"],
+            receipts[0]["engine_estimator_values"],
+        )
+
+        zero_raw = result._replace(
+            pathwise_raw_gradients=jax.tree_util.tree_map(
+                jnp.zeros_like, result.pathwise_raw_gradients
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "pathwise clipping"):
+            build_and_validate_estimator_receipts(
+                checkpoint_sha256="a" * 64,
+                hparams=self._complete_hparams(),
+                actor_params=self.params,
+                actor_apply=fake_actor,
+                normalizer_state=self.norm_state,
+                initial_state=initial_states,
+                action_noise=noise,
+                result=zero_raw,
+                gamma=0.5,
+                sigma=0.1,
+                pathwise_clip_norm=1.0,
+            )
+        zero_effective = result._replace(
+            pathwise_effective_gradients=jax.tree_util.tree_map(
+                jnp.zeros_like, result.pathwise_effective_gradients
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "pathwise clipping"):
+            build_and_validate_estimator_receipts(
+                checkpoint_sha256="a" * 64,
+                hparams=self._complete_hparams(),
+                actor_params=self.params,
+                actor_apply=fake_actor,
+                normalizer_state=self.norm_state,
+                initial_state=initial_states,
+                action_noise=noise,
+                result=zero_effective,
+                gamma=0.5,
+                sigma=0.1,
+                pathwise_clip_norm=1.0,
+            )
+        zero_clipping_pair = result._replace(
+            pathwise_raw_gradients=jax.tree_util.tree_map(
+                jnp.zeros_like, result.pathwise_raw_gradients
+            ),
+            pathwise_effective_gradients=jax.tree_util.tree_map(
+                jnp.zeros_like, result.pathwise_effective_gradients
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "pathwise clipping"):
+            build_and_validate_estimator_receipts(
+                checkpoint_sha256="a" * 64,
+                hparams=self._complete_hparams(),
+                actor_params=self.params,
+                actor_apply=fake_actor,
+                normalizer_state=self.norm_state,
+                initial_state=initial_states,
+                action_noise=noise,
+                result=zero_clipping_pair,
+                gamma=0.5,
+                sigma=0.1,
+                pathwise_clip_norm=1.0,
+            )
+        zero_score = result._replace(
+            score_gradients=jax.tree_util.tree_map(
+                jnp.zeros_like, result.score_gradients
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "score gradients"):
+            build_and_validate_estimator_receipts(
+                checkpoint_sha256="a" * 64,
+                hparams=self._complete_hparams(),
+                actor_params=self.params,
+                actor_apply=fake_actor,
+                normalizer_state=self.norm_state,
+                initial_state=initial_states,
+                action_noise=noise,
+                result=zero_score,
+                gamma=0.5,
+                sigma=0.1,
+                pathwise_clip_norm=1.0,
+            )
+
+        # The actor fused inside a large differentiable MJX graph and the same
+        # actor compiled alone need not be ULP-identical on GPU.  Admit only a
+        # small functional discrepancy, well below the 0.01 output-RMS audit
+        # step, while retaining exact identity between the two in-engine
+        # estimator consumers.
+        rounded_receipts = build_and_validate_estimator_receipts(
+            checkpoint_sha256="a" * 64,
+            hparams=self._complete_hparams(),
+            actor_params=self.params,
+            actor_apply=lambda params, obs: (
+                fake_actor(params, obs)
+                + 2.5e-4 * jnp.sin(jnp.sum(obs)).astype(jnp.float32)
+            ),
+            normalizer_state=self.norm_state,
+            initial_state=initial_states,
+            action_noise=noise,
+            result=result,
+            gamma=0.5,
+            sigma=0.1,
+            pathwise_clip_norm=1.0,
+        )
+        self.assertEqual(rounded_receipts[0], rounded_receipts[1])
+
+        original_score_loss = g1_runtime.detached_gaussian_score_loss
+        with (
+            mock.patch.object(
+                g1_runtime,
+                "detached_gaussian_score_loss",
+                side_effect=lambda *args, **kwargs: (
+                    original_score_loss(*args, **kwargs) + 0.1
+                ),
+            ),
+            self.assertRaisesRegex(ValueError, "independent score_losses"),
+        ):
+            build_and_validate_estimator_receipts(
+                checkpoint_sha256="a" * 64,
+                hparams=self._complete_hparams(),
+                actor_params=self.params,
+                actor_apply=fake_actor,
+                normalizer_state=self.norm_state,
+                initial_state=initial_states,
+                action_noise=noise,
+                result=result,
+                gamma=0.5,
+                sigma=0.1,
+                pathwise_clip_norm=1.0,
+            )
 
         def raising_actor(*_args):
             raise RuntimeError("independent actor was called")
@@ -409,7 +691,9 @@ class SharedRolloutTest(unittest.TestCase):
                 pathwise_clip_norm=1.0,
             )
 
-        with self.assertRaisesRegex(ValueError, "independent means"):
+        with self.assertRaisesRegex(
+            ValueError, "independent actor reconstruction"
+        ):
             build_and_validate_estimator_receipts(
                 checkpoint_sha256="a" * 64,
                 hparams=self._complete_hparams(),
@@ -450,7 +734,7 @@ class SharedRolloutTest(unittest.TestCase):
         altered = result._replace(
             score_means=result.score_means.at[0, 0, 0].add(1.0)
         )
-        with self.assertRaisesRegex(ValueError, "means"):
+        with self.assertRaisesRegex(ValueError, "engine means"):
             build_and_validate_estimator_receipts(
                 checkpoint_sha256="a" * 64,
                 hparams=self._complete_hparams(),
@@ -473,7 +757,7 @@ class SharedRolloutTest(unittest.TestCase):
                 )
             )
         )
-        with self.assertRaisesRegex(ValueError, "means"):
+        with self.assertRaisesRegex(ValueError, "engine means"):
             build_and_validate_estimator_receipts(
                 checkpoint_sha256="a" * 64,
                 hparams=self._complete_hparams(),
