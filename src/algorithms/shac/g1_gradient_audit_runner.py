@@ -25,11 +25,9 @@ from src.algorithms.shac.gradient_audit import (
     summarize_per_env_gradient_geometry,
 )
 
-
 PyTree = Any
 _CANDIDATE_LABELS = ("baseline", "pathwise", "score")
 _FIXED_SHARD_SEEDS = (0, 1, 2, 3)
-_FIXED_HELD_OUT_SEEDS = (4, 5, 6, 7)
 _FIXED_PHASES = (0, 100, 200, 300, 400)
 _REQUIRED_VALIDITY_KEYS = frozenset(
     {
@@ -102,7 +100,9 @@ def mean_pytrees(trees: Sequence[PyTree]) -> PyTree:
     try:
         assert_matching_pytree_leaf_order(*trees)
     except ValueError as error:
-        raise ValueError("pytrees must have matching structure and leaf order") from error
+        raise ValueError(
+            "pytrees must have matching structure and leaf order"
+        ) from error
 
     count = len(trees)
     result = jax.tree_util.tree_map(
@@ -158,8 +158,7 @@ def gradient_tree_geometry(left: PyTree, right: PyTree) -> dict[str, Any]:
     return to_finite_json(
         {
             "aggregate_cosine": tree_cosine(left, right),
-            "aggregate_sign_agreement_fraction": total_agreements
-            / total_elements,
+            "aggregate_sign_agreement_fraction": total_agreements / total_elements,
             "left_norm": tree_norm(left),
             "right_norm": tree_norm(right),
             "layers": layers,
@@ -314,9 +313,7 @@ def _per_environment_finite_mask(per_env_tree: PyTree) -> jax.Array:
         raise ValueError("gradient leaves must share a nonempty environment axis")
     finite = jp.ones((population,), dtype=jp.bool_)
     for leaf in leaves:
-        finite = finite & jp.all(
-            jp.isfinite(leaf), axis=tuple(range(1, leaf.ndim))
-        )
+        finite = finite & jp.all(jp.isfinite(leaf), axis=tuple(range(1, leaf.ndim)))
     return finite
 
 
@@ -326,28 +323,7 @@ def _mean_all_environments(per_env_tree: PyTree, *, label: str) -> PyTree:
     return jax.tree_util.tree_map(lambda leaf: jp.mean(leaf, axis=0), per_env_tree)
 
 
-def _finite_only_environment_mean(
-    per_env_tree: PyTree,
-) -> tuple[PyTree, int]:
-    finite = _per_environment_finite_mask(per_env_tree)
-    finite_count = int(jp.sum(finite))
-    if finite_count == 0:
-        raise ValueError("score gradients contain no finite environments")
-    population = finite.shape[0]
-
-    def mean_leaf(leaf):
-        shape = (population,) + (1,) * (leaf.ndim - 1)
-        sanitized = jp.where(jp.isfinite(leaf), leaf, 0.0)
-        return jp.sum(sanitized * finite.reshape(shape), axis=0) / finite_count
-
-    mean = jax.tree_util.tree_map(mean_leaf, per_env_tree)
-    _require_finite_tree(mean, label="score finite-only mean")
-    return mean, finite_count
-
-
-def _weighted_mean_pytrees(
-    trees: Sequence[PyTree], weights: Sequence[int]
-) -> PyTree:
+def _weighted_mean_pytrees(trees: Sequence[PyTree], weights: Sequence[int]) -> PyTree:
     trees = tuple(trees)
     weights = tuple(int(weight) for weight in weights)
     if len(trees) != len(weights) or not trees:
@@ -360,11 +336,13 @@ def _weighted_mean_pytrees(
         raise ValueError("weighted pytrees must match") from error
     denominator = sum(weights)
     result = jax.tree_util.tree_map(
-        lambda *leaves: sum(
-            (leaf * weight for leaf, weight in zip(leaves, weights, strict=True)),
-            jp.zeros_like(leaves[0]),
-        )
-        / denominator,
+        lambda *leaves: (
+            sum(
+                (leaf * weight for leaf, weight in zip(leaves, weights, strict=True)),
+                jp.zeros_like(leaves[0]),
+            )
+            / denominator
+        ),
         *trees,
     )
     _require_finite_tree(result, label="weighted mean")
@@ -408,8 +386,18 @@ def aggregate_four_shards(
             result.pathwise_effective_gradients,
             label="pathwise training-effective gradients",
         )
-        score_mean, score_finite_count = _finite_only_environment_mean(
-            result.score_gradients
+        score_finite = _per_environment_finite_mask(result.score_gradients)
+        if score_finite.shape != (64,):
+            raise ValueError("score gradients must contain exactly 64 environments")
+        score_finite_count = int(jp.sum(score_finite))
+        if score_finite_count != 64:
+            raise ValueError(
+                "score gradients contain a nonfinite environment; "
+                "the primary full-batch mean is invalid"
+            )
+        score_mean = _mean_all_environments(
+            result.score_gradients,
+            label="score raw full-batch gradients",
         )
         phases = jp.asarray(result.trajectory.initial_phase)
         pathwise_geometry = summarize_per_env_gradient_geometry(
@@ -434,30 +422,25 @@ def aggregate_four_shards(
                 "seed": seed,
                 "pathwise": to_finite_json(pathwise_geometry),
                 "score": to_finite_json(score_geometry),
-                "cross_estimator": gradient_tree_geometry(
-                    pathwise_mean, score_mean
-                ),
+                "cross_estimator": gradient_tree_geometry(pathwise_mean, score_mean),
             }
         )
 
     pathwise_shard_means = tuple(pathwise_shard_means)
     score_shard_means = tuple(score_shard_means)
     pathwise_mean = mean_pytrees(pathwise_shard_means)
-    score_mean = _weighted_mean_pytrees(
-        score_shard_means, score_finite_counts
-    )
+    score_mean = mean_pytrees(score_shard_means)
     observations = jp.concatenate(tuple(normalized_observations), axis=0)
     geometry = to_finite_json(
         {
             "per_shard": per_shard_geometry,
             "score_finite_count_by_shard": score_finite_counts,
+            "score_primary_aggregation": "raw-full-64-env-unweighted",
             "cross_shard_pairwise_cosines": {
                 "pathwise": pairwise_tree_cosines(
                     pathwise_shard_means, labels=shard_seeds
                 ),
-                "score": pairwise_tree_cosines(
-                    score_shard_means, labels=shard_seeds
-                ),
+                "score": pairwise_tree_cosines(score_shard_means, labels=shard_seeds),
             },
             "bootstrap_direction_confidence": {
                 "pathwise": bootstrap_direction_confidence(
@@ -467,12 +450,9 @@ def aggregate_four_shards(
                 "score": bootstrap_direction_confidence(
                     score_shard_means,
                     confidence_level=bootstrap_confidence_level,
-                    weights=score_finite_counts,
                 ),
             },
-            "cross_estimator": gradient_tree_geometry(
-                pathwise_mean, score_mean
-            ),
+            "cross_estimator": gradient_tree_geometry(pathwise_mean, score_mean),
         }
     )
     return FourShardAggregation(
@@ -497,9 +477,7 @@ def build_descent_candidates(
     apply_step: Callable[..., Any] = apply_functional_actor_step,
 ) -> CandidateActors:
     """Build equal-functional-size candidates along both descent directions."""
-    assert_matching_pytree_leaf_order(
-        actor_params, pathwise_gradient, score_gradient
-    )
+    assert_matching_pytree_leaf_order(actor_params, pathwise_gradient, score_gradient)
     _require_finite_tree(pathwise_gradient, label="pathwise gradient")
     _require_finite_tree(score_gradient, label="score gradient")
     _flatten_observations(normalized_observations)
@@ -528,64 +506,6 @@ def build_descent_candidates(
         functional_steps=to_finite_json(
             {"pathwise": pathwise_summary, "score": score_summary}
         ),
-    )
-
-
-def evaluate_held_out_candidates(
-    *,
-    candidates: CandidateActors,
-    held_out_seeds: Sequence[int],
-    phases: Sequence[int],
-    evaluate_seed: Callable[..., Mapping[str, Sequence[Mapping[str, Any]]]],
-) -> dict[str, Any]:
-    """Evaluate all three candidates together once for each of four CRN seeds."""
-    held_out_seeds = tuple(int(seed) for seed in held_out_seeds)
-    if held_out_seeds != _FIXED_HELD_OUT_SEEDS:
-        raise ValueError(
-            f"held-out seeds must equal {_FIXED_HELD_OUT_SEEDS}"
-        )
-    phases = tuple(int(phase) for phase in phases)
-    if phases != _FIXED_PHASES:
-        raise ValueError(f"phases must equal {_FIXED_PHASES}")
-    candidate_mapping = {
-        "baseline": candidates.baseline,
-        "pathwise": candidates.pathwise,
-        "score": candidates.score,
-    }
-
-    per_seed = []
-    for seed in held_out_seeds:
-        result = evaluate_seed(
-            seed=seed,
-            candidates=candidate_mapping,
-            phases=phases,
-        )
-        if not isinstance(result, Mapping) or set(result) != set(_CANDIDATE_LABELS):
-            raise ValueError("held-out evaluator must return all three candidates")
-        normalized = {}
-        for label in _CANDIDATE_LABELS:
-            rows = tuple(result[label])
-            if len(rows) != len(phases):
-                raise ValueError(f"{label} must return one row per phase")
-            normalized_rows = []
-            for expected_phase, row in zip(phases, rows, strict=True):
-                if not isinstance(row, Mapping):
-                    raise ValueError("held-out rows must be mappings")
-                required = {"phase", "return", "survival", "replay_free", "complete"}
-                if not required.issubset(row):
-                    raise ValueError(f"{label} held-out row is missing required fields")
-                if int(row["phase"]) != expected_phase:
-                    raise ValueError(f"{label} phases are not in the requested order")
-                normalized_rows.append(to_finite_json(dict(row)))
-            normalized[label] = normalized_rows
-        per_seed.append({"seed": seed, "candidates": normalized})
-
-    return to_finite_json(
-        {
-            "held_out_seeds": held_out_seeds,
-            "phases": phases,
-            "per_seed": per_seed,
-        }
     )
 
 
@@ -627,9 +547,7 @@ def classify_preregistered_outcome(
         key for key, valid in validity.items() if valid is not True
     )
     if failed_validity:
-        return _invalid_outcome(
-            "failed validity checks: " + ", ".join(failed_validity)
-        )
+        return _invalid_outcome("failed validity checks: " + ", ".join(failed_validity))
     try:
         finite_geometry = to_finite_json(geometry)
         finite_evaluation = to_finite_json(evaluation)
@@ -638,12 +556,32 @@ def classify_preregistered_outcome(
 
     rows_by_candidate = {label: [] for label in _CANDIDATE_LABELS}
     try:
-        for seed_result in finite_evaluation["per_seed"]:
+        if finite_evaluation.get("mode") != "single-deterministic-five-phase-grid":
+            return _invalid_outcome("ordinary evaluation mode is not preregistered")
+        if int(finite_evaluation.get("seed", -1)) != 0:
+            return _invalid_outcome("ordinary evaluation seed must equal zero")
+        if tuple(finite_evaluation.get("phases", ())) != _FIXED_PHASES:
+            return _invalid_outcome("ordinary evaluation phases are not preregistered")
+        seed_results = finite_evaluation["per_seed"]
+        if len(seed_results) != 1 or int(seed_results[0].get("seed", -1)) != 0:
+            return _invalid_outcome(
+                "ordinary evaluation must contain exactly one seed-zero grid"
+            )
+        for seed_result in seed_results:
             candidates = seed_result["candidates"]
             if set(candidates) != set(_CANDIDATE_LABELS):
                 return _invalid_outcome("evaluation candidate set is incomplete")
             for label in _CANDIDATE_LABELS:
-                for row in candidates[label]:
+                rows = candidates[label]
+                if len(rows) != len(_FIXED_PHASES):
+                    return _invalid_outcome(
+                        "ordinary evaluation must contain exactly five rows per candidate"
+                    )
+                if tuple(int(row["phase"]) for row in rows) != _FIXED_PHASES:
+                    return _invalid_outcome(
+                        "ordinary evaluation candidate phases are incomplete or duplicated"
+                    )
+                for row in rows:
                     if not row["complete"] or not row["replay_free"]:
                         return _invalid_outcome(
                             "held-out evaluation is incomplete or not replay-free"
@@ -721,6 +659,19 @@ def classify_preregistered_outcome(
         * (1.0 - thresholds.maximum_phase_survival_loss_fraction)
         for phase in phases
     )
+    pathwise_phase_survival_gate = all(
+        phase_survival["pathwise"][str(phase)]
+        >= phase_survival["baseline"][str(phase)]
+        * (1.0 - thresholds.maximum_phase_survival_loss_fraction)
+        for phase in phases
+    )
+    pathwise_baseline_noninferior = (
+        means["pathwise"]["return"]
+        >= means["baseline"]["return"] - thresholds.return_tolerance
+        and means["pathwise"]["survival"]
+        >= means["baseline"]["survival"] - thresholds.survival_tolerance
+        and pathwise_phase_survival_gate
+    )
 
     score_return_advantage = means["score"]["return"] - max(
         means["baseline"]["return"], means["pathwise"]["return"]
@@ -759,6 +710,8 @@ def classify_preregistered_outcome(
             "score_return_advantage_over_both": score_return_advantage,
             "score_survival_advantage_over_both": score_survival_advantage,
             "score_phase_survival_gate": score_phase_survival_gate,
+            "pathwise_phase_survival_gate": pathwise_phase_survival_gate,
+            "pathwise_baseline_noninferior": pathwise_baseline_noninferior,
         }
     )
 
@@ -766,8 +719,7 @@ def classify_preregistered_outcome(
         verdict = "inconclusive"
         reason = "score estimator stability is below the preregistered minimum"
     elif (
-        score_lower - pathwise_upper
-        >= thresholds.material_stability_advantage
+        score_lower - pathwise_upper >= thresholds.material_stability_advantage
         and score_beats_both
         and score_phase_survival_gate
     ):
@@ -789,6 +741,7 @@ def classify_preregistered_outcome(
         >= means["score"]["return"] - thresholds.return_tolerance
         and means["pathwise"]["survival"]
         >= means["score"]["survival"] - thresholds.survival_tolerance
+        and pathwise_baseline_noninferior
     ):
         verdict = "pathwise-supported"
         reason = "pathwise stability and transfer are at least as strong as score"

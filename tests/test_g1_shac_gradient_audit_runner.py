@@ -12,7 +12,6 @@ from src.algorithms.shac.g1_gradient_audit_runner import (
     bootstrap_direction_confidence,
     build_descent_candidates,
     classify_preregistered_outcome,
-    evaluate_held_out_candidates,
     gradient_tree_geometry,
     mean_pytrees,
     pairwise_tree_cosines,
@@ -56,9 +55,7 @@ class TreeAggregationTest(unittest.TestCase):
             geometry["layers"][0]["sign_agreement_fraction"], 2.0 / 3.0
         )
         self.assertAlmostEqual(geometry["layers"][1]["cosine"], 0.0)
-        self.assertAlmostEqual(
-            geometry["layers"][1]["sign_agreement_fraction"], 0.5
-        )
+        self.assertAlmostEqual(geometry["layers"][1]["sign_agreement_fraction"], 0.5)
 
     def test_pairwise_cosines_have_stable_order_and_summary(self):
         trees = (
@@ -93,7 +90,7 @@ class TreeAggregationTest(unittest.TestCase):
         )
         json.dumps(first, allow_nan=False)
 
-    def test_bootstrap_uses_same_finite_count_weights_as_score_aggregate(self):
+    def test_bootstrap_supports_explicit_descriptive_weights(self):
         trees = (
             {"w": jnp.array([100.0])},
             {"w": jnp.array([0.0])},
@@ -118,20 +115,12 @@ class TreeAggregationTest(unittest.TestCase):
 class FourShardRunnerTest(unittest.TestCase):
     @staticmethod
     def _fake_result(seed):
-        pathwise_raw = {
-            "w": jnp.array(
-                [[100.0 + seed], [200.0 + seed], [300.0 + seed]]
-            )
-        }
-        pathwise_effective = {
-            "w": jnp.array([[1.0 + seed], [3.0 + seed], [5.0 + seed]])
-        }
-        score = {
-            "w": jnp.array([[10.0 + seed], [jnp.nan], [14.0 + seed]])
-        }
+        pathwise_raw = {"w": jnp.full((64, 1), 100.0 + seed)}
+        pathwise_effective = {"w": jnp.full((64, 1), 3.0 + seed)}
+        score = {"w": jnp.full((64, 1), 12.0 + seed)}
         trajectory = SimpleNamespace(
-            initial_phase=jnp.array([0, 100, 200]),
-            normalized_observations=jnp.full((3, 2, 1), float(seed)),
+            initial_phase=jnp.arange(64) % 5 * 100,
+            normalized_observations=jnp.full((64, 2, 1), float(seed)),
         )
         return SimpleNamespace(
             pathwise_raw_gradients=pathwise_raw,
@@ -165,8 +154,8 @@ class FourShardRunnerTest(unittest.TestCase):
         )
         np.testing.assert_allclose(result.pathwise_mean["w"], [4.5])
         np.testing.assert_allclose(result.score_mean["w"], [13.5])
-        self.assertEqual(result.normalized_observations.shape, (24, 1))
-        self.assertEqual(result.geometry["score_finite_count_by_shard"], [2] * 4)
+        self.assertEqual(result.normalized_observations.shape, (512, 1))
+        self.assertEqual(result.geometry["score_finite_count_by_shard"], [64] * 4)
         self.assertEqual(
             result.geometry["cross_shard_pairwise_cosines"]["pathwise"]["count"],
             6,
@@ -178,35 +167,32 @@ class FourShardRunnerTest(unittest.TestCase):
 
     def test_requires_exactly_four_distinct_shards(self):
         for seeds in ((0, 1, 2), (0, 1, 2, 2), (0, 1, 2, 4)):
-            with self.subTest(seeds=seeds):
-                with self.assertRaisesRegex(ValueError, "shard seeds"):
-                    aggregate_four_shards(
-                        shard_seeds=seeds,
-                        estimate_shared_gradients=lambda **_: None,
-                        estimate_kwargs={},
-                        pathwise_clip_norm=1.0,
-                    )
+            with (
+                self.subTest(seeds=seeds),
+                self.assertRaisesRegex(ValueError, "shard seeds"),
+            ):
+                aggregate_four_shards(
+                    shard_seeds=seeds,
+                    estimate_shared_gradients=lambda **_: None,
+                    estimate_kwargs={},
+                    pathwise_clip_norm=1.0,
+                )
 
-    def test_weights_score_shards_by_their_finite_environment_counts(self):
+    def test_rejects_any_nonfinite_score_environment_in_primary_mean(self):
         def estimate_shared_gradients(*, seed):
             result = self._fake_result(seed)
             if seed == 0:
-                score = {"w": jnp.array([[100.0], [jnp.nan], [jnp.nan]])}
-            else:
-                score = {"w": jnp.zeros((3, 1))}
-            return result.__class__(**{**vars(result), "score_gradients": score})
+                score = {"w": result.score_gradients["w"].at[17, 0].set(jnp.nan)}
+                return result.__class__(**{**vars(result), "score_gradients": score})
+            return result
 
-        result = aggregate_four_shards(
-            shard_seeds=(0, 1, 2, 3),
-            estimate_shared_gradients=estimate_shared_gradients,
-            estimate_kwargs={},
-            pathwise_clip_norm=1.0,
-        )
-
-        np.testing.assert_allclose(result.score_mean["w"], [10.0])
-        self.assertEqual(
-            result.geometry["score_finite_count_by_shard"], [1, 3, 3, 3]
-        )
+        with self.assertRaisesRegex(ValueError, "score.*nonfinite"):
+            aggregate_four_shards(
+                shard_seeds=(0, 1, 2, 3),
+                estimate_shared_gradients=estimate_shared_gradients,
+                estimate_kwargs={},
+                pathwise_clip_norm=1.0,
+            )
 
 
 class JsonAndCandidateTest(unittest.TestCase):
@@ -253,7 +239,6 @@ class JsonAndCandidateTest(unittest.TestCase):
 
 class HeldOutEvaluationAndDecisionTest(unittest.TestCase):
     phases = (0, 100, 200, 300, 400)
-    seeds = (4, 5, 6, 7)
 
     @staticmethod
     def _candidates():
@@ -275,34 +260,31 @@ class HeldOutEvaluationAndDecisionTest(unittest.TestCase):
         replay_free=True,
         complete=True,
     ):
-        def evaluate_seed(*, seed, candidates, phases):
-            self.assertEqual(tuple(candidates), ("baseline", "pathwise", "score"))
-            score_survival = score_phase_survival or [score[1]] * len(phases)
-            metrics = {
-                "baseline": [baseline] * len(phases),
-                "pathwise": [pathwise] * len(phases),
-                "score": list(zip([score[0]] * len(phases), score_survival)),
-            }
-            return {
-                label: [
-                    {
-                        "phase": phase,
-                        "return": values[index][0] + 0.0 * seed,
-                        "survival": values[index][1],
-                        "replay_free": replay_free,
-                        "complete": complete,
-                    }
-                    for index, phase in enumerate(phases)
-                ]
-                for label, values in metrics.items()
-            }
-
-        return evaluate_held_out_candidates(
-            candidates=self._candidates(),
-            held_out_seeds=self.seeds,
-            phases=self.phases,
-            evaluate_seed=evaluate_seed,
-        )
+        score_survival = score_phase_survival or [score[1]] * len(self.phases)
+        metrics = {
+            "baseline": [baseline] * len(self.phases),
+            "pathwise": [pathwise] * len(self.phases),
+            "score": list(zip([score[0]] * len(self.phases), score_survival)),
+        }
+        candidates = {
+            label: [
+                {
+                    "phase": phase,
+                    "return": values[index][0],
+                    "survival": values[index][1],
+                    "replay_free": replay_free,
+                    "complete": complete,
+                }
+                for index, phase in enumerate(self.phases)
+            ]
+            for label, values in metrics.items()
+        }
+        return {
+            "mode": "single-deterministic-five-phase-grid",
+            "seed": 0,
+            "phases": list(self.phases),
+            "per_seed": [{"seed": 0, "candidates": candidates}],
+        }
 
     @staticmethod
     def _geometry(pathwise, score, alignment=0.0, *, confidence=True):
@@ -322,7 +304,7 @@ class HeldOutEvaluationAndDecisionTest(unittest.TestCase):
                     "cosine_to_full_mean": {
                         "lower": pathwise - 0.05,
                         "upper": pathwise + 0.05,
-                    }
+                    },
                 },
                 "score": {
                     "method": "exhaustive-four-shard-percentile",
@@ -331,7 +313,7 @@ class HeldOutEvaluationAndDecisionTest(unittest.TestCase):
                     "cosine_to_full_mean": {
                         "lower": score - 0.05,
                         "upper": score + 0.05,
-                    }
+                    },
                 },
             }
         return geometry
@@ -368,53 +350,6 @@ class HeldOutEvaluationAndDecisionTest(unittest.TestCase):
             bootstrap_confidence_level=0.95,
         )
 
-    def test_evaluates_all_candidates_once_per_common_random_seed(self):
-        calls = []
-
-        def evaluate_seed(*, seed, candidates, phases):
-            calls.append((seed, tuple(candidates), tuple(phases)))
-            return {
-                label: [
-                    {
-                        "phase": phase,
-                        "return": float(seed),
-                        "survival": 50.0,
-                        "replay_free": True,
-                        "complete": True,
-                    }
-                    for phase in phases
-                ]
-                for label in candidates
-            }
-
-        result = evaluate_held_out_candidates(
-            candidates=self._candidates(),
-            held_out_seeds=self.seeds,
-            phases=self.phases,
-            evaluate_seed=evaluate_seed,
-        )
-
-        self.assertEqual([call[0] for call in calls], list(self.seeds))
-        self.assertTrue(
-            all(call[1] == ("baseline", "pathwise", "score") for call in calls)
-        )
-        self.assertEqual(len(result["per_seed"]), 4)
-        json.dumps(result, allow_nan=False)
-
-    def test_rejects_nonfrozen_held_out_seeds_or_phases(self):
-        for seeds, phases in (
-            ((4, 5, 6, 8), self.phases),
-            (self.seeds, (0, 100, 200, 300, 401)),
-        ):
-            with self.subTest(seeds=seeds, phases=phases):
-                with self.assertRaisesRegex(ValueError, "held-out seeds|phases"):
-                    evaluate_held_out_candidates(
-                        candidates=self._candidates(),
-                        held_out_seeds=seeds,
-                        phases=phases,
-                        evaluate_seed=lambda **_: {},
-                    )
-
     def test_classifies_pathwise_quality_limited_with_phase_survival_gate(self):
         result = classify_preregistered_outcome(
             geometry=self._geometry(pathwise=0.4, score=0.9),
@@ -436,16 +371,12 @@ class HeldOutEvaluationAndDecisionTest(unittest.TestCase):
             validity=self._validity(),
         )
         self.assertEqual(gated["verdict"], "inconclusive")
-        self.assertFalse(
-            gated["decision_metrics"]["score_phase_survival_gate"]
-        )
+        self.assertFalse(gated["decision_metrics"]["score_phase_survival_gate"])
 
     def test_classifies_shared_objective_and_pathwise_supported(self):
         shared = classify_preregistered_outcome(
             geometry=self._geometry(pathwise=0.8, score=0.8, alignment=0.9),
-            evaluation=self._evaluation(
-                pathwise=(10.1, 101.0), score=(10.05, 100.5)
-            ),
+            evaluation=self._evaluation(pathwise=(10.1, 101.0), score=(10.05, 100.5)),
             thresholds=self._thresholds(),
             validity=self._validity(),
         )
@@ -462,6 +393,65 @@ class HeldOutEvaluationAndDecisionTest(unittest.TestCase):
             validity=self._validity(),
         )
         self.assertEqual(supported["verdict"], "pathwise-supported")
+
+        degrading = classify_preregistered_outcome(
+            geometry=self._geometry(pathwise=0.9, score=0.8, alignment=0.2),
+            evaluation=self._evaluation(
+                baseline=(10.0, 100.0),
+                pathwise=(5.0, 50.0),
+                score=(4.0, 49.0),
+            ),
+            thresholds=self._thresholds(),
+            validity=self._validity(),
+        )
+        self.assertEqual(degrading["verdict"], "inconclusive")
+
+        phase_unsafe_evaluation = self._evaluation(
+            baseline=(10.0, 100.0),
+            pathwise=(12.0, 105.0),
+            score=(11.0, 103.0),
+        )
+        phase_unsafe_evaluation["per_seed"][0]["candidates"]["pathwise"][0][
+            "survival"
+        ] = 89.0
+        phase_unsafe = classify_preregistered_outcome(
+            geometry=self._geometry(pathwise=0.9, score=0.8, alignment=0.2),
+            evaluation=phase_unsafe_evaluation,
+            thresholds=self._thresholds(),
+            validity=self._validity(),
+        )
+        self.assertEqual(phase_unsafe["verdict"], "inconclusive")
+
+    def test_classifier_requires_exact_single_deterministic_three_by_five_grid(self):
+        valid = self._evaluation()
+        malformed = []
+
+        repeated = json.loads(json.dumps(valid))
+        repeated["per_seed"].append(repeated["per_seed"][0])
+        malformed.append(repeated)
+
+        missing_phase = json.loads(json.dumps(valid))
+        missing_phase["per_seed"][0]["candidates"]["score"].pop()
+        malformed.append(missing_phase)
+
+        duplicate_phase = json.loads(json.dumps(valid))
+        duplicate_phase["per_seed"][0]["candidates"]["pathwise"][4]["phase"] = 300
+        malformed.append(duplicate_phase)
+
+        wrong_seed = json.loads(json.dumps(valid))
+        wrong_seed["seed"] = 4
+        wrong_seed["per_seed"][0]["seed"] = 4
+        malformed.append(wrong_seed)
+
+        for evaluation in malformed:
+            with self.subTest(evaluation=evaluation):
+                result = classify_preregistered_outcome(
+                    geometry=self._geometry(pathwise=0.8, score=0.8),
+                    evaluation=evaluation,
+                    thresholds=self._thresholds(),
+                    validity=self._validity(),
+                )
+                self.assertEqual(result["verdict"], "invalid")
 
     def test_classifies_invalid_and_inconclusive_paths(self):
         invalid = classify_preregistered_outcome(
@@ -521,9 +511,9 @@ class HeldOutEvaluationAndDecisionTest(unittest.TestCase):
         self.assertEqual(overlapping["verdict"], "inconclusive")
 
         forged_geometry = self._geometry(pathwise=0.4, score=0.9)
-        forged_geometry["bootstrap_direction_confidence"]["score"][
-            "method"
-        ] = "unregistered-random-bootstrap"
+        forged_geometry["bootstrap_direction_confidence"]["score"]["method"] = (
+            "unregistered-random-bootstrap"
+        )
         forged = classify_preregistered_outcome(
             geometry=forged_geometry,
             evaluation=self._evaluation(),

@@ -1,8 +1,7 @@
 """Fail-closed CLI contract for the frozen G1 SHAC gradient-quality audit.
 
-This module deliberately owns only immutable-input validation and durable
-evidence writes.  The expensive simulator and gradient implementation remains
-an explicit dependency of :func:`main` until the audit engine is available.
+This module owns immutable-input validation and durable evidence writes, then
+loads the expensive simulator-backed execution engine only after validation.
 """
 
 from __future__ import annotations
@@ -14,10 +13,12 @@ import math
 import os
 import pickle
 import re
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
+import numpy as np
 
 FIXED_SHARD_SEEDS = (0, 1, 2, 3)
 FIXED_HELD_OUT_SEEDS = (4, 5, 6, 7)
@@ -118,7 +119,7 @@ FROZEN_E064_HPARAMS = {
 
 @dataclass(frozen=True)
 class AuditContract:
-    """Validated immutable inputs consumed by the future audit engine."""
+    """Validated immutable inputs consumed by the live audit engine."""
 
     checkpoint: Path
     checkpoint_sha256: str
@@ -149,9 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--reference-sha256", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument(
-        "--shard-seeds", type=int, nargs=4, default=FIXED_SHARD_SEEDS
-    )
+    parser.add_argument("--shard-seeds", type=int, nargs=4, default=FIXED_SHARD_SEEDS)
     parser.add_argument(
         "--held-out-seeds", type=int, nargs=4, default=FIXED_HELD_OUT_SEEDS
     )
@@ -213,9 +212,11 @@ def _read_frozen_hparams(
     try:
         hparams = json.loads(hparams_path.read_text())
     except json.JSONDecodeError as error:
-        raise ValueError(f"frozen hparams are not valid JSON: {hparams_path}") from error
+        raise ValueError(
+            f"frozen hparams are not valid JSON: {hparams_path}"
+        ) from error
     if not isinstance(hparams, Mapping):
-        raise ValueError("frozen hparams must be a JSON object")
+        raise TypeError("frozen hparams must be a JSON object")
 
     expected_hparams = dict(FROZEN_E064_HPARAMS)
     expected_hparams["reference_path"] = str(reference)
@@ -243,15 +244,9 @@ def validate_audit_contract(args: argparse.Namespace) -> AuditContract:
     if not reference.is_file():
         raise ValueError(f"reference does not exist: {reference}")
 
-    checkpoint_sha256 = _require_sha256(
-        args.checkpoint_sha256, "checkpoint SHA-256"
-    )
-    reference_sha256 = _require_sha256(
-        args.reference_sha256, "reference SHA-256"
-    )
-    _require_exact(
-        "checkpoint SHA-256", checkpoint_sha256, E064_CHECKPOINT_SHA256
-    )
+    checkpoint_sha256 = _require_sha256(args.checkpoint_sha256, "checkpoint SHA-256")
+    reference_sha256 = _require_sha256(args.reference_sha256, "reference SHA-256")
+    _require_exact("checkpoint SHA-256", checkpoint_sha256, E064_CHECKPOINT_SHA256)
     _require_exact("reference SHA-256", reference_sha256, E064_REFERENCE_SHA256)
     _require_exact(
         "checkpoint file SHA-256", sha256_file(checkpoint), E064_CHECKPOINT_SHA256
@@ -263,9 +258,7 @@ def validate_audit_contract(args: argparse.Namespace) -> AuditContract:
     for name, expected in FROZEN_ARGUMENTS.items():
         _require_exact(name.replace("_", " "), getattr(args, name), expected)
     _require_exact("shard seeds", tuple(args.shard_seeds), FIXED_SHARD_SEEDS)
-    _require_exact(
-        "held-out seeds", tuple(args.held_out_seeds), FIXED_HELD_OUT_SEEDS
-    )
+    _require_exact("held-out seeds", tuple(args.held_out_seeds), FIXED_HELD_OUT_SEEDS)
     _require_exact("phases", tuple(args.phases), FIXED_PHASES)
 
     hparams_path = _read_frozen_hparams(checkpoint, reference)
@@ -328,17 +321,34 @@ def write_json_atomically(path: Path, document: Mapping[str, Any]) -> None:
 def write_pickle_atomically(path: Path, value: Any) -> None:
     """Atomically materialize a candidate checkpoint or audit artifact."""
     _replace_atomically(
-        path, lambda stream: pickle.dump(value, stream, protocol=pickle.HIGHEST_PROTOCOL)
+        path,
+        lambda stream: pickle.dump(value, stream, protocol=pickle.HIGHEST_PROTOCOL),
+    )
+
+
+def write_npz_atomically(path: Path, arrays: Mapping[str, Any]) -> None:
+    """Atomically materialize a finite named-array evidence archive."""
+    normalized = {str(name): np.asarray(value) for name, value in arrays.items()}
+    if not normalized:
+        raise ValueError("NPZ evidence must contain at least one array")
+    for name, value in normalized.items():
+        if not np.issubdtype(value.dtype, np.number) and value.dtype != np.bool_:
+            raise ValueError(f"NPZ evidence array {name!r} must be numeric or boolean")
+        if not np.isfinite(value).all():
+            raise ValueError(f"NPZ evidence array {name!r} contains nonfinite values")
+    _replace_atomically(
+        path,
+        lambda stream: np.savez_compressed(stream, **normalized),
     )
 
 
 def _load_future_run_audit() -> Callable[..., Any]:
     """Import the engine lazily so parser/contract checks stay lightweight."""
     try:
-        from src.algorithms.shac.gradient_audit import run_audit
+        from src.algorithms.shac.g1_gradient_audit_execution import run_audit
     except (ImportError, AttributeError) as error:
         raise RuntimeError(
-            "the gradient-quality execution engine is not implemented yet"
+            "the G1 gradient-quality execution engine is unavailable"
         ) from error
     return run_audit
 
@@ -348,12 +358,12 @@ def main(
     *,
     run_audit_impl: Callable[..., Any] | None = None,
 ) -> Any:
-    """Validate the immutable contract and delegate to the future audit engine."""
+    """Validate the immutable contract and delegate to the live audit engine."""
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         contract = validate_audit_contract(args)
-    except ValueError as error:
+    except (TypeError, ValueError) as error:
         parser.error(str(error))
     implementation = run_audit_impl or _load_future_run_audit()
     return implementation(contract=contract)
