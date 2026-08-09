@@ -142,16 +142,33 @@ class GradientGeometryTest(unittest.TestCase):
                 "b": jnp.array([[0.0], [3.0]]),
             },
             max_norm=1.0,
-            initial_phases=jnp.array([0, 100]),
+            initial_phases=jnp.array([0, 0]),
         )
 
-        np.testing.assert_allclose(summary.raw_mean["w"], [1.0, 0.0])
+        np.testing.assert_allclose(summary.raw_mean["w"], [2.0, 0.0])
         np.testing.assert_allclose(summary.raw_mean["b"], [0.0])
         np.testing.assert_allclose(summary.clipped_mean["w"], [0.5, 0.0])
         np.testing.assert_allclose(summary.clipped_mean["b"], [0.0])
         np.testing.assert_allclose(summary.finite_by_env, [True, False])
         self.assertAlmostEqual(float(summary.finite_fraction), 0.5)
-        self.assertAlmostEqual(float(summary.clipping_fraction), 0.5)
+        self.assertAlmostEqual(float(summary.clipping_fraction), 1.0)
+        self.assertEqual(int(summary.phase_bins[0].count), 2)
+        self.assertEqual(int(summary.phase_bins[0].finite_count), 1)
+        self.assertAlmostEqual(float(summary.phase_bins[0].raw_mean_norm), 2.0)
+        self.assertAlmostEqual(
+            float(summary.phase_bins[0].clipped_mean_norm), 0.5
+        )
+
+    def test_clipping_fraction_is_zero_when_no_environment_is_finite(self):
+        summary = summarize_per_env_gradient_geometry(
+            {"w": jnp.array([[jnp.nan], [jnp.inf]])},
+            max_norm=1.0,
+            initial_phases=jnp.array([0, 100]),
+        )
+
+        self.assertEqual(float(summary.clipping_fraction), 0.0)
+        np.testing.assert_array_equal(summary.raw_mean["w"], [0.0])
+        np.testing.assert_array_equal(summary.clipped_mean["w"], [0.0])
 
     def test_reports_raw_and_clipped_population_geometry(self):
         summary = summarize_per_env_gradient_geometry(
@@ -195,6 +212,29 @@ class GradientGeometryTest(unittest.TestCase):
             [float(item.clipped_mean_norm) for item in summary.phase_bins],
             np.ones(5),
         )
+        self.assertTrue(
+            all(
+                np.isfinite(float(value))
+                for item in summary.phase_bins
+                for value in (item.raw_snr, item.clipped_snr)
+            )
+        )
+
+    def test_empty_and_singleton_phase_bin_snr_is_finite(self):
+        summary = summarize_per_env_gradient_geometry(
+            {"w": jnp.array([[2.0]])},
+            max_norm=1.0,
+            initial_phases=jnp.array([0]),
+        )
+
+        self.assertEqual(int(summary.phase_bins[0].finite_count), 1)
+        self.assertTrue(np.isfinite(float(summary.phase_bins[0].raw_snr)))
+        self.assertTrue(np.isfinite(float(summary.phase_bins[0].clipped_snr)))
+        for empty_bin in summary.phase_bins[1:]:
+            self.assertEqual(int(empty_bin.count), 0)
+            self.assertEqual(int(empty_bin.finite_count), 0)
+            self.assertTrue(np.isfinite(float(empty_bin.raw_snr)))
+            self.assertTrue(np.isfinite(float(empty_bin.clipped_snr)))
 
 
 class PyTreeOrderAndFunctionalScalingTest(unittest.TestCase):
@@ -250,6 +290,78 @@ class PyTreeOrderAndFunctionalScalingTest(unittest.TestCase):
             float(jnp.max(jnp.abs(actor_apply(second_params, observations) - actor_apply(params, observations)))),
             places=7,
         )
+
+    def test_exact_rms_calibration_handles_nonlinear_actor_output(self):
+        params = {"p": jnp.array(1.0, dtype=jnp.float32)}
+        direction = {"p": jnp.array(1.0, dtype=jnp.float32)}
+
+        def actor_apply(value, observations):
+            del observations
+            return jnp.reshape(jnp.square(value["p"]), (1, 1))
+
+        candidate, summary = apply_functional_actor_step(
+            actor_apply,
+            params,
+            direction,
+            jnp.zeros((1, 1)),
+            target_rms=0.01,
+        )
+
+        exact_delta = actor_apply(candidate, None) - actor_apply(params, None)
+        np.testing.assert_allclose(
+            jnp.sqrt(jnp.mean(exact_delta**2)), 0.01, rtol=2e-5
+        )
+        np.testing.assert_allclose(summary.output_rms, 0.01, rtol=2e-5)
+
+    def test_rejects_nonfinite_actor_unused_direction_leaf(self):
+        params = {"used": jnp.array(1.0), "unused": jnp.array(0.0)}
+        direction = {"used": jnp.array(1.0), "unused": jnp.array(jnp.nan)}
+
+        with self.assertRaisesRegex(ValueError, "direction.*nonfinite"):
+            apply_functional_actor_step(
+                lambda value, observations: value["used"] * observations,
+                params,
+                direction,
+                jnp.ones((1, 1)),
+            )
+
+    def test_rejects_nonfinite_baseline_actor_output(self):
+        with self.assertRaisesRegex(ValueError, "baseline.*nonfinite"):
+            apply_functional_actor_step(
+                lambda value, observations: jnp.array([jnp.nan]),
+                {"p": jnp.array(1.0)},
+                {"p": jnp.array(1.0)},
+                jnp.ones((1, 1)),
+            )
+
+    def test_rejects_nonfinite_candidate_actor_output(self):
+        def actor_apply(value, observations):
+            del observations
+            return jnp.where(value["p"] == 1.0, value["p"], jnp.nan)
+
+        with self.assertRaisesRegex(ValueError, "candidate.*nonfinite"):
+            apply_functional_actor_step(
+                actor_apply,
+                {"p": jnp.array(1.0)},
+                {"p": jnp.array(1.0)},
+                jnp.ones((1, 1)),
+            )
+
+    def test_rejects_nonfinite_exact_action_delta(self):
+        largest = jnp.array(jnp.finfo(jnp.float32).max, dtype=jnp.float32)
+
+        def actor_apply(value, observations):
+            del observations
+            discontinuous = jnp.where(value["p"] == 0.0, largest, -largest)
+            return jnp.stack((discontinuous, value["p"]))
+
+        with self.assertRaisesRegex(ValueError, "delta.*nonfinite"):
+            apply_functional_actor_step(
+                actor_apply,
+                {"p": jnp.array(0.0, dtype=jnp.float32)},
+                {"p": jnp.array(1.0, dtype=jnp.float32)},
+                jnp.ones((1, 1)),
+            )
 
 
 if __name__ == "__main__":

@@ -23,6 +23,9 @@ PHASE_BINS = (
     (400, 500),
 )
 
+_FUNCTIONAL_RMS_CALIBRATION_STEPS = 8
+_FUNCTIONAL_RMS_RELATIVE_TOLERANCE = 2e-5
+
 
 class PhaseBinGradientGeometry(NamedTuple):
     """Scalar geometry for one immutable initial-reference phase interval."""
@@ -30,6 +33,7 @@ class PhaseBinGradientGeometry(NamedTuple):
     start: int
     stop: int
     count: jax.Array
+    finite_count: jax.Array
     raw_mean_norm: jax.Array
     clipped_mean_norm: jax.Array
     raw_trace_variance: jax.Array
@@ -118,15 +122,16 @@ def _env_tree(batched_tree: PyTree, index: int) -> PyTree:
 
 
 def _safe_snr(mean_norm: jax.Array, trace_variance: jax.Array) -> jax.Array:
-    standard_deviation = jp.sqrt(trace_variance)
-    return jp.where(
-        standard_deviation > 0.0,
+    """Returns finite SNR using dtype epsilon as the variance floor."""
+    dtype_limits = jp.finfo(mean_norm.dtype)
+    standard_deviation = jp.sqrt(
+        jp.maximum(trace_variance, dtype_limits.eps)
+    )
+    return jp.nan_to_num(
         mean_norm / standard_deviation,
-        jp.where(
-            mean_norm > 0.0,
-            jp.array(jp.inf, dtype=mean_norm.dtype),
-            jp.zeros_like(mean_norm),
-        ),
+        nan=0.0,
+        posinf=dtype_limits.max,
+        neginf=0.0,
     )
 
 
@@ -235,25 +240,24 @@ def summarize_per_env_gradient_geometry(
     clipped_norm_by_env = jp.stack(
         tuple(tree_norm(item) for item in clipped_individual)
     )
-    selected = jp.ones((num_envs,), dtype=jp.bool_)
-    raw = _population_geometry(raw_contributions, selected)
-    clipped = _population_geometry(clipped_contributions, selected)
+    full_population = jp.ones((num_envs,), dtype=jp.bool_)
+    raw = _population_geometry(raw_contributions, finite_by_env)
+    clipped = _population_geometry(clipped_contributions, full_population)
     phase_bins = tuple(
         PhaseBinGradientGeometry(
             start=start,
             stop=stop,
-            count=jp.sum(
-                ((initial_phases >= start) & (initial_phases < stop)).astype(
-                    jp.int32
-                )
+            count=jp.sum(phase_selection.astype(jp.int32)),
+            finite_count=jp.sum(
+                (phase_selection & finite_by_env).astype(jp.int32)
             ),
             raw_mean_norm=(raw_bin := _population_geometry(
                 raw_contributions,
-                (initial_phases >= start) & (initial_phases < stop),
+                phase_selection & finite_by_env,
             )).mean_norm,
             clipped_mean_norm=(clipped_bin := _population_geometry(
                 clipped_contributions,
-                (initial_phases >= start) & (initial_phases < stop),
+                phase_selection,
             )).mean_norm,
             raw_trace_variance=raw_bin.trace_variance,
             clipped_trace_variance=clipped_bin.trace_variance,
@@ -262,7 +266,11 @@ def summarize_per_env_gradient_geometry(
             negative_cosine_fraction=clipped_bin.negative_cosine_fraction,
         )
         for start, stop in PHASE_BINS
+        for phase_selection in (
+            (initial_phases >= start) & (initial_phases < stop),
+        )
     )
+    finite_count = jp.sum(finite_by_env.astype(jp.int32))
     return PerEnvironmentGradientGeometry(
         raw_mean=raw.mean,
         clipped_mean=clipped.mean,
@@ -270,9 +278,11 @@ def summarize_per_env_gradient_geometry(
         finite_fraction=jp.mean(finite_by_env.astype(jp.float32)),
         raw_norm_by_env=raw_norm_by_env,
         clipped_norm_by_env=clipped_norm_by_env,
-        clipping_fraction=jp.mean(
-            (raw_norm_by_env > max_norm).astype(jp.float32)
-        ),
+        clipping_fraction=jp.sum(
+            (
+                finite_by_env & (raw_norm_by_env > max_norm)
+            ).astype(jp.float32)
+        ) / jp.maximum(finite_count, 1),
         raw_mean_norm=raw.mean_norm,
         clipped_mean_norm=clipped.mean_norm,
         raw_trace_variance=raw.trace_variance,
@@ -286,6 +296,34 @@ def summarize_per_env_gradient_geometry(
     )
 
 
+def _require_finite(value: PyTree, *, label: str) -> None:
+    leaves = jax.tree_util.tree_leaves(value)
+    if not leaves or any(
+        not bool(jp.all(jp.isfinite(leaf))) for leaf in leaves
+    ):
+        raise ValueError(f"{label} contains nonfinite values")
+
+
+def _candidate_actor_delta(
+    actor_apply: Callable[[PyTree, jax.Array], jax.Array],
+    params: PyTree,
+    direction: PyTree,
+    observations: jax.Array,
+    baseline_outputs: jax.Array,
+    scale: jax.Array,
+) -> tuple[PyTree, jax.Array, jax.Array]:
+    candidate_params = jax.tree_util.tree_map(
+        lambda value, delta: value + scale * delta, params, direction
+    )
+    candidate_outputs = actor_apply(candidate_params, observations)
+    _require_finite(candidate_outputs, label="candidate actor output")
+    action_delta = candidate_outputs - baseline_outputs
+    _require_finite(action_delta, label="exact action delta")
+    output_rms = jp.sqrt(jp.mean(jp.square(action_delta)))
+    _require_finite(output_rms, label="exact action RMS")
+    return candidate_params, action_delta, output_rms
+
+
 def apply_functional_actor_step(
     actor_apply: Callable[[PyTree, jax.Array], jax.Array],
     params: PyTree,
@@ -296,14 +334,18 @@ def apply_functional_actor_step(
 ) -> tuple[PyTree, FunctionalActorStepSummary]:
     """Scales a parameter direction to a target actor-output RMS change.
 
-    The scale is measured from a JVP at the frozen parameters and captured
-    observations.  The returned RMS and maximum action delta are recomputed
-    exactly after applying the scaled parameter direction.
+    A JVP at the frozen parameters initializes the scale.  Eight deterministic
+    scalar target/exact-RMS corrections then calibrate nonlinear actor outputs;
+    this is not an objective line search.  The final exact RMS must meet the
+    target within a relative tolerance of ``2e-5``, including float32 output
+    quantization around the frozen baseline.
     """
     if not jp.isfinite(target_rms) or target_rms <= 0.0:
         raise ValueError("target_rms must be finite and positive")
     assert_matching_pytree_leaf_order(params, direction)
+    _require_finite(direction, label="parameter direction")
     baseline_outputs = actor_apply(params, observations)
+    _require_finite(baseline_outputs, label="baseline actor output")
     _, output_tangent = jax.jvp(
         lambda value: actor_apply(value, observations),
         (params,),
@@ -312,12 +354,31 @@ def apply_functional_actor_step(
     direction_rms = jp.sqrt(jp.mean(jp.square(output_tangent)))
     if not bool(jp.isfinite(direction_rms)) or not bool(direction_rms > 0.0):
         raise ValueError("parameter direction must produce a finite nonzero JVP")
-    scale = jp.asarray(target_rms, dtype=direction_rms.dtype) / direction_rms
-    candidate_params = jax.tree_util.tree_map(
-        lambda value, delta: value + scale * delta, params, direction
+    target = jp.asarray(target_rms, dtype=direction_rms.dtype)
+    scale = target / direction_rms
+    for _ in range(_FUNCTIONAL_RMS_CALIBRATION_STEPS):
+        _, _, output_rms = _candidate_actor_delta(
+            actor_apply,
+            params,
+            direction,
+            observations,
+            baseline_outputs,
+            scale,
+        )
+        if not bool(output_rms > 0.0):
+            raise ValueError("exact action RMS must be nonzero")
+        scale = scale * target / output_rms
+    candidate_params, action_delta, output_rms = _candidate_actor_delta(
+        actor_apply,
+        params,
+        direction,
+        observations,
+        baseline_outputs,
+        scale,
     )
-    action_delta = actor_apply(candidate_params, observations) - baseline_outputs
-    output_rms = jp.sqrt(jp.mean(jp.square(action_delta)))
+    relative_error = jp.abs(output_rms - target) / target
+    if not bool(relative_error <= _FUNCTIONAL_RMS_RELATIVE_TOLERANCE):
+        raise ValueError("exact action RMS calibration did not converge")
     return candidate_params, FunctionalActorStepSummary(
         scale=scale,
         linearized_rms=jp.sqrt(jp.mean(jp.square(scale * output_tangent))),
