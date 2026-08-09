@@ -28,6 +28,7 @@ _FIXED_PHASES = (0, 100, 200, 300, 400)
 _CANDIDATE_LABELS = ("baseline", "uniform", "tail")
 _BASELINE_SURVIVAL_FLOORS = (110, 78, 74, 76, 58)
 _RECEIPT_SUMMARY_ATOL = 128 * np.finfo(np.float64).eps
+_COSINE_MEAN_SUMMARY_ATOL = np.finfo(np.float32).eps
 _REQUIRED_VALIDITY_KEYS = frozenset(
     {
         "frozen_hashes",
@@ -527,7 +528,10 @@ def _validate_cosine_summary(
     }
     for field, expected_value in expected.items():
         actual = _require_bounded_cosine(receipt[field], label=f"{label} {field}")
-        if abs(actual - expected_value) > _RECEIPT_SUMMARY_ATOL:
+        tolerance = (
+            _COSINE_MEAN_SUMMARY_ATOL if field == "mean" else _RECEIPT_SUMMARY_ATOL
+        )
+        if abs(actual - expected_value) > tolerance:
             raise ValueError(f"{label} cosine {field} summary does not match values")
 
 

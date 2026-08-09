@@ -414,6 +414,39 @@ class FailureWeightedAggregationTest(unittest.TestCase):
                 replace(aggregation, geometry=changed_geometry),
             )
 
+    def test_cosine_mean_summary_admits_only_e008_float32_reduction_roundoff(self):
+        from src.algorithms.shac.g1_failure_weighted_audit import (
+            _validate_cosine_summary,
+        )
+
+        values = [
+            0.41276466846466064,
+            0.3933444619178772,
+            0.5381776690483093,
+            0.4716799855232239,
+            0.5448299646377563,
+            0.44469526410102844,
+        ]
+        e008_host_f64_mean = float(np.mean(values))
+        self.assertEqual(e008_host_f64_mean, 0.46758200228214264)
+        e008_producer_f32_mean = 0.4675820469856262
+        receipt = {
+            "minimum": min(values),
+            "mean": e008_producer_f32_mean,
+            "maximum": max(values),
+        }
+
+        _validate_cosine_summary(receipt, values, label="E008 uniform pairwise")
+
+        corrupted = dict(receipt)
+        corrupted["mean"] += 2.0 * np.finfo(np.float32).eps
+        with self.assertRaisesRegex(ValueError, "mean summary"):
+            _validate_cosine_summary(
+                corrupted,
+                values,
+                label="E008 uniform pairwise",
+            )
+
 
 class FailureWeightedCandidatesTest(unittest.TestCase):
     def test_builds_equal_size_candidates_and_reports_their_separation(self):
