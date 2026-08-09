@@ -1,8 +1,7 @@
 """Compiled runtime for the one canonical G1 tail-contact smoke case.
 
-This module deliberately exposes no orchestration or output publication.  It
-only compiles and executes the shard-0, bin-0 diagnostic needed to decide
-whether a full forward-mode SHAC experiment is warranted.
+It compiles and executes the shard-0, bin-0 diagnostic, binds that case to the
+authoritative E011 replay, and publishes one operational decision receipt.
 """
 
 from __future__ import annotations
