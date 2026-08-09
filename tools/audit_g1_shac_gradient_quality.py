@@ -22,6 +22,12 @@ from typing import Any, Callable, Mapping, Sequence
 FIXED_SHARD_SEEDS = (0, 1, 2, 3)
 FIXED_HELD_OUT_SEEDS = (4, 5, 6, 7)
 FIXED_PHASES = (0, 100, 200, 300, 400)
+E064_CHECKPOINT_SHA256 = (
+    "6b5c6bb208f9acd9f5988fee201915f8aa67cba42c15231d361a4d2ae530a094"
+)
+E064_REFERENCE_SHA256 = (
+    "bf8c8b407062d1b309440f4c1787c345b04d79501ea75f615e5b41c0c5ebb6db"
+)
 
 FROZEN_ARGUMENTS = {
     "horizon": 48,
@@ -34,26 +40,79 @@ FROZEN_ARGUMENTS = {
     "solver_ls_iterations": 5,
 }
 
-# These are the run hparams that define the audit's unmodified stochastic
-# objective.  The checkpoint and reference identifiers are checked separately
-# because they are supplied as immutable CLI inputs.
-FROZEN_HPARAMS = {
+# Exact E064 final-checkpoint hparams.  reference_path is replaced at
+# validation time by the resolved selected path, while its key and hash remain
+# mandatory parts of this exact 62-key document.
+FROZEN_E064_HPARAMS = {
     "algorithm": "shac",
-    "env_variant": "g1_tracking_rmr_50hz_validated",
+    "total_steps": 393216,
     "unroll_length": 48,
     "num_envs": 64,
+    "gradient_accumulation_steps": 1,
+    "effective_num_envs": 64,
+    "steps_per_actor_update": 3072,
+    "actor_lr": 0.001,
+    "critic_lr": 0.0005,
     "gamma": 0.99,
-    "action_noise_std_start": 0.1,
+    "gae_lambda": 0.95,
+    "target_update_rate": 0.01,
+    "critic_iterations": 16,
+    "xml_path": (
+        "/home/ubuntu/projects/rmr_tracking/source/whole_body_tracking/"
+        "whole_body_tracking/assets/unitree_description/mjcf/g1.xml"
+    ),
+    "action_scale": 1.0,
+    "cmd_vel_x_range": [-2.0, 2.0],
+    "cmd_vel_y_range": [-1.0, 1.0],
+    "cmd_yaw_rate_range": [-1.5, 1.5],
+    "cmd_zero_prob": [0.1, 0.7, 0.5],
+    "cmd_ctrl_interval_range": [60, 140],
+    "action_noise_std_start": 1.0,
     "action_noise_std_end": 0.1,
-    "actor_per_env_grad_clip": 1.0,
-    "actor_bootstrap_scale": 0.0,
-    "squash_actor_actions": False,
     "friction_range": [1.0, 1.0],
     "mass_range": [1.0, 1.0],
+    "effort_limit_scale": 1.0,
+    "termination_margin_weight": 0.0,
+    "kp_range": [1.0, 1.0],
+    "kd_range": [1.0, 1.0],
     "com_offset_range": [0.0, 0.0, 0.0],
     "push_velocity_range": [0.0, 0.0],
+    "push_interval_s": 1000000000.0,
+    "terrain_flat_prob": 0.2,
+    "terrain_slope_max": 5.0,
+    "terrain_bump_std": 0.4,
+    "terrain_bump_decay": 0.4,
     "terrain": False,
-    "reference_reset_noise_scale": 0.0,
+    "zero_difficulty_frac": 1.0,
+    "curriculum_grace": 393216,
+    "curriculum_steps": 1,
+    "seed": 1,
+    "best_reward": 0.07537891473167549,
+    "max_episode_length": 499,
+    "actor_history_len": 1,
+    "actor_per_env_grad_clip": 1.0,
+    "critic_per_env_grad_clip": 1.0,
+    "actor_bootstrap_scale": 0.0,
+    "actor_bootstrap_delay_steps": 0,
+    "actor_hidden": [512, 512],
+    "actor_layer_norm": False,
+    "actor_zero_output": False,
+    "source_actor_policy": False,
+    "actor_kind": "flax",
+    "residual_action_scale": 0.0,
+    "differentiate_source_feedback": True,
+    "env_variant": "g1_tracking_rmr_50hz_validated",
+    "squash_actor_actions": False,
+    "reference_path": (
+        "/home/ubuntu/worktrees/open-diffloco/g1-rmr-50hz-20260805/"
+        "artifacts/E-20260808-000/reference/"
+        "dance1_subject2_f122_422_50hz.npz"
+    ),
+    "reference_sha256": E064_REFERENCE_SHA256,
+    "reference_fps": 50.0,
+    "reference_stride": 1,
+    "reference_states": 500,
+    "reference_transitions": 499,
 }
 
 
@@ -147,7 +206,6 @@ def _require_exact(name: str, actual: Any, expected: Any) -> None:
 def _read_frozen_hparams(
     checkpoint: Path,
     reference: Path,
-    reference_sha256: str,
 ) -> Path:
     hparams_path = checkpoint.parent / "hparams.json"
     if not hparams_path.is_file():
@@ -159,18 +217,20 @@ def _read_frozen_hparams(
     if not isinstance(hparams, Mapping):
         raise ValueError("frozen hparams must be a JSON object")
 
-    for name, expected in FROZEN_HPARAMS.items():
-        if name not in hparams:
-            raise ValueError(f"frozen hparams are missing {name}")
-        _require_exact(f"frozen hparams {name}", hparams[name], expected)
+    expected_hparams = dict(FROZEN_E064_HPARAMS)
+    expected_hparams["reference_path"] = str(reference)
+    missing = sorted(set(expected_hparams) - set(hparams))
+    extra = sorted(set(hparams) - set(expected_hparams))
+    if missing or extra:
+        details = []
+        if missing:
+            details.append(f"missing keys: {', '.join(missing)}")
+        if extra:
+            details.append(f"extra keys: {', '.join(extra)}")
+        raise ValueError(f"frozen hparams key set mismatch ({'; '.join(details)})")
 
-    if hparams.get("reference_sha256") != reference_sha256:
-        raise ValueError("frozen hparams reference_sha256 does not match --reference")
-    recorded_reference = hparams.get("reference_path")
-    if not isinstance(recorded_reference, str):
-        raise ValueError("frozen hparams are missing reference_path")
-    if Path(recorded_reference).resolve() != reference:
-        raise ValueError("frozen hparams reference_path does not match --reference")
+    for name, expected in expected_hparams.items():
+        _require_exact(f"frozen hparams {name}", hparams[name], expected)
     return hparams_path.resolve()
 
 
@@ -189,10 +249,16 @@ def validate_audit_contract(args: argparse.Namespace) -> AuditContract:
     reference_sha256 = _require_sha256(
         args.reference_sha256, "reference SHA-256"
     )
-    if sha256_file(checkpoint) != checkpoint_sha256:
-        raise ValueError("checkpoint SHA-256 does not match --checkpoint")
-    if sha256_file(reference) != reference_sha256:
-        raise ValueError("reference SHA-256 does not match --reference")
+    _require_exact(
+        "checkpoint SHA-256", checkpoint_sha256, E064_CHECKPOINT_SHA256
+    )
+    _require_exact("reference SHA-256", reference_sha256, E064_REFERENCE_SHA256)
+    _require_exact(
+        "checkpoint file SHA-256", sha256_file(checkpoint), E064_CHECKPOINT_SHA256
+    )
+    _require_exact(
+        "reference file SHA-256", sha256_file(reference), E064_REFERENCE_SHA256
+    )
 
     for name, expected in FROZEN_ARGUMENTS.items():
         _require_exact(name.replace("_", " "), getattr(args, name), expected)
@@ -202,9 +268,7 @@ def validate_audit_contract(args: argparse.Namespace) -> AuditContract:
     )
     _require_exact("phases", tuple(args.phases), FIXED_PHASES)
 
-    hparams_path = _read_frozen_hparams(
-        checkpoint, reference, reference_sha256
-    )
+    hparams_path = _read_frozen_hparams(checkpoint, reference)
     return AuditContract(
         checkpoint=checkpoint,
         checkpoint_sha256=checkpoint_sha256,

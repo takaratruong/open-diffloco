@@ -1,51 +1,49 @@
-import hashlib
 import json
 import pickle
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 class G1ShacGradientQualityCliTest(unittest.TestCase):
     def _inputs(self, directory: Path) -> tuple[list[str], Path, Path]:
+        from tools.audit_g1_shac_gradient_quality import (
+            E064_CHECKPOINT_SHA256,
+            E064_REFERENCE_SHA256,
+            FROZEN_E064_HPARAMS,
+        )
+
         checkpoint = directory / "checkpoint_final.pkl"
         checkpoint.write_bytes(b"immutable E064 checkpoint")
         reference = directory / "lafan1_reference.npz"
         reference.write_bytes(b"immutable 500-state reference")
-        hparams = {
-            "algorithm": "shac",
-            "env_variant": "g1_tracking_rmr_50hz_validated",
-            "unroll_length": 48,
-            "num_envs": 64,
-            "gamma": 0.99,
-            "action_noise_std_start": 0.1,
-            "action_noise_std_end": 0.1,
-            "actor_per_env_grad_clip": 1.0,
-            "actor_bootstrap_scale": 0.0,
-            "squash_actor_actions": False,
-            "friction_range": [1.0, 1.0],
-            "mass_range": [1.0, 1.0],
-            "com_offset_range": [0.0, 0.0, 0.0],
-            "push_velocity_range": [0.0, 0.0],
-            "terrain": False,
-            "reference_reset_noise_scale": 0.0,
-            "reference_path": str(reference.resolve()),
-            "reference_sha256": hashlib.sha256(reference.read_bytes()).hexdigest(),
-        }
+        hparams = dict(FROZEN_E064_HPARAMS)
+        hparams["reference_path"] = str(reference.resolve())
         (directory / "hparams.json").write_text(json.dumps(hparams))
         return (
             [
                 "--checkpoint", str(checkpoint),
                 "--checkpoint-sha256",
-                hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+                E064_CHECKPOINT_SHA256,
                 "--reference", str(reference),
                 "--reference-sha256",
-                hashlib.sha256(reference.read_bytes()).hexdigest(),
+                E064_REFERENCE_SHA256,
                 "--output-dir", str(directory / "audit"),
             ],
             checkpoint,
             reference,
         )
+
+    def _pinned_file_sha(self, path: Path) -> str:
+        from tools.audit_g1_shac_gradient_quality import (
+            E064_CHECKPOINT_SHA256,
+            E064_REFERENCE_SHA256,
+        )
+
+        if path.suffix == ".pkl":
+            return E064_CHECKPOINT_SHA256
+        return E064_REFERENCE_SHA256
 
     def test_parser_requires_immutable_inputs_and_uses_frozen_defaults(self):
         from tools.audit_g1_shac_gradient_quality import (
@@ -75,7 +73,35 @@ class G1ShacGradientQualityCliTest(unittest.TestCase):
         self.assertEqual(args.solver_iterations, 4)
         self.assertEqual(args.solver_ls_iterations, 5)
 
-    def test_contract_rejects_hash_mismatch_and_nonfrozen_arguments(self):
+    def test_contract_rejects_unpinned_cli_hashes(self):
+        from tools.audit_g1_shac_gradient_quality import (
+            build_parser,
+            validate_audit_contract,
+        )
+
+        for attribute, label in (
+            ("checkpoint_sha256", "checkpoint SHA-256"),
+            ("reference_sha256", "reference SHA-256"),
+        ):
+            with self.subTest(attribute=attribute), tempfile.TemporaryDirectory() as directory:
+                argv, _, _ = self._inputs(Path(directory))
+                args = build_parser().parse_args(argv)
+                setattr(args, attribute, "0" * 64)
+                with self.assertRaisesRegex(ValueError, label):
+                    validate_audit_contract(args)
+
+    def test_contract_rejects_recomputed_file_hash_mismatch(self):
+        from tools.audit_g1_shac_gradient_quality import (
+            build_parser,
+            validate_audit_contract,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            argv, _, _ = self._inputs(Path(directory))
+            with self.assertRaisesRegex(ValueError, "checkpoint.*SHA-256"):
+                validate_audit_contract(build_parser().parse_args(argv))
+
+    def test_contract_rejects_nonfrozen_arguments(self):
         from tools.audit_g1_shac_gradient_quality import (
             build_parser,
             validate_audit_contract,
@@ -85,19 +111,22 @@ class G1ShacGradientQualityCliTest(unittest.TestCase):
             argv, _, _ = self._inputs(Path(directory))
             parser = build_parser()
             args = parser.parse_args(argv)
-            args.checkpoint_sha256 = "0" * 64
-            with self.assertRaisesRegex(ValueError, "checkpoint SHA-256"):
-                validate_audit_contract(args)
-
-            args = parser.parse_args(argv)
             args.horizon = 47
-            with self.assertRaisesRegex(ValueError, "horizon"):
-                validate_audit_contract(args)
+            with patch(
+                "tools.audit_g1_shac_gradient_quality.sha256_file",
+                side_effect=self._pinned_file_sha,
+            ):
+                with self.assertRaisesRegex(ValueError, "horizon"):
+                    validate_audit_contract(args)
 
             args = parser.parse_args(argv)
             args.shard_seeds = [0, 1, 2, 4]
-            with self.assertRaisesRegex(ValueError, "shard seeds"):
-                validate_audit_contract(args)
+            with patch(
+                "tools.audit_g1_shac_gradient_quality.sha256_file",
+                side_effect=self._pinned_file_sha,
+            ):
+                with self.assertRaisesRegex(ValueError, "shard seeds"):
+                    validate_audit_contract(args)
 
     def test_contract_rejects_hparams_that_violate_the_frozen_protocol(self):
         from tools.audit_g1_shac_gradient_quality import (
@@ -113,8 +142,76 @@ class G1ShacGradientQualityCliTest(unittest.TestCase):
             hparams["squash_actor_actions"] = True
             hparams_path.write_text(json.dumps(hparams))
 
-            with self.assertRaisesRegex(ValueError, "squash_actor_actions"):
-                validate_audit_contract(build_parser().parse_args(argv))
+            with patch(
+                "tools.audit_g1_shac_gradient_quality.sha256_file",
+                side_effect=self._pinned_file_sha,
+            ):
+                with self.assertRaisesRegex(ValueError, "squash_actor_actions"):
+                    validate_audit_contract(build_parser().parse_args(argv))
+
+    def test_contract_rejects_changed_kp_or_kd_range(self):
+        from tools.audit_g1_shac_gradient_quality import (
+            build_parser,
+            validate_audit_contract,
+        )
+
+        for name in ("kp_range", "kd_range"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory)
+                argv, _, _ = self._inputs(path)
+                hparams_path = path / "hparams.json"
+                hparams = json.loads(hparams_path.read_text())
+                hparams[name] = [0.9, 1.1]
+                hparams_path.write_text(json.dumps(hparams))
+
+                with patch(
+                    "tools.audit_g1_shac_gradient_quality.sha256_file",
+                    side_effect=self._pinned_file_sha,
+                ):
+                    with self.assertRaisesRegex(ValueError, name):
+                        validate_audit_contract(build_parser().parse_args(argv))
+
+    def test_contract_rejects_extra_hparam_key(self):
+        from tools.audit_g1_shac_gradient_quality import (
+            build_parser,
+            validate_audit_contract,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            argv, _, _ = self._inputs(path)
+            hparams_path = path / "hparams.json"
+            hparams = json.loads(hparams_path.read_text())
+            hparams["unregistered_override"] = True
+            hparams_path.write_text(json.dumps(hparams))
+
+            with patch(
+                "tools.audit_g1_shac_gradient_quality.sha256_file",
+                side_effect=self._pinned_file_sha,
+            ):
+                with self.assertRaisesRegex(ValueError, "extra.*unregistered_override"):
+                    validate_audit_contract(build_parser().parse_args(argv))
+
+    def test_contract_rejects_missing_hparam_key(self):
+        from tools.audit_g1_shac_gradient_quality import (
+            build_parser,
+            validate_audit_contract,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            argv, _, _ = self._inputs(path)
+            hparams_path = path / "hparams.json"
+            hparams = json.loads(hparams_path.read_text())
+            del hparams["actor_kind"]
+            hparams_path.write_text(json.dumps(hparams))
+
+            with patch(
+                "tools.audit_g1_shac_gradient_quality.sha256_file",
+                side_effect=self._pinned_file_sha,
+            ):
+                with self.assertRaisesRegex(ValueError, "missing.*actor_kind"):
+                    validate_audit_contract(build_parser().parse_args(argv))
 
     def test_atomic_helpers_reject_nonfinite_json_and_replace_outputs(self):
         from tools.audit_g1_shac_gradient_quality import (
@@ -158,7 +255,11 @@ class G1ShacGradientQualityCliTest(unittest.TestCase):
                 calls.append(contract)
                 return {"status": "wired"}
 
-            result = main(argv, run_audit_impl=future_run_audit)
+            with patch(
+                "tools.audit_g1_shac_gradient_quality.sha256_file",
+                side_effect=self._pinned_file_sha,
+            ):
+                result = main(argv, run_audit_impl=future_run_audit)
 
         self.assertEqual(result, {"status": "wired"})
         self.assertEqual(calls[0].checkpoint, checkpoint.resolve())
