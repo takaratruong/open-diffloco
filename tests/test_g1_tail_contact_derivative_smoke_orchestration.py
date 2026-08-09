@@ -2,7 +2,7 @@ import json
 import tempfile
 import unittest
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,6 +25,8 @@ class FakeSmoke:
     reverse_cached_duration_seconds: float = 4.0
     forward_cached_sweep_durations_seconds: tuple[float, ...] = (5.0, 6.0, 7.0)
     probe_durations_seconds: tuple[float, ...] = (8.0, 9.0)
+    reverse_gradient: tuple[float, ...] = (1.0,)
+    forward_gradients: tuple[tuple[float, ...], ...] = ((1.0,),)
 
 
 def _source(losses, phases, identity):
@@ -43,6 +45,50 @@ def _source(losses, phases, identity):
 
 
 class OneCaseSmokeOrchestrationTest(unittest.TestCase):
+    def _classify(self, smoke, *, memory=None):
+        losses = np.arange(64, dtype=np.float64)
+        phases = np.arange(64, dtype=np.int64) % 100
+        identity = {"trajectory": "same"}
+        trajectory = SimpleNamespace(initial_phase=phases)
+        evidence = SimpleNamespace(
+            result=SimpleNamespace(losses=losses, trajectory=trajectory),
+            pathwise_receipt=identity,
+            score_receipt=identity,
+        )
+        prepared = SimpleNamespace(
+            estimate_shard=lambda _: evidence,
+            prepare_first_action_objective=lambda *args, **kwargs: SimpleNamespace(
+                nominal_first_action=np.zeros(29), nominal_objective=np.asarray(0.0)
+            ),
+            gradient_solver_context=lambda: _null_context(),
+            runtime_provenance={},
+            external_inputs={},
+        )
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        contract = SimpleNamespace(
+            output_dir=Path(temporary.name) / "smoke",
+            checkpoint=Path("/checkpoint.pkl"),
+            checkpoint_sha256="checkpoint-sha",
+            reference=Path("/reference.npz"),
+            reference_sha256="reference-sha",
+        )
+        from src.algorithms.shac.g1_tail_contact_derivative_smoke import (
+            run_one_case_smoke,
+        )
+
+        return run_one_case_smoke(
+            contract,
+            Path("/frozen/e011"),
+            load_source_receipts_impl=lambda _: _source(losses, phases, identity),
+            prepare_e064_execution_impl=lambda _: prepared,
+            make_action_noise_impl=lambda _: object(),
+            compile_case_kernels_impl=lambda _: object(),
+            run_compiled_case_smoke_impl=lambda _: smoke,
+            memory_snapshot_impl=lambda: memory or {"available": False},
+            source_hashes_impl=lambda _: {},
+        )
+
     def test_replays_only_shard_zero_selects_bin_zero_and_writes_one_receipt(self):
         from src.algorithms.shac.g1_tail_contact_derivative_smoke import (
             run_one_case_smoke,
@@ -131,52 +177,79 @@ class OneCaseSmokeOrchestrationTest(unittest.TestCase):
         self.assertLess(calls.index(("prepare-objective", 5)), calls.index(("compile", "diagnostic")))
 
     def test_abandons_on_forward_failure_but_still_publishes_classification(self):
-        from src.algorithms.shac.g1_tail_contact_derivative_smoke import (
-            run_one_case_smoke,
-        )
-
-        losses = np.arange(64, dtype=np.float64)
-        phases = np.arange(64, dtype=np.int64) % 100
-        identity = {"trajectory": "same"}
-        trajectory = SimpleNamespace(initial_phase=phases)
-        evidence = SimpleNamespace(
-            result=SimpleNamespace(losses=losses, trajectory=trajectory),
-            pathwise_receipt=identity,
-            score_receipt=identity,
-        )
-        prepared = SimpleNamespace(
-            estimate_shard=lambda _: evidence,
-            prepare_first_action_objective=lambda *args, **kwargs: SimpleNamespace(
-                nominal_first_action=np.zeros(29), nominal_objective=np.asarray(0.0)
-            ),
-            gradient_solver_context=lambda: _null_context(),
-            runtime_provenance={},
-            external_inputs={},
-        )
         failed = FakeSmoke(comparison=FakeComparison(forward_valid=False))
-
-        with tempfile.TemporaryDirectory() as temporary:
-            contract = SimpleNamespace(
-                output_dir=Path(temporary) / "smoke",
-                checkpoint=Path("/checkpoint.pkl"),
-                checkpoint_sha256="checkpoint-sha",
-                reference=Path("/reference.npz"),
-                reference_sha256="reference-sha",
-            )
-            receipt = run_one_case_smoke(
-                contract,
-                Path("/frozen/e011"),
-                load_source_receipts_impl=lambda _: _source(losses, phases, identity),
-                prepare_e064_execution_impl=lambda _: prepared,
-                make_action_noise_impl=lambda _: object(),
-                compile_case_kernels_impl=lambda _: object(),
-                run_compiled_case_smoke_impl=lambda _: failed,
-                memory_snapshot_impl=lambda: {"available": False},
-                source_hashes_impl=lambda _: {},
-            )
+        receipt = self._classify(failed)
 
         self.assertEqual(receipt["decision"], "abandon-forward-shac-mechanism")
         self.assertFalse(receipt["decision_gates"]["forward_valid"])
+
+    def test_each_resource_or_execution_gate_independently_abandons(self):
+        base = FakeSmoke(comparison=FakeComparison())
+        cases = (
+            (
+                "memory_headroom_valid",
+                base,
+                {
+                    "available": True,
+                    "bytes_limit": 3 * 1024**3,
+                    "peak_bytes_in_use": 2 * 1024**3,
+                },
+            ),
+            (
+                "projection_within_one_hour",
+                replace(
+                    base,
+                    forward_cached_sweep_durations_seconds=(100.0, 100.0, 100.0),
+                ),
+                None,
+            ),
+            (
+                "probes_preserve_done_and_support",
+                replace(base, probes_preserve_done_and_support=False),
+                None,
+            ),
+            ("execution_valid", replace(base, execution_valid=False), None),
+        )
+        for gate, smoke, memory in cases:
+            with self.subTest(gate=gate):
+                receipt = self._classify(smoke, memory=memory)
+                self.assertEqual(
+                    receipt["decision"], "abandon-forward-shac-mechanism"
+                )
+                self.assertFalse(receipt["decision_gates"][gate])
+
+        receipt = self._classify(base)
+        timings = receipt["timings_seconds"]
+        self.assertAlmostEqual(
+            timings["projected_twenty_case"],
+            timings["total_smoke_elapsed_upper_bound"] + 19 * timings["cached_case"],
+        )
+
+    def test_nonfinite_derivative_telemetry_is_finite_json_and_still_classifies(self):
+        reverse_nan = replace(
+            FakeSmoke(comparison=FakeComparison()), reverse_gradient=(float("nan"),)
+        )
+        reverse_receipt = self._classify(reverse_nan)
+        self.assertEqual(
+            reverse_receipt["decision"], "authorize-forward-shac-method"
+        )
+        self.assertEqual(reverse_receipt["numerical"]["reverse_gradient"], [None])
+        self.assertEqual(
+            reverse_receipt["numerical_nonfinite_counts"][
+                "numerical.reverse_gradient[0]"
+            ],
+            1,
+        )
+
+        forward_nan = replace(
+            FakeSmoke(comparison=FakeComparison(forward_valid=False)),
+            forward_gradients=((float("nan"),),),
+        )
+        forward_receipt = self._classify(forward_nan)
+        self.assertEqual(
+            forward_receipt["decision"], "abandon-forward-shac-mechanism"
+        )
+        self.assertEqual(forward_receipt["numerical"]["forward_gradients"], [[None]])
 
     def test_rejects_e012_output_and_existing_receipt_before_live_work(self):
         from src.algorithms.shac.g1_tail_contact_derivative_smoke import (
@@ -203,7 +276,7 @@ class OneCaseSmokeOrchestrationTest(unittest.TestCase):
                     )
         self.assertEqual(live_calls, [])
 
-    def test_rejects_mismatched_authoritative_replay(self):
+    def test_mismatched_authoritative_replay_publishes_abandonment(self):
         from src.algorithms.shac.g1_tail_contact_derivative_smoke import (
             run_one_case_smoke,
         )
@@ -220,16 +293,24 @@ class OneCaseSmokeOrchestrationTest(unittest.TestCase):
             estimate_shard=lambda _: evidence,
             gradient_solver_context=lambda: _null_context(),
         )
-        with tempfile.TemporaryDirectory() as temporary, self.assertRaisesRegex(
-            ValueError, "estimator.*source"
-        ):
-            run_one_case_smoke(
+        with tempfile.TemporaryDirectory() as temporary:
+            receipt = run_one_case_smoke(
                 SimpleNamespace(output_dir=Path(temporary) / "smoke"),
                 Path("/frozen/e011"),
                 load_source_receipts_impl=lambda _: source,
                 prepare_e064_execution_impl=lambda _: prepared,
                 make_action_noise_impl=lambda _: object(),
+                memory_snapshot_impl=lambda: {"available": False},
+                source_hashes_impl=lambda _: {},
             )
+            on_disk = json.loads(
+                (Path(temporary) / "smoke" / "smoke_receipt.json").read_text()
+            )
+
+        self.assertEqual(receipt, on_disk)
+        self.assertEqual(receipt["decision"], "abandon-forward-shac-mechanism")
+        self.assertFalse(receipt["decision_gates"]["authoritative_binding"])
+        self.assertFalse(receipt["derivatives_executed"])
 
 
 @contextmanager

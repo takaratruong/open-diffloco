@@ -7,6 +7,7 @@ whether a full forward-mode SHAC experiment is warranted.
 
 from __future__ import annotations
 
+import dataclasses
 import resource
 import time
 from collections.abc import Callable, Mapping
@@ -35,6 +36,7 @@ _CANONICAL_DIRECTION_SEED = 12001
 _MINIMUM_DEVICE_HEADROOM_BYTES = 2 * 1024**3
 _MAXIMUM_PROJECTED_TWENTY_CASE_SECONDS = 3600.0
 _FORBIDDEN_EXPERIMENT = "E-20260809-012"
+_PUBLICATION_BUDGET_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -439,6 +441,62 @@ def _memory_gate(snapshots: list[dict[str, Any]]) -> tuple[bool, int | None]:
     return headroom >= _MINIMUM_DEVICE_HEADROOM_BYTES, headroom
 
 
+def _telemetry_json(
+    value: Any,
+    *,
+    path: str = "numerical",
+    nonfinite_counts: dict[str, int] | None = None,
+) -> tuple[Any, dict[str, int]]:
+    """Encode nonfinite diagnostic values as null without losing their location."""
+
+    counts = nonfinite_counts if nonfinite_counts is not None else {}
+    if dataclasses.is_dataclass(value):
+        value = dataclasses.asdict(value)
+    elif hasattr(value, "_asdict"):
+        value = value._asdict()
+    if isinstance(value, Mapping):
+        return (
+            {
+                str(key): _telemetry_json(
+                    child,
+                    path=f"{path}.{key}",
+                    nonfinite_counts=counts,
+                )[0]
+                for key, child in value.items()
+            },
+            counts,
+        )
+    if isinstance(value, (jax.Array, np.ndarray, np.generic)):
+        array = np.asarray(jax.device_get(value))
+        return _telemetry_json(
+            array.item() if array.ndim == 0 else array.tolist(),
+            path=path,
+            nonfinite_counts=counts,
+        )
+    if isinstance(value, (list, tuple)):
+        return (
+            [
+                _telemetry_json(
+                    child,
+                    path=f"{path}[{index}]",
+                    nonfinite_counts=counts,
+                )[0]
+                for index, child in enumerate(value)
+            ],
+            counts,
+        )
+    if isinstance(value, (float, np.floating)):
+        if not np.isfinite(value):
+            counts[path] = counts.get(path, 0) + 1
+            return None, counts
+        return float(value), counts
+    if isinstance(value, (int, np.integer)) and not isinstance(value, bool):
+        return int(value), counts
+    if isinstance(value, (bool, str)) or value is None:
+        return value, counts
+    raise TypeError(f"telemetry value at {path} is not JSON serializable: {type(value)!r}")
+
+
 def run_one_case_smoke(
     contract: Any,
     e011_run_dir: Path,
@@ -470,6 +528,7 @@ def run_one_case_smoke(
     source_started = time.perf_counter()
     source = load_source_receipts_impl(Path(e011_run_dir))
     source_load_duration = time.perf_counter() - source_started
+    hashes = (source_hashes_impl or _default_source_hashes)(Path(e011_run_dir))
 
     if prepare_e064_execution_impl is None:
         from src.algorithms.shac.g1_gradient_audit_execution import (
@@ -498,15 +557,21 @@ def run_one_case_smoke(
     shard_duration = time.perf_counter() - shard_started
     memory_snapshots.append({"boundary": "after-shard-zero", **memory_snapshot()})
 
-    actual_pathwise = to_finite_json(dict(evidence.pathwise_receipt))
-    actual_score = to_finite_json(dict(evidence.score_receipt))
+    estimator_receipts_json_valid = True
+    try:
+        actual_pathwise = to_finite_json(dict(evidence.pathwise_receipt))
+        actual_score = to_finite_json(dict(evidence.score_receipt))
+    except (TypeError, ValueError):
+        actual_pathwise = None
+        actual_score = None
+        estimator_receipts_json_valid = False
     expected_estimators = to_finite_json(
         dict(source.estimator_receipts["per_shard"]["0"]["pathwise"])
     )
-    if actual_pathwise != actual_score:
-        raise ValueError("shard-0 pathwise and score estimator receipts differ")
-    if actual_pathwise != expected_estimators:
-        raise ValueError("shard-0 estimator receipt differs from the E011 source")
+    estimator_receipts_exact = bool(
+        estimator_receipts_json_valid
+        and actual_pathwise == actual_score == expected_estimators
+    )
 
     source_losses = np.asarray(source.losses_by_shard[0], dtype=np.float64)
     source_phases = np.asarray(source.initial_phases_by_shard[0])
@@ -514,15 +579,111 @@ def run_one_case_smoke(
     actual_phases = np.asarray(jax.device_get(evidence.result.trajectory.initial_phase))
     losses_exact = bool(np.array_equal(actual_losses, source_losses))
     phases_exact = bool(np.array_equal(actual_phases, source_phases))
-    if not losses_exact:
-        raise ValueError("shard-0 losses differ from the E011 source")
-    if not phases_exact:
-        raise ValueError("shard-0 initial phases differ from the E011 source")
     source_case = _select_bin_zero(source_losses, source_phases)
-    actual_case = _select_bin_zero(actual_losses, actual_phases)
-    selection_exact = source_case == actual_case
-    if not selection_exact:
-        raise ValueError("shard-0 bin-0 rank-zero selection differs from E011")
+    try:
+        actual_case = _select_bin_zero(actual_losses, actual_phases)
+    except (TypeError, ValueError):
+        actual_case = None
+    selection_exact = bool(actual_case is not None and source_case == actual_case)
+    authoritative_binding = {
+        "estimator_receipts_finite_json": estimator_receipts_json_valid,
+        "estimator_receipts_exact": estimator_receipts_exact,
+        "losses_exact": losses_exact,
+        "initial_phases_exact": phases_exact,
+        "selected_case_exact": selection_exact,
+        "all_exact": bool(
+            estimator_receipts_exact
+            and losses_exact
+            and phases_exact
+            and selection_exact
+        ),
+    }
+    if not authoritative_binding["all_exact"]:
+        replay_mismatches = [
+            name for name, exact in authoritative_binding.items() if exact is not True
+        ]
+        memory_valid, minimum_headroom = _memory_gate(memory_snapshots)
+        elapsed_before_publication = time.perf_counter() - total_started
+        elapsed_upper_bound = elapsed_before_publication + _PUBLICATION_BUDGET_SECONDS
+        decision_gates = {
+            "authoritative_binding": False,
+            "forward_valid": False,
+            "probes_preserve_done_and_support": False,
+            "execution_valid": False,
+            "projection_within_one_hour": False,
+            "memory_headroom_valid": memory_valid,
+        }
+        receipt = to_finite_json(
+            {
+                "schema": "g1-tail-contact-one-case-smoke-v1",
+                "decision": "abandon-forward-shac-mechanism",
+                "classification_reason": "authoritative-replay-mismatch",
+                "replay_mismatches": replay_mismatches,
+                "decision_gates": decision_gates,
+                "authoritative_binding": authoritative_binding,
+                "selected_case": actual_case,
+                "source_selected_case": source_case,
+                "source": {
+                    "e011_run_dir": str(Path(e011_run_dir).resolve()),
+                    "e011_evidence_dir": str(source.evidence_dir),
+                    "e011_verdict": source.outcome["verdict"],
+                    "file_sha256": dict(hashes),
+                    "checkpoint": str(getattr(contract, "checkpoint", "")),
+                    "checkpoint_sha256": getattr(
+                        contract, "checkpoint_sha256", ""
+                    ),
+                    "reference": str(getattr(contract, "reference", "")),
+                    "reference_sha256": getattr(
+                        contract, "reference_sha256", ""
+                    ),
+                },
+                "runtime_provenance": dict(
+                    getattr(prepared, "runtime_provenance", {})
+                ),
+                "external_inputs": dict(getattr(prepared, "external_inputs", {})),
+                "numerical": None,
+                "numerical_nonfinite_counts": {},
+                "timings_seconds": {
+                    "source_receipt_load": source_load_duration,
+                    "e064_preparation": preparation_duration,
+                    "shard_estimator": shard_duration,
+                    "first_action_objective_preparation": None,
+                    "reverse_compile": None,
+                    "forward_compile": None,
+                    "reverse_cached": None,
+                    "forward_cached_sweeps": None,
+                    "probes": None,
+                    "cached_case": None,
+                    "total_smoke_elapsed_before_publication": elapsed_before_publication,
+                    "publication_budget": _PUBLICATION_BUDGET_SECONDS,
+                    "total_smoke_elapsed_upper_bound": elapsed_upper_bound,
+                    "projected_twenty_case": None,
+                    "projection_formula": None,
+                },
+                "resources": {
+                    "host_ru_maxrss": int(
+                        resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                    ),
+                    "host_ru_maxrss_units": "KiB-on-Linux",
+                    "device_memory_snapshots": memory_snapshots,
+                    "minimum_headroom_bytes": minimum_headroom,
+                    "headroom_rule_bytes": _MINIMUM_DEVICE_HEADROOM_BYTES,
+                    "unavailable_allocator_rule": "valid only when the live process completes without allocator/OOM failure",
+                },
+                "fixed_thresholds": {
+                    "finite_difference_epsilon": _FINITE_DIFFERENCE_EPSILON,
+                    "forward_repeat_maximum_absolute_error": 1e-6,
+                    "projected_twenty_case_maximum_seconds": _MAXIMUM_PROJECTED_TWENTY_CASE_SECONDS,
+                    "minimum_device_headroom_bytes": _MINIMUM_DEVICE_HEADROOM_BYTES,
+                },
+                "reverse_mode_role": "telemetry-only",
+                "derivatives_executed": False,
+                "no_training_update": True,
+                "e012_artifacts_written": False,
+            }
+        )
+        write_json_atomically(receipt_path, receipt)
+        return receipt
 
     compile_impl = compile_case_kernels_impl or compile_case_kernels
     run_impl = run_compiled_case_smoke_impl or run_compiled_case_smoke
@@ -548,19 +709,16 @@ def run_one_case_smoke(
         + np.sum(numerical.forward_cached_sweep_durations_seconds)
         + np.sum(numerical.probe_durations_seconds)
     )
-    total_elapsed = time.perf_counter() - total_started
-    projected_twenty_case_seconds = float(total_elapsed + 19 * cached_case_duration)
+    numerical_json, numerical_nonfinite_counts = _telemetry_json(numerical)
+    elapsed_before_publication = time.perf_counter() - total_started
+    elapsed_upper_bound = elapsed_before_publication + _PUBLICATION_BUDGET_SECONDS
+    projected_twenty_case_seconds = float(
+        elapsed_upper_bound + 19 * cached_case_duration
+    )
     memory_valid, minimum_headroom = _memory_gate(memory_snapshots)
     projection_valid = (
         projected_twenty_case_seconds <= _MAXIMUM_PROJECTED_TWENTY_CASE_SECONDS
     )
-    authoritative_binding = {
-        "estimator_receipts_exact": True,
-        "losses_exact": losses_exact,
-        "initial_phases_exact": phases_exact,
-        "selected_case_exact": selection_exact,
-        "all_exact": bool(losses_exact and phases_exact and selection_exact),
-    }
     decision_gates = {
         "authoritative_binding": authoritative_binding["all_exact"],
         "forward_valid": bool(numerical.comparison.forward_valid),
@@ -576,7 +734,6 @@ def run_one_case_smoke(
         if all(decision_gates.values())
         else "abandon-forward-shac-mechanism"
     )
-    hashes = (source_hashes_impl or _default_source_hashes)(Path(e011_run_dir))
     receipt = to_finite_json(
         {
             "schema": "g1-tail-contact-one-case-smoke-v1",
@@ -597,7 +754,8 @@ def run_one_case_smoke(
             },
             "runtime_provenance": dict(prepared.runtime_provenance),
             "external_inputs": dict(prepared.external_inputs),
-            "numerical": numerical,
+            "numerical": numerical_json,
+            "numerical_nonfinite_counts": numerical_nonfinite_counts,
             "timings_seconds": {
                 "source_receipt_load": source_load_duration,
                 "e064_preparation": preparation_duration,
@@ -609,9 +767,11 @@ def run_one_case_smoke(
                 "forward_cached_sweeps": numerical.forward_cached_sweep_durations_seconds,
                 "probes": numerical.probe_durations_seconds,
                 "cached_case": cached_case_duration,
-                "total_smoke_elapsed": total_elapsed,
+                "total_smoke_elapsed_before_publication": elapsed_before_publication,
+                "publication_budget": _PUBLICATION_BUDGET_SECONDS,
+                "total_smoke_elapsed_upper_bound": elapsed_upper_bound,
                 "projected_twenty_case": projected_twenty_case_seconds,
-                "projection_formula": "total_smoke_elapsed + 19 * cached_case",
+                "projection_formula": "total_smoke_elapsed_upper_bound + 19 * cached_case",
             },
             "resources": {
                 "host_ru_maxrss": int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss),
@@ -628,6 +788,7 @@ def run_one_case_smoke(
                 "minimum_device_headroom_bytes": _MINIMUM_DEVICE_HEADROOM_BYTES,
             },
             "reverse_mode_role": "telemetry-only",
+            "derivatives_executed": True,
             "no_training_update": True,
             "e012_artifacts_written": False,
         }
