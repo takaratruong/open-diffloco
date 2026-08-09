@@ -195,6 +195,17 @@ class ValidatedCheckpointShapes(NamedTuple):
     initial_state_signature: tuple
 
 
+class FirstActionObjective(NamedTuple):
+    """Frozen one-environment seam for an exact first-action diagnostic."""
+
+    nominal_trajectory: SharedTrajectory
+    nominal_final_state: PyTree
+    nominal_first_action: jax.Array
+    nominal_objective: jax.Array
+    rollout: Callable[[jax.Array], tuple[SharedTrajectory, PyTree]]
+    objective: Callable[[jax.Array], jax.Array]
+
+
 def _require_unbounded_environment(env: Any) -> None:
     if getattr(env, "clip_actions", None) is not False:
         raise ValueError("the G1 audit requires an explicitly unbounded environment")
@@ -832,6 +843,235 @@ class PreparedE064Estimator:
             normalizer_state=self._normalizer_state,
             initial_states=self._initial_states,
             sigma=self.contract.sigma,
+        )
+
+    def prepare_first_action_objective(
+        self,
+        action_noise: jax.Array,
+        env_index: int,
+        *,
+        expected_shared_trajectory: SharedTrajectory,
+    ) -> FirstActionObjective:
+        """Freezes one row and exposes a first-action-only objective seam."""
+
+        _require_host_tree(action_noise, label="first-action objective")
+        _require_host_tree(
+            expected_shared_trajectory,
+            label="authoritative E011 shared trajectory",
+        )
+        _require_unbounded_environment(self._env)
+        if isinstance(env_index, bool) or not isinstance(
+            env_index, (int, np.integer)
+        ):
+            raise TypeError("env_index must be an integer")
+        if not 0 <= int(env_index) < self.contract.population:
+            raise ValueError("env_index is outside the frozen population")
+        action_noise = jp.asarray(action_noise)
+        if (
+            action_noise.ndim != 3
+            or action_noise.shape[0] != self.contract.population
+            or action_noise.shape[1] != self.contract.horizon
+            or action_noise.shape[2] < 1
+        ):
+            raise ValueError(
+                "action_noise shape must match the frozen population and horizon"
+            )
+        if not np.isfinite(np.asarray(jax.device_get(action_noise))).all():
+            raise ValueError("action_noise must be finite")
+        sigma = jp.asarray(self.contract.sigma, dtype=action_noise.dtype)
+        if sigma.ndim != 0 or not bool(jp.isfinite(sigma)) or not bool(sigma > 0.0):
+            raise ValueError("first-action sigma must be a positive finite scalar")
+
+        selected_state = jax.tree_util.tree_map(
+            lambda leaf: jax.lax.stop_gradient(leaf[int(env_index)]),
+            self._initial_states,
+        )
+        selected_noise = jax.lax.stop_gradient(
+            jp.array(action_noise[int(env_index)])
+        )
+        nominal_trajectory, nominal_final_state = rollout_one_environment(
+            self._actor_params,
+            self._actor_apply,
+            self._env,
+            normalizer=self._normalizer,
+            normalizer_state=self._normalizer_state,
+            initial_state=selected_state,
+            action_noise=selected_noise,
+            sigma=sigma,
+        )
+        nominal_first_action = jax.lax.stop_gradient(
+            nominal_trajectory.actions[0]
+        )
+        if nominal_first_action.shape != (action_noise.shape[2],):
+            raise ValueError("action_noise action shape differs from the frozen actor")
+        nominal_objective = pathwise_negative_objective(
+            nominal_trajectory.rewards,
+            nominal_trajectory.dones,
+            gamma=self.contract.gamma,
+        )
+        for label, value in (
+            ("nominal trajectory", nominal_trajectory),
+            ("nominal final state", nominal_final_state),
+            ("nominal first action", nominal_first_action),
+            ("nominal objective", nominal_objective),
+        ):
+            leaves = jax.tree_util.tree_leaves(value)
+            if not leaves or any(
+                not np.isfinite(np.asarray(jax.device_get(leaf))).all()
+                for leaf in leaves
+            ):
+                raise ValueError(f"{label} must be finite")
+
+        if not isinstance(expected_shared_trajectory, SharedTrajectory):
+            raise TypeError(
+                "expected_shared_trajectory must be a SharedTrajectory"
+            )
+        for field_name in SharedTrajectory._fields:
+            authoritative = np.ascontiguousarray(
+                np.asarray(
+                    jax.device_get(
+                        getattr(expected_shared_trajectory, field_name)
+                    )
+                )
+            )
+            if (
+                authoritative.ndim < 1
+                or authoritative.shape[0] != self.contract.population
+            ):
+                raise ValueError(
+                    "authoritative E011 shared trajectory "
+                    f"{field_name} must have the frozen population axis"
+                )
+            authoritative_row = np.ascontiguousarray(
+                authoritative[int(env_index)]
+            )
+            nominal_row = np.ascontiguousarray(
+                np.asarray(
+                    jax.device_get(getattr(nominal_trajectory, field_name))
+                )
+            )
+            if (
+                authoritative_row.shape != nominal_row.shape
+                or authoritative_row.dtype != nominal_row.dtype
+                or authoritative_row.tobytes() != nominal_row.tobytes()
+            ):
+                raise ValueError(
+                    "authoritative E011 shared trajectory "
+                    f"{field_name} must be byte-exact"
+                )
+
+        def rollout(candidate_action: jax.Array) -> tuple[SharedTrajectory, PyTree]:
+            candidate_action = jp.asarray(candidate_action)
+            if candidate_action.shape != nominal_first_action.shape:
+                raise ValueError("candidate_action shape differs from nominal action")
+            if not any(
+                isinstance(leaf, jax.core.Tracer)
+                for leaf in jax.tree_util.tree_leaves(candidate_action)
+            ) and not np.isfinite(
+                np.asarray(jax.device_get(candidate_action))
+            ).all():
+                raise ValueError("candidate_action must be finite")
+
+            def step(state: PyTree, transition_input: tuple[jax.Array, jax.Array]):
+                noise_t, replace_action = transition_input
+                observation_rng, environment_rng = jax.random.split(
+                    state.info["rng"]
+                )
+                state = state.replace(
+                    info={**state.info, "rng": environment_rng}
+                )
+                actor_observation = self._env._apply_obs_noise(
+                    state.obs, observation_rng
+                )
+                normalized_observation = self._env.normalize_actor_obs(
+                    self._normalizer,
+                    self._normalizer_state,
+                    actor_observation,
+                ).astype(jp.float32)
+                mean = self._actor_apply(
+                    self._actor_params, normalized_observation
+                ).astype(jp.float64)
+                sampled_action = mean + sigma.astype(jp.float64) * noise_t.astype(
+                    jp.float64
+                )
+                action = jp.where(replace_action, candidate_action, sampled_action)
+                next_state = self._env.step(state, action)
+                transition = {
+                    "noise": noise_t,
+                    "observation_rngs": observation_rng,
+                    "raw_observations": state.obs,
+                    "observations": actor_observation,
+                    "normalized_observations": normalized_observation,
+                    "means": mean,
+                    "actions": action,
+                    "rewards": next_state.reward,
+                    "dones": next_state.done,
+                }
+                return next_state, transition
+
+            replace_first_action = jp.arange(selected_noise.shape[0]) == 0
+            final_state, arrays = jax.lax.scan(
+                step,
+                selected_state,
+                (selected_noise, replace_first_action),
+            )
+            return (
+                SharedTrajectory(
+                    noise=arrays["noise"],
+                    observation_rngs=arrays["observation_rngs"],
+                    raw_observations=arrays["raw_observations"],
+                    observations=arrays["observations"],
+                    normalized_observations=arrays["normalized_observations"],
+                    means=arrays["means"],
+                    actions=arrays["actions"],
+                    rewards=arrays["rewards"],
+                    dones=arrays["dones"],
+                    initial_phase=jax.lax.stop_gradient(
+                        selected_state.info["phase"]
+                    ),
+                ),
+                final_state,
+            )
+
+        def objective(candidate_action: jax.Array) -> jax.Array:
+            trajectory, _ = rollout(candidate_action)
+            return pathwise_negative_objective(
+                trajectory.rewards,
+                trajectory.dones,
+                gamma=self.contract.gamma,
+            )
+
+        replayed_trajectory, replayed_final_state = rollout(
+            nominal_first_action
+        )
+        replayed_objective = objective(nominal_first_action)
+        for label, actual, expected in (
+            ("trajectory", replayed_trajectory, nominal_trajectory),
+            ("final state", replayed_final_state, nominal_final_state),
+            ("objective", replayed_objective, nominal_objective),
+        ):
+            actual_leaves, actual_definition = jax.tree_util.tree_flatten(actual)
+            expected_leaves, expected_definition = jax.tree_util.tree_flatten(expected)
+            if actual_definition != expected_definition or any(
+                not np.array_equal(
+                    np.asarray(jax.device_get(actual_leaf)),
+                    np.asarray(jax.device_get(expected_leaf)),
+                )
+                for actual_leaf, expected_leaf in zip(
+                    actual_leaves, expected_leaves, strict=True
+                )
+            ):
+                raise ValueError(
+                    f"nominal first-action injection changed the {label}"
+                )
+
+        return FirstActionObjective(
+            nominal_trajectory=nominal_trajectory,
+            nominal_final_state=nominal_final_state,
+            nominal_first_action=nominal_first_action,
+            nominal_objective=nominal_objective,
+            rollout=rollout,
+            objective=objective,
         )
 
     def __call__(self, action_noise: jax.Array) -> ExactE064AuditResult:
