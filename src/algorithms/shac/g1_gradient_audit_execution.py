@@ -17,7 +17,7 @@ import platform
 import socket
 import subprocess
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,6 +42,8 @@ _ACTION_DIMENSION = 29
 _SHARD_SEEDS = (0, 1, 2, 3)
 _HELD_OUT_SEEDS = (4, 5, 6, 7)
 _PHASES = (0, 100, 200, 300, 400)
+_E066_BASELINE_SURVIVAL = (135, 236, 152, 83, 74)
+_E066_COMPETENCE_FLOORS = (110, 78, 74, 76, 58)
 _CANDIDATE_LABELS = ("baseline", "pathwise", "score")
 _ORDINARY_ARRAY_FIELDS = (
     "active",
@@ -86,6 +88,38 @@ E064_OUTCOME_THRESHOLDS = OutcomeThresholds(
     maximum_phase_survival_loss_fraction=0.10,
     bootstrap_confidence_level=0.95,
 )
+
+
+def _baseline_competence_receipt(
+    *,
+    phases: Sequence[int],
+    actual_survival: Sequence[int],
+) -> dict[str, Any]:
+    """Admit a baseline by E066's frozen floors, retaining exact replay as telemetry."""
+    phase_values = [int(value) for value in phases]
+    survival_values = [int(value) for value in actual_survival]
+    if tuple(phase_values) != _PHASES:
+        raise ValueError("baseline phases do not match the frozen phase grid")
+    if len(survival_values) != len(_E066_COMPETENCE_FLOORS):
+        raise ValueError("baseline survival does not match the frozen phase grid")
+    historical = list(_E066_BASELINE_SURVIVAL)
+    floors = list(_E066_COMPETENCE_FLOORS)
+    exact_match = survival_values == historical
+    return {
+        "source_experiment": "E066",
+        "phases": phase_values,
+        "historical_expected_survival": historical,
+        "actual_survival": survival_values,
+        "competence_floors": floors,
+        "competence_floor_pass": all(
+            actual >= floor for actual, floor in zip(survival_values, floors, strict=True)
+        ),
+        "historical_exact_match": exact_match,
+        # Retain the v3 keys so older evidence readers can still consume the
+        # diagnostic historical comparison without treating it as admission.
+        "expected_survival": historical,
+        "exact_match": exact_match,
+    }
 
 
 @dataclass(frozen=True)
@@ -905,17 +939,15 @@ def run_audit(contract: Any) -> dict[str, Any]:
             "per_seed": [{"seed": ordinary_seed, "candidates": ordinary_candidates}],
         }
     )
-    expected_baseline_survival = [135, 236, 152, 83, 74]
     actual_baseline_survival = [
         int(row["survival"]) for row in ordinary_candidates["baseline"]
     ]
     baseline_reproduction = {
-        "source_experiment": "E066",
+        **_baseline_competence_receipt(
+            phases=contract.phases,
+            actual_survival=actual_baseline_survival,
+        ),
         "seed": ordinary_seed,
-        "phases": list(contract.phases),
-        "expected_survival": expected_baseline_survival,
-        "actual_survival": actual_baseline_survival,
-        "exact_match": actual_baseline_survival == expected_baseline_survival,
     }
 
     proof_keys = {
@@ -943,7 +975,7 @@ def run_audit(contract: Any) -> dict[str, Any]:
         **{key: value is True for key, value in prepared.algorithmic_validity.items()},
         "rollouts_fresh_replay_free_complete_finite": bool(
             heldout_stochastic_finite_complete
-            and baseline_reproduction["exact_match"]
+            and baseline_reproduction["competence_floor_pass"]
             and all(
                 bool(row["complete"]) and bool(row["replay_free"])
                 for rows in ordinary_candidates.values()

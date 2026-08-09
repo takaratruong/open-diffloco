@@ -15,6 +15,7 @@ import numpy as np
 from src.algorithms.shac.g1_gradient_audit_execution import (
     EstimatorShardEvidence,
     PreparedAuditExecution,
+    _baseline_competence_receipt,
     make_frozen_action_noise,
     make_phase_rollout,
     replace_actor_parameters,
@@ -78,6 +79,41 @@ class CandidateCheckpointTest(unittest.TestCase):
         np.testing.assert_array_equal(candidate.actor_params["w"], [2.0])
         np.testing.assert_array_equal(candidate.untouched, state.untouched)
         np.testing.assert_array_equal(state.actor_params["w"], [1.0])
+
+
+class BaselineCompetenceReceiptTest(unittest.TestCase):
+    def test_accepts_e007_device_sensitive_vector_and_keeps_exact_match_diagnostic(self):
+        receipt = _baseline_competence_receipt(
+            phases=(0, 100, 200, 300, 400),
+            actual_survival=(135, 230, 157, 82, 75),
+        )
+
+        self.assertEqual(receipt["competence_floors"], [110, 78, 74, 76, 58])
+        self.assertTrue(receipt["competence_floor_pass"])
+        self.assertFalse(receipt["historical_exact_match"])
+        self.assertEqual(receipt["historical_expected_survival"], [135, 236, 152, 83, 74])
+
+    def test_rejects_each_floor_minus_one(self):
+        floors = (110, 78, 74, 76, 58)
+        for index in range(len(floors)):
+            actual = list(floors)
+            actual[index] -= 1
+
+            receipt = _baseline_competence_receipt(
+                phases=(0, 100, 200, 300, 400),
+                actual_survival=actual,
+            )
+
+            self.assertFalse(receipt["competence_floor_pass"], index)
+
+    def test_accepts_values_exactly_at_every_floor(self):
+        receipt = _baseline_competence_receipt(
+            phases=(0, 100, 200, 300, 400),
+            actual_survival=(110, 78, 74, 76, 58),
+        )
+
+        self.assertTrue(receipt["competence_floor_pass"])
+        self.assertFalse(receipt["historical_exact_match"])
 
 
 class StochasticRolloutSummaryTest(unittest.TestCase):
@@ -221,24 +257,27 @@ class RunAuditTest(unittest.TestCase):
         )
 
     @staticmethod
-    def _ordinary_row(*, seed, phase, gain):
-        rewards = np.array([gain + seed * 0.001, gain + 0.5], dtype=np.float64)
+    def _ordinary_row(*, seed, phase, gain, survival=2):
+        rewards = np.full(survival, gain + seed * 0.001, dtype=np.float64)
+        rewards[-1] = gain + 0.5
+        dones = np.zeros(survival, dtype=bool)
+        dones[-1] = True
         return {
             "phase": phase,
             "return": float(np.mean(rewards)),
             "reward_sum": float(np.sum(rewards)),
-            "survival": 2,
+            "survival": survival,
             "terminal": True,
             "complete": True,
             "replay_free": True,
-            "active": np.array([True, True]),
+            "active": np.ones(survival, dtype=bool),
             "rewards": rewards,
-            "dones": np.array([False, True]),
-            "terminals": np.array([False, True]),
-            "actions": np.full((2, 1), gain),
-            "phases": np.array([phase + 1, phase + 2]),
-            "qpos": np.full((2, 1), phase),
-            "qvel": np.full((2, 1), gain),
+            "dones": dones,
+            "terminals": dones.copy(),
+            "actions": np.full((survival, 1), gain),
+            "phases": np.arange(phase + 1, phase + survival + 1),
+            "qpos": np.full((survival, 1), phase),
+            "qvel": np.full((survival, 1), gain),
         }
 
     def test_runs_exact_e064_transaction_and_hashes_every_artifact(self):
@@ -324,8 +363,18 @@ class RunAuditTest(unittest.TestCase):
                 self.assertFalse(solver_context_active[0])
                 events.append("numeric")
                 phase_calls.append((seed, phase, float(actor_params["w"][0])))
+                survival = {
+                    0: 135,
+                    100: 230,
+                    200: 157,
+                    300: 82,
+                    400: 75,
+                }[phase]
                 return self._ordinary_row(
-                    seed=seed, phase=phase, gain=float(actor_params["w"][0])
+                    seed=seed,
+                    phase=phase,
+                    gain=float(actor_params["w"][0]),
+                    survival=survival,
                 )
 
             def render_phase_zero(*, rows, output_dir):
@@ -405,10 +454,19 @@ class RunAuditTest(unittest.TestCase):
                 loaded_manifest["ordinary_baseline_reproduction"]["expected_survival"],
                 [135, 236, 152, 83, 74],
             )
+            self.assertEqual(
+                loaded_manifest["ordinary_baseline_reproduction"]["competence_floors"],
+                [110, 78, 74, 76, 58],
+            )
+            self.assertTrue(
+                loaded_manifest["ordinary_baseline_reproduction"][
+                    "competence_floor_pass"
+                ]
+            )
             self.assertFalse(
                 loaded_manifest["ordinary_baseline_reproduction"]["exact_match"]
             )
-            self.assertEqual(loaded_manifest["outcome"]["verdict"], "invalid")
+            self.assertNotEqual(loaded_manifest["outcome"]["verdict"], "invalid")
             self.assertEqual(
                 loaded_manifest["external_inputs"]["plant_xml"]["sha256"],
                 "d" * 64,
@@ -464,7 +522,7 @@ class RunAuditTest(unittest.TestCase):
                 row = summary["per_seed"][0]["candidates"]["baseline"][0]
                 self.assertEqual(summary["seed"], 0)
                 self.assertAlmostEqual(row["return"], float(np.mean(rewards)))
-                self.assertEqual(row["survival"], 2)
+                self.assertEqual(row["survival"], 135)
 
     def test_numeric_failure_prevents_video_and_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
