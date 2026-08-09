@@ -313,6 +313,28 @@ class PyTreeOrderAndFunctionalScalingTest(unittest.TestCase):
         )
         np.testing.assert_allclose(summary.output_rms, 0.01, rtol=2e-5)
 
+    def test_exact_rms_calibration_accepts_float32_parameter_quantization(self):
+        params = {"p": jnp.array(4.0, dtype=jnp.float32)}
+        direction = {"p": jnp.array(1.0, dtype=jnp.float32)}
+
+        def actor_apply(value, observations):
+            del observations
+            return jnp.reshape(value["p"], (1, 1))
+
+        candidate, summary = apply_functional_actor_step(
+            actor_apply,
+            params,
+            direction,
+            jnp.zeros((1, 1), dtype=jnp.float32),
+            target_rms=0.01,
+        )
+
+        exact_delta = actor_apply(candidate, None) - actor_apply(params, None)
+        relative_error = jnp.abs(summary.output_rms - 0.01) / 0.01
+        np.testing.assert_array_equal(summary.output_rms, jnp.abs(exact_delta[0, 0]))
+        self.assertGreater(float(relative_error), 2e-5)
+        self.assertLessEqual(float(relative_error), 5e-5)
+
     def test_rejects_nonfinite_actor_unused_direction_leaf(self):
         params = {"used": jnp.array(1.0), "unused": jnp.array(0.0)}
         direction = {"used": jnp.array(1.0), "unused": jnp.array(jnp.nan)}

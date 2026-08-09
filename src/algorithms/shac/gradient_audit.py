@@ -1,6 +1,7 @@
 """Pure score-estimator, geometry, and scaling primitives for SHAC audits."""
 
-from typing import Any, Callable, NamedTuple
+from collections.abc import Callable
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jp
@@ -10,7 +11,6 @@ from src.algorithms.shac.batch_gradients import (
     tree_dot,
     tree_norm,
 )
-
 
 PyTree = Any
 
@@ -24,7 +24,7 @@ PHASE_BINS = (
 )
 
 _FUNCTIONAL_RMS_CALIBRATION_STEPS = 8
-_FUNCTIONAL_RMS_RELATIVE_TOLERANCE = 2e-5
+_FUNCTIONAL_RMS_RELATIVE_TOLERANCE = 5e-5
 
 
 class PhaseBinGradientGeometry(NamedTuple):
@@ -337,8 +337,9 @@ def apply_functional_actor_step(
     A JVP at the frozen parameters initializes the scale.  Eight deterministic
     scalar target/exact-RMS corrections then calibrate nonlinear actor outputs;
     this is not an objective line search.  The final exact RMS must meet the
-    target within a relative tolerance of ``2e-5``, including float32 output
-    quantization around the frozen baseline.
+    target within a relative tolerance of ``5e-5``.  This admits the measured
+    float32 parameter-quantization floor while remaining much smaller than the
+    requested functional step.
     """
     if not jp.isfinite(target_rms) or target_rms <= 0.0:
         raise ValueError("target_rms must be finite and positive")
