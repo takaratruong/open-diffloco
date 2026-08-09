@@ -65,6 +65,22 @@ def _quat_apply(q: jax.Array, vector: jax.Array) -> jax.Array:
     )
 
 
+def _quat_from_euler_xyz(euler: jax.Array) -> jax.Array:
+    """Return a scalar-first quaternion from XYZ Euler angles."""
+    roll, pitch, yaw = euler
+    cr, sr = jp.cos(0.5 * roll), jp.sin(0.5 * roll)
+    cp, sp = jp.cos(0.5 * pitch), jp.sin(0.5 * pitch)
+    cy, sy = jp.cos(0.5 * yaw), jp.sin(0.5 * yaw)
+    return jp.stack(
+        (
+            cr * cp * cy + sr * sp * sy,
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
+        )
+    )
+
+
 def _yaw_quaternion(q: jax.Array) -> jax.Array:
     w, x, y, z = jp.moveaxis(q, -1, 0)
     yaw = jp.arctan2(
@@ -117,6 +133,7 @@ class G1TrackingEnv:
         mass_range: tuple[float, float] = (1.0, 1.0),
         effort_limit_scale: float = 1.0,
         termination_margin_weight: float = 0.0,
+        reference_reset_noise_scale: float = 0.0,
         **_unused_go2_options,
     ):
         if actor_history_len < 1:
@@ -150,6 +167,15 @@ class G1TrackingEnv:
                 "termination_margin_weight must be non-negative and finite"
             )
         self.termination_margin_weight = float(termination_margin_weight)
+        if (
+            isinstance(reference_reset_noise_scale, bool)
+            or not np.isfinite(reference_reset_noise_scale)
+            or reference_reset_noise_scale < 0.0
+        ):
+            raise ValueError(
+                "reference_reset_noise_scale must be non-negative and finite"
+            )
+        self.reference_reset_noise_scale = float(reference_reset_noise_scale)
         mass_values = np.asarray(mass_range, dtype=np.float64)
         if (
             mass_values.shape != (2,)
@@ -499,20 +525,14 @@ class G1TrackingEnv:
             "foot_normal_RR": zero,
         }
 
-    def reset_at_phase(
+    def _initial_state_from_data(
         self,
+        *,
+        data: mjx.Data,
         rng: jax.Array,
         difficulty: jax.Array,
         phase: jax.Array,
     ) -> EnvState:
-        """Creates an exact RSI state at a caller-selected reference frame."""
-        phase = jp.asarray(phase, dtype=jp.int32)
-        data = mjx.make_data(self.mjx_model)
-        data = data.replace(
-            qpos=self.qpos_reference[phase],
-            qvel=self.qvel_reference[phase],
-        )
-        data = mjx.forward(self.mjx_model, data)
         info = self._base_info(rng=rng, phase=phase, difficulty=difficulty)
         actor_frame = self._get_actor_obs(data, info)
         actor_history = jp.repeat(
@@ -534,8 +554,42 @@ class G1TrackingEnv:
             metrics=self._init_metrics(),
         )
 
+    def reset_at_phase(
+        self,
+        rng: jax.Array,
+        difficulty: jax.Array,
+        phase: jax.Array,
+    ) -> EnvState:
+        """Creates an exact RSI state at a caller-selected reference frame."""
+        phase = jp.asarray(phase, dtype=jp.int32)
+        data = mjx.make_data(self.mjx_model)
+        data = data.replace(
+            qpos=self.qpos_reference[phase],
+            qvel=self.qvel_reference[phase],
+        )
+        data = mjx.forward(self.mjx_model, data)
+        return self._initial_state_from_data(
+            data=data,
+            rng=rng,
+            difficulty=difficulty,
+            phase=phase,
+        )
+
     def reset(self, rng: jax.Array, difficulty: jax.Array) -> EnvState:
-        rng, phase_key = jax.random.split(rng)
+        if self.reference_reset_noise_scale == 0.0:
+            rng, phase_key = jax.random.split(rng)
+            phase = jax.random.randint(
+                phase_key,
+                (),
+                minval=0,
+                maxval=self.reference_length - 2,
+                dtype=jp.int32,
+            )
+            return self.reset_at_phase(rng, difficulty, phase)
+
+        rng, phase_key, pose_key, velocity_key, joint_key = jax.random.split(
+            rng, 5
+        )
         phase = jax.random.randint(
             phase_key,
             (),
@@ -543,7 +597,49 @@ class G1TrackingEnv:
             maxval=self.reference_length - 2,
             dtype=jp.int32,
         )
-        return self.reset_at_phase(rng, difficulty, phase)
+        scale = self.reference_reset_noise_scale
+        pose_limit = scale * jp.array(
+            [0.02, 0.02, 0.005, 0.1, 0.1, 0.1]
+        )
+        velocity_limit = scale * jp.array(
+            [0.25, 0.25, 0.1, 0.26, 0.26, 0.39]
+        )
+        pose_delta = jax.random.uniform(
+            pose_key, (6,), minval=-pose_limit, maxval=pose_limit
+        )
+        velocity_delta = jax.random.uniform(
+            velocity_key,
+            (6,),
+            minval=-velocity_limit,
+            maxval=velocity_limit,
+        )
+        joint_delta = jax.random.uniform(
+            joint_key, (29,), minval=-0.05 * scale, maxval=0.05 * scale
+        )
+        qpos = self.qpos_reference[phase]
+        root_quat = _quat_mul(
+            _quat_from_euler_xyz(pose_delta[3:]), qpos[3:7]
+        )
+        root_quat = root_quat / jp.linalg.norm(root_quat)
+        qpos = qpos.at[:3].add(pose_delta[:3])
+        qpos = qpos.at[3:7].set(root_quat)
+        qpos = qpos.at[7:].set(
+            jp.clip(
+                qpos[7:] + joint_delta,
+                self.soft_joint_lower,
+                self.soft_joint_upper,
+            )
+        )
+        qvel = self.qvel_reference[phase].at[:6].add(velocity_delta)
+
+        data = mjx.make_data(self.mjx_model).replace(qpos=qpos, qvel=qvel)
+        data = mjx.forward(self.mjx_model, data)
+        return self._initial_state_from_data(
+            data=data,
+            rng=rng,
+            difficulty=difficulty,
+            phase=phase,
+        )
 
     def termination_errors(
         self,

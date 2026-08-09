@@ -168,6 +168,84 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         for value in components.values():
             self.assertAlmostEqual(float(value), 1.0, places=5)
 
+    def test_reference_reset_noise_is_default_off_and_validated(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        shifted = G1TrackingEnv(reference_reset_noise_scale=1.0)
+
+        self.assertEqual(self.env.reference_reset_noise_scale, 0.0)
+        self.assertEqual(shifted.reference_reset_noise_scale, 1.0)
+        for scale in (-1.0, float("nan"), float("inf"), True):
+            with self.subTest(scale=scale):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "reference_reset_noise_scale",
+                ):
+                    G1TrackingEnv(reference_reset_noise_scale=scale)
+
+    def test_reference_reset_noise_perturbs_only_upstream_rmr_envelope(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        env = G1TrackingEnv(reference_reset_noise_scale=1.0)
+        state = env.reset(jax.random.PRNGKey(19), jnp.array(0.0))
+        phase = int(state.info["phase"])
+        qpos_delta = np.asarray(state.data.qpos - env.qpos_reference[phase])
+        qvel_delta = np.asarray(state.data.qvel - env.qvel_reference[phase])
+
+        self.assertGreater(np.max(np.abs(qpos_delta)), 0.0)
+        self.assertGreater(np.max(np.abs(qvel_delta)), 0.0)
+        np.testing.assert_array_less(
+            np.abs(qpos_delta[:3]), [0.020001, 0.020001, 0.005001]
+        )
+        np.testing.assert_array_less(np.abs(qpos_delta[7:]), 0.050001)
+        np.testing.assert_array_less(
+            np.abs(qvel_delta[:3]), [0.250001, 0.250001, 0.100001]
+        )
+        np.testing.assert_array_less(
+            np.abs(qvel_delta[3:6]), [0.260001, 0.260001, 0.390001]
+        )
+        np.testing.assert_allclose(
+            np.linalg.norm(np.asarray(state.data.qpos[3:7])),
+            1.0,
+            atol=1e-6,
+        )
+        self.assertTrue(
+            np.all(
+                np.asarray(state.data.qpos[7:])
+                >= np.asarray(env.soft_joint_lower)
+            )
+        )
+        self.assertTrue(
+            np.all(
+                np.asarray(state.data.qpos[7:])
+                <= np.asarray(env.soft_joint_upper)
+            )
+        )
+
+    def test_exact_reset_path_preserves_rng_and_state_when_noise_is_zero(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        env = G1TrackingEnv(reference_reset_noise_scale=0.0)
+        key = jax.random.PRNGKey(23)
+        expected_rng, phase_key = jax.random.split(key)
+        expected_phase = jax.random.randint(
+            phase_key,
+            (),
+            minval=0,
+            maxval=env.reference_length - 2,
+            dtype=jnp.int32,
+        )
+
+        state = env.reset(key, jnp.array(0.0))
+
+        np.testing.assert_array_equal(state.info["rng"], expected_rng)
+        self.assertEqual(int(state.info["phase"]), int(expected_phase))
+        np.testing.assert_allclose(
+            state.data.qpos,
+            env.qpos_reference[expected_phase],
+            atol=1e-7,
+        )
+
     def test_fixed_phase_reset_supports_paired_evaluation(self):
         env = self.env
         state = env.reset_at_phase(
