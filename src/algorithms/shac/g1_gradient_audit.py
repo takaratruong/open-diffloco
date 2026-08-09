@@ -7,6 +7,7 @@ detached Gaussian score gradients from that trajectory.
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Callable, Mapping
 from hashlib import sha256
@@ -22,113 +23,110 @@ from src.algorithms.shac.gradient_audit import (
     detached_gaussian_score_loss,
     discounted_return_to_go,
 )
+from src.core.data_structures import Normalizer
 from src.core.networks import Actor
+from src.envs.g1_tracking.environment import G1TrackingRMR50HzValidatedEnv
 
 PyTree = Any
 
+E064_CHECKPOINT_SHA256 = (
+    "6b5c6bb208f9acd9f5988fee201915f8aa67cba42c15231d361a4d2ae530a094"
+)
+E064_HPARAMS_SHA256 = (
+    "98499799f221978510ee15b9417a4e408a6a0ae1aff95c9f84b48a4cc88a9c8b"
+)
+E064_REFERENCE_SHA256 = (
+    "bf8c8b407062d1b309440f4c1787c345b04d79501ea75f615e5b41c0c5ebb6db"
+)
+E064_XML_SHA256 = (
+    "5d76cf92f00dd49d6eb9fae38d7d38e46886848b602ac691051e886c3bcccfb1"
+)
+E064_CONTROLLER_SHA256 = (
+    "f832285356d8fc10b226b6bbf557520d5323c7c9022ae6dbd00c683b06e5b7ee"
+)
+E064_LIVE_RUNTIME_SHA256 = (
+    "118b94a353ec0de85411e6179e681fddb364d79fd381f7e95380a8a84a474883"
+)
+E064_ACTOR_PARAMETERS_SHA256 = (
+    "39b359b03d3415fc55b59efce1d5166ced0728b025bf526901b53af205603954"
+)
+E064_NORMALIZER_SHA256 = (
+    "e4a3a615e1b2016dddb7c6f29359ac547cf25de2e01d5ba0511b052766282ec7"
+)
+E064_INITIAL_STATE_SHA256 = (
+    "6ec9738c68eb9ce854e8aa430749aa6a6becf1c82081f390bf702d3f3fcd0a98"
+)
 
-# A caller must pass this complete audit-runtime mapping, not an unchecked
-# subset of a training hparams file.  Fields that are non-causal once their
-# parent switch is off (for example terrain bump magnitude) are deliberately
-# absent.
-E064_RUNTIME_HPARAMS: Mapping[str, Any] = MappingProxyType({
-    "algorithm": "shac",
-    "env_variant": "g1_tracking_rmr_50hz_validated",
-    "unroll_length": 48,
-    "num_envs": 64,
-    "effective_num_envs": 64,
-    "gradient_accumulation_steps": 1,
-    "gamma": 0.99,
+E064_FROZEN_HPARAMS: Mapping[str, Any] = MappingProxyType({
     "action_noise_std_end": 0.1,
-    "actor_per_env_grad_clip": 1.0,
-    "actor_bootstrap_scale": 0.0,
-    "actor_bootstrap_delay_steps": 0,
-    "squash_actor_actions": False,
+    "action_noise_std_start": 1.0,
     "action_scale": 1.0,
-    "friction_range": (1.0, 1.0),
-    "mass_range": (1.0, 1.0),
-    "effort_limit_scale": 1.0,
-    "kp_range": (1.0, 1.0),
-    "kd_range": (1.0, 1.0),
-    "com_offset_range": (0.0, 0.0, 0.0),
-    "push_velocity_range": (0.0, 0.0),
-    "terrain": False,
-    "zero_difficulty_frac": 1.0,
-    "actor_history_len": 1,
+    "actor_bootstrap_delay_steps": 0,
+    "actor_bootstrap_scale": 0.0,
     "actor_hidden": (512, 512),
-    "actor_layer_norm": False,
-    "actor_zero_output": False,
+    "actor_history_len": 1,
     "actor_kind": "flax",
-    "source_actor_policy": False,
+    "actor_layer_norm": False,
+    "actor_lr": 0.001,
+    "actor_per_env_grad_clip": 1.0,
+    "actor_zero_output": False,
+    "algorithm": "shac",
+    "best_reward": 0.07537891473167549,
+    "cmd_ctrl_interval_range": (60, 140),
+    "cmd_vel_x_range": (-2.0, 2.0),
+    "cmd_vel_y_range": (-1.0, 1.0),
+    "cmd_yaw_rate_range": (-1.5, 1.5),
+    "cmd_zero_prob": (0.1, 0.7, 0.5),
+    "com_offset_range": (0.0, 0.0, 0.0),
+    "critic_iterations": 16,
+    "critic_lr": 0.0005,
+    "critic_per_env_grad_clip": 1.0,
+    "curriculum_grace": 393216,
+    "curriculum_steps": 1,
+    "differentiate_source_feedback": True,
+    "effective_num_envs": 64,
+    "effort_limit_scale": 1.0,
+    "env_variant": "g1_tracking_rmr_50hz_validated",
+    "friction_range": (1.0, 1.0),
+    "gae_lambda": 0.95,
+    "gamma": 0.99,
+    "gradient_accumulation_steps": 1,
+    "kd_range": (1.0, 1.0),
+    "kp_range": (1.0, 1.0),
+    "mass_range": (1.0, 1.0),
+    "max_episode_length": 499,
+    "num_envs": 64,
+    "push_interval_s": 1_000_000_000.0,
+    "push_velocity_range": (0.0, 0.0),
+    "reference_fps": 50.0,
+    "reference_path": (
+        "/home/ubuntu/worktrees/open-diffloco/g1-rmr-50hz-20260805/"
+        "artifacts/E-20260808-000/reference/"
+        "dance1_subject2_f122_422_50hz.npz"
+    ),
+    "reference_sha256": E064_REFERENCE_SHA256,
+    "reference_states": 500,
+    "reference_stride": 1,
+    "reference_transitions": 499,
     "residual_action_scale": 0.0,
-})
-
-# Exact key schema written beside the immutable E064 checkpoint.  Callers pass
-# the complete mapping and its independently preregistered expectation; this
-# schema prevents a hand-picked safety subset from being treated as complete.
-E064_REQUIRED_HPARAM_KEYS = frozenset({
-    "action_noise_std_end",
-    "action_noise_std_start",
-    "action_scale",
-    "actor_bootstrap_delay_steps",
-    "actor_bootstrap_scale",
-    "actor_hidden",
-    "actor_history_len",
-    "actor_kind",
-    "actor_layer_norm",
-    "actor_lr",
-    "actor_per_env_grad_clip",
-    "actor_zero_output",
-    "algorithm",
-    "best_reward",
-    "cmd_ctrl_interval_range",
-    "cmd_vel_x_range",
-    "cmd_vel_y_range",
-    "cmd_yaw_rate_range",
-    "cmd_zero_prob",
-    "com_offset_range",
-    "critic_iterations",
-    "critic_lr",
-    "critic_per_env_grad_clip",
-    "curriculum_grace",
-    "curriculum_steps",
-    "differentiate_source_feedback",
-    "effective_num_envs",
-    "effort_limit_scale",
-    "env_variant",
-    "friction_range",
-    "gae_lambda",
-    "gamma",
-    "gradient_accumulation_steps",
-    "kd_range",
-    "kp_range",
-    "mass_range",
-    "max_episode_length",
-    "num_envs",
-    "push_interval_s",
-    "push_velocity_range",
-    "reference_fps",
-    "reference_path",
-    "reference_sha256",
-    "reference_states",
-    "reference_stride",
-    "reference_transitions",
-    "residual_action_scale",
-    "seed",
-    "source_actor_policy",
-    "squash_actor_actions",
-    "steps_per_actor_update",
-    "target_update_rate",
-    "termination_margin_weight",
-    "terrain",
-    "terrain_bump_decay",
-    "terrain_bump_std",
-    "terrain_flat_prob",
-    "terrain_slope_max",
-    "total_steps",
-    "unroll_length",
-    "xml_path",
-    "zero_difficulty_frac",
+    "seed": 1,
+    "source_actor_policy": False,
+    "squash_actor_actions": False,
+    "steps_per_actor_update": 3072,
+    "target_update_rate": 0.01,
+    "termination_margin_weight": 0.0,
+    "terrain": False,
+    "terrain_bump_decay": 0.4,
+    "terrain_bump_std": 0.4,
+    "terrain_flat_prob": 0.2,
+    "terrain_slope_max": 5.0,
+    "total_steps": 393216,
+    "unroll_length": 48,
+    "xml_path": (
+        "/home/ubuntu/projects/rmr_tracking/source/whole_body_tracking/"
+        "whole_body_tracking/assets/unitree_description/mjcf/g1.xml"
+    ),
+    "zero_difficulty_frac": 1.0,
 })
 
 
@@ -137,6 +135,7 @@ class SharedTrajectory(NamedTuple):
 
     noise: jax.Array
     observation_rngs: jax.Array
+    raw_observations: jax.Array
     observations: jax.Array
     normalized_observations: jax.Array
     means: jax.Array
@@ -157,6 +156,12 @@ class SharedGradientResult(NamedTuple):
     pathwise_effective_gradients: PyTree
     pathwise_raw_norms: jax.Array
     pathwise_clip_scales: jax.Array
+    pathwise_returns_to_go: jax.Array
+    pathwise_score_losses: jax.Array
+    score_means: jax.Array
+    score_returns_to_go: jax.Array
+    score_objectives: jax.Array
+    score_losses: jax.Array
     score_gradients: PyTree
 
 
@@ -174,6 +179,17 @@ class ValidatedE064Contract(NamedTuple):
     initial_state_sha256: str
     env_variant: str
     reference_sha256: str
+    actor_parameter_signature: tuple
+    normalizer_signature: tuple
+    initial_state_signature: tuple
+
+
+class ValidatedCheckpointShapes(NamedTuple):
+    """Pure shape/dtype contract used by tests and literal validation."""
+
+    population: int
+    horizon: int
+    sigma: float
     actor_parameter_signature: tuple
     normalizer_signature: tuple
     initial_state_signature: tuple
@@ -224,10 +240,9 @@ def rollout_one_environment(
         state = state.replace(
             info={**state.info, "rng": environment_rng}
         )
-        # E064's validated observation transform is exactly identity.  Keep the
-        # otherwise-unused split so the carried environment RNG advances in
-        # precisely the same order as production.
-        actor_observation = state.obs
+        actor_observation = env._apply_obs_noise(
+            state.obs, observation_rng
+        )
         normalized_observation = env.normalize_actor_obs(
             normalizer,
             normalizer_state,
@@ -239,6 +254,7 @@ def rollout_one_environment(
         transition = {
             "noise": noise_t,
             "observation_rngs": observation_rng,
+            "raw_observations": state.obs,
             "observations": actor_observation,
             "normalized_observations": normalized_observation,
             "means": mean,
@@ -253,6 +269,7 @@ def rollout_one_environment(
         SharedTrajectory(
             noise=arrays["noise"],
             observation_rngs=arrays["observation_rngs"],
+            raw_observations=arrays["raw_observations"],
             observations=arrays["observations"],
             normalized_observations=arrays["normalized_observations"],
             means=arrays["means"],
@@ -409,18 +426,50 @@ def estimate_shared_gradients(
         jax.lax.stop_gradient, trajectory
     )
 
-    def score_loss(params, data):
+    @jax.custom_vjp
+    def attach_actor_derivative(params, observations, stored_means):
+        return stored_means
+
+    def attach_actor_derivative_fwd(params, observations, stored_means):
+        return stored_means, (params, observations, stored_means)
+
+    def attach_actor_derivative_bwd(residual, cotangent):
+        params, observations, stored_means = residual
+
+        def current_policy(candidate_params):
+            return jax.vmap(lambda obs: actor_apply(candidate_params, obs))(
+                observations
+            ).astype(stored_means.dtype)
+
+        _, pullback = jax.vjp(current_policy, params)
+        return (
+            pullback(cotangent)[0],
+            jax.tree_util.tree_map(jp.zeros_like, observations),
+            jax.tree_util.tree_map(jp.zeros_like, stored_means),
+        )
+
+    attach_actor_derivative.defvjp(
+        attach_actor_derivative_fwd, attach_actor_derivative_bwd
+    )
+
+    def score_inputs(params, data):
         stopped_normalized_observations = jax.lax.stop_gradient(
             data.normalized_observations
         )
-        means = jax.vmap(lambda obs: actor_apply(params, obs))(
-            stopped_normalized_observations
+        means = attach_actor_derivative(
+            params,
+            stopped_normalized_observations,
+            data.means,
         )
         returns = discounted_return_to_go(
             data.rewards,
             data.dones,
             gamma=gamma,
         )
+        return means, returns
+
+    def score_loss(params, data):
+        means, returns = score_inputs(params, data)
         return detached_gaussian_score_loss(
             means,
             data.actions,
@@ -428,9 +477,27 @@ def estimate_shared_gradients(
             std=sigma,
         )
 
-    score_gradients = jax.vmap(
-        jax.grad(score_loss), in_axes=(None, 0)
+    score_losses, score_gradients = jax.vmap(
+        jax.value_and_grad(score_loss), in_axes=(None, 0)
     )(actor_params, score_trajectory)
+    score_means, score_returns_to_go = jax.vmap(
+        score_inputs, in_axes=(None, 0)
+    )(actor_params, score_trajectory)
+    pathwise_returns_to_go = jax.vmap(
+        lambda rewards, dones: discounted_return_to_go(
+            rewards, dones, gamma=gamma
+        )
+    )(trajectory.rewards, trajectory.dones)
+    pathwise_score_losses = jax.vmap(
+        lambda means, actions, returns: detached_gaussian_score_loss(
+            means, actions, returns, std=sigma
+        )
+    )(trajectory.means, trajectory.actions, pathwise_returns_to_go)
+    score_objectives = jax.vmap(
+        lambda rewards, dones: pathwise_negative_objective(
+            rewards, dones, gamma=gamma
+        )
+    )(score_trajectory.rewards, score_trajectory.dones)
     (
         pathwise_effective_gradients,
         pathwise_raw_norms,
@@ -448,60 +515,418 @@ def estimate_shared_gradients(
         pathwise_effective_gradients=pathwise_effective_gradients,
         pathwise_raw_norms=pathwise_raw_norms,
         pathwise_clip_scales=pathwise_clip_scales,
+        pathwise_returns_to_go=pathwise_returns_to_go,
+        pathwise_score_losses=pathwise_score_losses,
+        score_means=score_means,
+        score_returns_to_go=score_returns_to_go,
+        score_objectives=score_objectives,
+        score_losses=score_losses,
         score_gradients=score_gradients,
     )
 
 
-def estimate_e064_shared_gradients(
-    contract: ValidatedE064Contract,
+def prepare_compiled_estimator_core(
     actor_params: PyTree,
+    actor_apply: Callable[[PyTree, jax.Array], jax.Array],
     env: Any,
     *,
     normalizer: Any,
-    normalizer_state: Any,
+    normalizer_state: PyTree,
     initial_states: PyTree,
-    action_noise: jax.Array,
-) -> SharedGradientResult:
-    """Runs the estimator only after rebinding every frozen E064 input."""
+    sigma: float,
+    gamma: float,
+    pathwise_clip_norm: float,
+) -> Callable[[jax.Array], SharedGradientResult]:
+    """Builds a same-shape JIT core with no host hashing or validation."""
 
-    if action_noise.shape != (64, 48, 29):
-        raise ValueError("E064 action_noise must have exact shape (64, 48, 29)")
-    if (contract.population, contract.horizon, contract.sigma) != (64, 48, 0.1):
-        raise ValueError("validated contract must freeze population 64, horizon 48, sigma 0.1")
-    if (contract.gamma, contract.pathwise_clip_norm) != (0.99, 1.0):
-        raise ValueError("validated contract must freeze gamma 0.99 and clip norm 1.0")
-    if pytree_shape_signature(actor_params) != contract.actor_parameter_signature:
-        raise ValueError("execution actor parameter shapes differ from validation")
-    if stable_pytree_sha256(actor_params) != contract.actor_parameters_sha256:
-        raise ValueError("execution actor parameters differ from validation")
-    normalizer_tree = _normalizer_identity_tree(normalizer_state)
-    if pytree_shape_signature(normalizer_tree) != contract.normalizer_signature:
-        raise ValueError("execution actor normalizer shapes differ from validation")
-    if stable_pytree_sha256(normalizer_tree) != contract.normalizer_sha256:
-        raise ValueError("execution actor normalizer differs from validation")
-    if pytree_shape_signature(initial_states) != contract.initial_state_signature:
-        raise ValueError("execution carried-state shapes differ from validation")
-    if stable_pytree_sha256(initial_states) != contract.initial_state_sha256:
-        raise ValueError("execution carried state differs from validation")
-    _require_unbounded_environment(env)
-    if getattr(env, "action_dim", None) != 29:
-        raise ValueError("E064 environment action_dim must be 29")
-    if getattr(env, "actor_obs_dim", None) != 154:
-        raise ValueError("E064 environment actor_obs_dim must be 154")
-    if getattr(env, "actor_history_len", None) != 1:
-        raise ValueError("E064 environment actor_history_len must be one")
-    if getattr(env, "reference_stride", None) != 1:
-        raise ValueError("E064 environment reference_stride must be one")
-    reference = getattr(env, "reference", None)
-    if reference is None or reference.qpos.shape[0] != 500:
-        raise ValueError("E064 environment must carry the 500-state reference")
+    return jax.jit(
+        lambda action_noise: estimate_shared_gradients(
+            actor_params,
+            actor_apply,
+            env,
+            normalizer=normalizer,
+            normalizer_state=normalizer_state,
+            initial_states=initial_states,
+            action_noise=action_noise,
+            sigma=sigma,
+            gamma=gamma,
+            pathwise_clip_norm=pathwise_clip_norm,
+        )
+    )
+
+
+def prepare_compiled_rollout_core(
+    actor_params: PyTree,
+    actor_apply: Callable[[PyTree, jax.Array], jax.Array],
+    env: Any,
+    *,
+    normalizer: Any,
+    normalizer_state: PyTree,
+    initial_states: PyTree,
+    sigma: float,
+) -> Callable[[jax.Array], tuple[SharedTrajectory, PyTree]]:
+    """Builds a reusable candidate rollout from frozen state and normalization."""
+
+    return jax.jit(
+        lambda action_noise: rollout_batched_environments(
+            actor_params,
+            actor_apply,
+            env,
+            normalizer=normalizer,
+            normalizer_state=normalizer_state,
+            initial_states=initial_states,
+            action_noise=action_noise,
+            sigma=sigma,
+        )
+    )
+
+
+def _require_host_tree(tree: PyTree, *, label: str) -> None:
+    if any(
+        isinstance(leaf, jax.core.Tracer)
+        for leaf in jax.tree_util.tree_leaves(tree)
+    ):
+        raise TypeError(f"{label} validation is host-only and must run before jax.jit")
+
+
+def validate_identity_observation_handling(env: Any, initial_states: Any) -> None:
+    """Exercises the live observation hook and requires exact identity output."""
+
+    _require_host_tree(initial_states, label="observation")
+    raw_observations = _field(initial_states, "obs")
+    state_info = _field(initial_states, "info")
+    observation_rngs = jax.vmap(lambda key: jax.random.split(key)[0])(
+        state_info["rng"]
+    )
+    handled = jax.vmap(env._apply_obs_noise)(
+        raw_observations, observation_rngs
+    )
+    if not np.array_equal(
+        np.asarray(jax.device_get(handled)),
+        np.asarray(jax.device_get(raw_observations)),
+    ):
+        raise ValueError("E064 observation handling must be exactly identity")
+
+
+def validate_e064_live_semantics(
+    contract: ValidatedE064Contract,
+    env: Any,
+    normalizer: Any,
+    normalizer_state: Any,
+    initial_states: Any,
+) -> None:
+    """Host-validates the live environment and normalization implementations."""
+
+    _require_host_tree(initial_states, label="E064 live semantics")
+    if type(normalizer) is not Normalizer:
+        raise ValueError("E064 requires the exact Normalizer implementation")
+    if (normalizer.size, normalizer.eps) != (154, 1e-4):
+        raise ValueError("E064 Normalizer must use size 154 and eps 1e-4")
+    if type(env) is not G1TrackingRMR50HzValidatedEnv:
+        raise ValueError("E064 requires G1TrackingRMR50HzValidatedEnv exactly")
+    causal_methods = {
+        name
+        for cls in type(env).__mro__
+        for name, value in vars(cls).items()
+        if callable(value)
+    }
+    shadowed = sorted(causal_methods.intersection(vars(env)))
+    if shadowed:
+        raise ValueError(
+            "E064 live environment has instance-overridden methods: "
+            + ", ".join(shadowed)
+        )
+    if not hasattr(env, "xml_path") or sha256_file(env.xml_path) != E064_XML_SHA256:
+        raise ValueError("E064 physical XML SHA-256 differs from registration")
+    if (
+        not hasattr(env, "controller_path")
+        or sha256_file(env.controller_path) != E064_CONTROLLER_SHA256
+    ):
+        raise ValueError("E064 controller SHA-256 differs from registration")
+    for name, expected in (
+        ("body_mass_scale", 1.0),
+        ("effort_limit_scale", 1.0),
+        ("termination_margin_weight", 0.0),
+        ("reference_reset_noise_scale", 0.0),
+        ("n_frames", 4),
+        ("reward_scale", 0.02),
+        ("dt", 0.02),
+        ("control_reference_dt", 0.02),
+        ("clip_actions", False),
+        ("squash_actor_actions", False),
+        ("reference_length", 500),
+        ("mj_model.nq", 36),
+        ("mj_model.nv", 35),
+        ("action_dim", 29),
+        ("actor_frame_obs_dim", 154),
+        ("actor_obs_dim", 154),
+        ("critic_obs_dim", 286),
+        ("actor_history_len", 1),
+        ("reference_stride", 1),
+        ("reference_transitions", 499),
+        ("max_episode_length", 499),
+        ("body_ids", (1, 3, 5, 7, 9, 11, 13, 16, 18, 20, 23, 25, 27, 30)),
+        ("anchor_body_id", 1),
+        ("distal_body_slots", (3, 6, 10, 13)),
+    ):
+        if name.startswith("mj_model."):
+            actual = getattr(env.mj_model, name.removeprefix("mj_model."), None)
+        else:
+            actual = getattr(env, name, None)
+        if actual != expected:
+            raise ValueError(f"E064 live environment requires {name}={expected!r}")
     if sha256_file(env.reference_path) != contract.reference_sha256:
-        raise ValueError("E064 environment reference SHA-256 differs from validation")
-    model = getattr(env, "mj_model", None)
-    if model is None or (model.opt.iterations, model.opt.ls_iterations) != (4, 5):
-        raise ValueError("E064 environment solver must be exactly 4/5")
-    if getattr(env, "reference_reset_noise_scale", 0.0) != 0.0:
-        raise ValueError("E064 environment must disable reference reset corruption")
+        raise ValueError("E064 live reference SHA-256 differs from registration")
+    reference = env.reference
+    if reference.qpos.shape[0] != 500 or float(reference.fps) != 50.0:
+        raise ValueError("E064 live reference must be the 500-state 50 Hz archive")
+    model = env.mj_model
+    if (model.opt.iterations, model.opt.ls_iterations) != (4, 5):
+        raise ValueError("E064 live solver must be exactly 4/5")
+    if float(model.opt.timestep) != 0.005:
+        raise ValueError("E064 live physics timestep must be exactly 0.005")
+    runtime_tree = {
+        name: getattr(env, name)
+        for name in (
+            "qpos_reference",
+            "qvel_reference",
+            "body_pos_reference",
+            "body_quat_reference",
+            "body_lin_vel_reference",
+            "body_ang_vel_reference",
+            "kp",
+            "kd",
+            "effort_limit",
+            "default_joints",
+            "action_scales",
+            "actor_to_model_permutation",
+            "model_to_actor_permutation",
+            "soft_joint_lower",
+            "soft_joint_upper",
+            "_foot_body_ids",
+        )
+    }
+    runtime_tree["mjx_model"] = env.mjx_model
+    runtime_tree["mj_model_body_rootid"] = jp.asarray(
+        np.asarray(env.mj_model.body_rootid)
+    )
+    if stable_pytree_sha256(runtime_tree) != E064_LIVE_RUNTIME_SHA256:
+        raise ValueError(
+            "E064 live controller, reference, or MJX runtime identity drifted"
+        )
+
+    validate_identity_observation_handling(env, initial_states)
+    observations = _field(initial_states, "obs")
+    actual = env.normalize_actor_obs(
+        normalizer, normalizer_state, observations
+    )
+    mean = _field(normalizer_state, "mean")
+    var = _field(normalizer_state, "var")
+    expected = (observations - mean) / jp.sqrt(var + normalizer.eps)
+    if not np.allclose(
+        np.asarray(jax.device_get(actual)),
+        np.asarray(jax.device_get(expected)),
+        rtol=0.0,
+        atol=0.0,
+    ):
+        raise ValueError("E064 live actor normalization semantics differ")
+
+
+class ExactE064AuditResult(NamedTuple):
+    """Validated numerical output and the two matching identity receipts."""
+
+    gradients: SharedGradientResult
+    pathwise_receipt: dict[str, str]
+    score_receipt: dict[str, str]
+    contract: ValidatedE064Contract
+
+
+def _snapshot_pytree(tree: PyTree) -> PyTree:
+    """Deep-copies leaves, containers, and registered static PyTree metadata."""
+
+    return copy.deepcopy(tree)
+
+
+def _assert_runtime_snapshot_identity(
+    contract: ValidatedE064Contract,
+    hparams: Mapping[str, Any],
+    actor_params: PyTree,
+    normalizer_state: PyTree,
+    initial_state: PyTree,
+) -> None:
+    identities = {
+        "hparams": (
+            stable_mapping_sha256(hparams),
+            contract.hparams_sha256,
+        ),
+        "actor parameters": (
+            stable_pytree_sha256(actor_params),
+            contract.actor_parameters_sha256,
+        ),
+        "normalizer": (
+            stable_pytree_sha256(_normalizer_identity_tree(normalizer_state)),
+            contract.normalizer_sha256,
+        ),
+        "initial state": (
+            stable_pytree_sha256(initial_state),
+            contract.initial_state_sha256,
+        ),
+    }
+    for label, (actual, expected) in identities.items():
+        if actual != expected:
+            raise ValueError(f"literal E064 {label} snapshot identity drifted")
+
+
+class PreparedE064Estimator:
+    """Host-validated wrapper around one reusable same-shape compiled core."""
+
+    def __init__(
+        self,
+        *,
+        contract: ValidatedE064Contract,
+        actor_params: PyTree,
+        normalizer_state: PyTree,
+        initial_states: PyTree,
+        checkpoint_path: str | Path,
+        hparams: Mapping[str, Any],
+        env: Any,
+        normalizer: Normalizer,
+        actor_apply: Callable[[PyTree, jax.Array], jax.Array],
+        compiled_core: Callable[[jax.Array], SharedGradientResult],
+    ):
+        self.contract = contract
+        self._actor_params = actor_params
+        self._normalizer_state = normalizer_state
+        self._initial_states = initial_states
+        self._checkpoint_path = Path(checkpoint_path)
+        self._hparams = E064_FROZEN_HPARAMS
+        self._env = env
+        self._normalizer = normalizer
+        self._actor_apply = actor_apply
+        self._compiled_core = compiled_core
+
+    @property
+    def actor_apply(self) -> Callable[[PyTree, jax.Array], jax.Array]:
+        """The exact frozen actor apply used for candidate evaluation."""
+
+        return self._actor_apply
+
+    def prepare_candidate_rollout(
+        self, actor_params: PyTree
+    ) -> Callable[[jax.Array], tuple[SharedTrajectory, PyTree]]:
+        """Compiles a candidate on the frozen state without claiming its hash."""
+
+        _require_host_tree(actor_params, label="candidate actor")
+        if pytree_shape_signature(actor_params) != self.contract.actor_parameter_signature:
+            raise ValueError("candidate actor shape differs from the E064 actor")
+        if not all(
+            np.all(np.isfinite(np.asarray(jax.device_get(leaf))))
+            for leaf in jax.tree_util.tree_leaves(actor_params)
+        ):
+            raise ValueError("candidate actor must be finite")
+        return prepare_compiled_rollout_core(
+            actor_params,
+            self._actor_apply,
+            self._env,
+            normalizer=self._normalizer,
+            normalizer_state=self._normalizer_state,
+            initial_states=self._initial_states,
+            sigma=self.contract.sigma,
+        )
+
+    def __call__(self, action_noise: jax.Array) -> ExactE064AuditResult:
+        _require_host_tree(action_noise, label="exact E064 execution")
+        if action_noise.shape != (64, 48, 29):
+            raise ValueError("E064 action_noise must have exact shape (64, 48, 29)")
+        if sha256_file(self._checkpoint_path) != E064_CHECKPOINT_SHA256:
+            raise ValueError("literal E064 checkpoint changed after preparation")
+        _assert_runtime_snapshot_identity(
+            self.contract,
+            self._hparams,
+            self._actor_params,
+            self._normalizer_state,
+            self._initial_states,
+        )
+        validate_e064_live_semantics(
+            self.contract,
+            self._env,
+            self._normalizer,
+            self._normalizer_state,
+            self._initial_states,
+        )
+        result = self._compiled_core(action_noise)
+        if not np.array_equal(
+            np.asarray(jax.device_get(result.trajectory.raw_observations)),
+            np.asarray(jax.device_get(result.trajectory.observations)),
+        ):
+            raise ValueError("E064 rollout observation hook was not identity")
+        expected_normalized = self._env.normalize_actor_obs(
+            self._normalizer,
+            self._normalizer_state,
+            result.trajectory.observations,
+        ).astype(jp.float32)
+        if not np.array_equal(
+            np.asarray(jax.device_get(expected_normalized)),
+            np.asarray(
+                jax.device_get(result.trajectory.normalized_observations)
+            ),
+        ):
+            raise ValueError("E064 rollout normalization semantics drifted")
+        pathwise_receipt, score_receipt = (
+            build_and_validate_estimator_receipts(
+                checkpoint_sha256=E064_CHECKPOINT_SHA256,
+                hparams=self._hparams,
+                actor_params=self._actor_params,
+                actor_apply=self._actor_apply,
+                normalizer_state=_normalizer_identity_tree(
+                    self._normalizer_state
+                ),
+                initial_state=self._initial_states,
+                action_noise=action_noise,
+                result=result,
+                gamma=self.contract.gamma,
+                sigma=self.contract.sigma,
+                pathwise_clip_norm=self.contract.pathwise_clip_norm,
+            )
+        )
+        return ExactE064AuditResult(
+            gradients=result,
+            pathwise_receipt=pathwise_receipt,
+            score_receipt=score_receipt,
+            contract=self.contract,
+        )
+
+
+def prepare_e064_estimator_engine(
+    checkpoint_state: Any,
+    hparams: Mapping[str, Any],
+    *,
+    checkpoint_path: str | Path,
+    env: Any,
+    normalizer: Normalizer,
+) -> PreparedE064Estimator:
+    """Host-validates literal E064 identities, then builds one JIT core."""
+
+    contract = validate_e064_checkpoint_contract(
+        checkpoint_state, hparams, checkpoint_path=checkpoint_path
+    )
+    validate_e064_live_semantics(
+        contract,
+        env,
+        normalizer,
+        checkpoint_state.normalizer,
+        checkpoint_state.env_state,
+    )
+    actor_params = _snapshot_pytree(checkpoint_state.actor_params)
+    normalizer_state = copy.deepcopy(checkpoint_state.normalizer)
+    initial_states = _snapshot_pytree(checkpoint_state.env_state)
+    _assert_runtime_snapshot_identity(
+        contract,
+        E064_FROZEN_HPARAMS,
+        actor_params,
+        normalizer_state,
+        initial_states,
+    )
     actor = Actor(
         29,
         hidden=(512, 512),
@@ -509,18 +934,50 @@ def estimate_e064_shared_gradients(
         layer_norm=False,
         zero_output=False,
     )
-    return estimate_shared_gradients(
+    compiled_core = prepare_compiled_estimator_core(
         actor_params,
         actor.apply,
         env,
         normalizer=normalizer,
         normalizer_state=normalizer_state,
         initial_states=initial_states,
-        action_noise=action_noise,
         sigma=contract.sigma,
         gamma=contract.gamma,
         pathwise_clip_norm=contract.pathwise_clip_norm,
     )
+    return PreparedE064Estimator(
+        contract=contract,
+        actor_params=actor_params,
+        normalizer_state=normalizer_state,
+        initial_states=initial_states,
+        checkpoint_path=checkpoint_path,
+        hparams=hparams,
+        env=env,
+        normalizer=normalizer,
+        actor_apply=actor.apply,
+        compiled_core=compiled_core,
+    )
+
+
+def estimate_e064_shared_gradients(
+    checkpoint_state: Any,
+    hparams: Mapping[str, Any],
+    env: Any,
+    *,
+    checkpoint_path: str | Path,
+    normalizer: Normalizer,
+    action_noise: jax.Array,
+) -> ExactE064AuditResult:
+    """One-shot convenience wrapper; use prepare for four-shard reuse."""
+
+    prepared = prepare_e064_estimator_engine(
+        checkpoint_state,
+        hparams,
+        checkpoint_path=checkpoint_path,
+        env=env,
+        normalizer=normalizer,
+    )
+    return prepared(action_noise)
 
 
 def pytree_shape_signature(tree: PyTree) -> tuple[tuple[str, tuple[int, ...], str], ...]:
@@ -541,9 +998,9 @@ def stable_pytree_sha256(tree: PyTree) -> str:
 
     leaves_with_paths, tree_definition = jax.tree_util.tree_flatten_with_path(tree)
     digest = sha256()
-    digest.update(b"open-diffloco-g1-gradient-audit-pytree-v1\0")
-    digest.update(str(tree_definition).encode("utf-8"))
-    digest.update(b"\0")
+    digest.update(b"open-diffloco-g1-gradient-audit-pytree-v3\0")
+    digest.update(_stable_treedef_schema(tree_definition))
+    digest.update(len(leaves_with_paths).to_bytes(8, "little"))
     for path, leaf in leaves_with_paths:
         array = np.asarray(jax.device_get(leaf))
         if array.dtype.hasobject:
@@ -562,6 +1019,111 @@ def stable_pytree_sha256(tree: PyTree) -> str:
         digest.update(len(payload).to_bytes(8, "little"))
         digest.update(payload)
     return digest.hexdigest()
+
+
+def _qualified_type_name(value: type) -> str:
+    return f"{value.__module__}.{value.__qualname__}"
+
+
+def _stable_aux_schema(value: Any) -> bytes:
+    """Encodes static PyTree metadata without process-specific object reprs."""
+
+    if value is None:
+        return b"none"
+    if isinstance(value, type):
+        return b"type:" + _qualified_type_name(value).encode()
+    if isinstance(value, bool):
+        return b"bool:1" if value else b"bool:0"
+    if isinstance(value, int):
+        return b"int:" + str(value).encode()
+    if isinstance(value, float):
+        return b"float:" + value.hex().encode()
+    if isinstance(value, str):
+        encoded = value.encode("utf-8")
+        return b"str:" + len(encoded).to_bytes(8, "little") + encoded
+    if isinstance(value, bytes):
+        return b"bytes:" + len(value).to_bytes(8, "little") + value
+    if isinstance(value, tuple):
+        parts = [_stable_aux_schema(item) for item in value]
+        return b"tuple:" + b"".join(
+            len(part).to_bytes(8, "little") + part for part in parts
+        )
+    if isinstance(value, list):
+        parts = [_stable_aux_schema(item) for item in value]
+        return b"list:" + b"".join(
+            len(part).to_bytes(8, "little") + part for part in parts
+        )
+    if isinstance(value, Mapping):
+        parts = sorted(
+            (
+                _stable_aux_schema(key),
+                _stable_aux_schema(item),
+            )
+            for key, item in value.items()
+        )
+        return b"mapping:" + b"".join(
+            len(key).to_bytes(8, "little")
+            + key
+            + len(item).to_bytes(8, "little")
+            + item
+            for key, item in parts
+        )
+    if isinstance(value, np.generic):
+        return _stable_aux_schema(value.item())
+    if isinstance(value, np.dtype):
+        return b"dtype:" + value.str.encode()
+    if isinstance(value, np.ndarray):
+        if value.dtype.hasobject:
+            raise TypeError("object arrays cannot be stable PyTree metadata")
+        dtype = value.dtype.newbyteorder("<")
+        canonical = np.ascontiguousarray(value.astype(dtype, copy=False))
+        return (
+            b"ndarray:"
+            + canonical.dtype.str.encode()
+            + b":"
+            + repr(tuple(canonical.shape)).encode()
+            + b":"
+            + canonical.tobytes(order="C")
+        )
+    wrapped_array = getattr(value, "array", None)
+    wrapper_type = _qualified_type_name(type(value))
+    if (
+        wrapper_type == "mujoco.mjx._src.dataclasses._NumPyArrayHashWrapper"
+        and getattr(type(value), "__slots__", None) == ("_hash_key", "array")
+        and isinstance(wrapped_array, np.ndarray)
+    ):
+        return (
+            b"array-wrapper:"
+            + wrapper_type.encode()
+            + b":"
+            + _stable_aux_schema(wrapped_array)
+            + b":"
+            + _stable_aux_schema(value._hash_key)
+        )
+    raise TypeError(
+        "unsupported static PyTree metadata type: "
+        + _qualified_type_name(type(value))
+    )
+
+
+def _stable_treedef_schema(tree_definition: Any) -> bytes:
+    node_data = tree_definition.node_data()
+    if node_data is None:
+        return b"leaf"
+    node_type, aux_data = node_data
+    children = tree_definition.children()
+    header = (
+        b"node:"
+        + _qualified_type_name(node_type).encode()
+        + b":"
+        + str(len(children)).encode()
+        + b":"
+        + _stable_aux_schema(aux_data)
+    )
+    return header + b"".join(
+        len(child_schema).to_bytes(8, "little") + child_schema
+        for child_schema in map(_stable_treedef_schema, children)
+    )
 
 
 def sha256_file(path: str | Path, *, block_size: int = 1024 * 1024) -> str:
@@ -601,6 +1163,14 @@ def identity_receipt(
     initial_state: PyTree,
     action_noise: jax.Array,
     trajectory: SharedTrajectory,
+    objective_values: jax.Array,
+    returns_to_go: jax.Array,
+    score_losses: jax.Array,
+    independent_means: jax.Array | None = None,
+    independent_objective_values: jax.Array | None = None,
+    independent_score_losses: jax.Array | None = None,
+    numeric_equivalence_evidence: Mapping[str, Any] | None = None,
+    engine_estimator_values: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Builds the binding identity receipt shared by estimator consumers."""
 
@@ -610,6 +1180,26 @@ def identity_receipt(
         int(checkpoint_sha256, 16)
     except ValueError as error:
         raise ValueError("checkpoint_sha256 must be hexadecimal") from error
+    if independent_means is None:
+        independent_means = trajectory.means
+    if independent_objective_values is None:
+        independent_objective_values = objective_values
+    if independent_score_losses is None:
+        independent_score_losses = score_losses
+    if numeric_equivalence_evidence is None:
+        numeric_equivalence_evidence = {
+            "mean_max_abs_error": 0.0,
+            "objective_max_abs_error": 0.0,
+            "score_loss_max_abs_error": 0.0,
+            "mean_gate_ulps": 4,
+            "objective_gate_ulps": 16,
+            "score_loss_gate_ulps": 256,
+        }
+    if engine_estimator_values is None:
+        engine_estimator_values = {
+            "objective_values": stable_pytree_sha256(objective_values),
+            "score_losses": stable_pytree_sha256(score_losses),
+        }
     return {
         "checkpoint": checkpoint_sha256.lower(),
         "hparams": stable_mapping_sha256(hparams),
@@ -632,15 +1222,43 @@ def identity_receipt(
         "observation_rngs": stable_pytree_sha256(
             trajectory.observation_rngs
         ),
+        "raw_observations": stable_pytree_sha256(
+            trajectory.raw_observations
+        ),
         "observations": stable_pytree_sha256(trajectory.observations),
         "normalized_observations": stable_pytree_sha256(
             trajectory.normalized_observations
         ),
         "means": stable_pytree_sha256(trajectory.means),
+        "independent_means": stable_pytree_sha256(independent_means),
         "actions": stable_pytree_sha256(trajectory.actions),
         "rewards": stable_pytree_sha256(trajectory.rewards),
         "dones": stable_pytree_sha256(trajectory.dones),
         "initial_phases": stable_pytree_sha256(trajectory.initial_phase),
+        "objective_contract": stable_mapping_sha256(
+            {
+                "name": "negative_episode_start_discounted_return",
+                "horizon_divisor": "trajectory_length",
+                "done_discount_reset": True,
+                "bootstrap": 0.0,
+                "score": "detached_gaussian_likelihood_ratio",
+            }
+        ),
+        "objective_values": stable_pytree_sha256(objective_values),
+        "independent_objective_values": stable_pytree_sha256(
+            independent_objective_values
+        ),
+        "returns_to_go": stable_pytree_sha256(returns_to_go),
+        "score_losses": stable_pytree_sha256(score_losses),
+        "independent_score_losses": stable_pytree_sha256(
+            independent_score_losses
+        ),
+        "numeric_equivalence_evidence": stable_mapping_sha256(
+            numeric_equivalence_evidence
+        ),
+        "engine_estimator_values": stable_mapping_sha256(
+            engine_estimator_values
+        ),
         "trajectory": stable_pytree_sha256(trajectory),
     }
 
@@ -657,15 +1275,241 @@ _IDENTITY_RECEIPT_FIELDS = frozenset({
     "initial_state",
     "noise",
     "observation_rngs",
+    "raw_observations",
     "observations",
     "normalized_observations",
     "means",
+    "independent_means",
     "actions",
     "rewards",
     "dones",
     "initial_phases",
+    "objective_contract",
+    "objective_values",
+    "independent_objective_values",
+    "returns_to_go",
+    "score_losses",
+    "independent_score_losses",
+    "numeric_equivalence_evidence",
+    "engine_estimator_values",
     "trajectory",
 })
+
+
+def build_and_validate_estimator_receipts(
+    *,
+    checkpoint_sha256: str,
+    hparams: Mapping[str, Any],
+    actor_params: PyTree,
+    actor_apply: Callable[[PyTree, jax.Array], jax.Array],
+    normalizer_state: PyTree,
+    initial_state: PyTree,
+    action_noise: jax.Array,
+    result: SharedGradientResult,
+    gamma: float,
+    sigma: float,
+    pathwise_clip_norm: float,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Independently receipts both estimator consumers and fails on drift."""
+
+    def exact_equal(left, right, *, label):
+        left_array = np.asarray(jax.device_get(left))
+        right_array = np.asarray(jax.device_get(right))
+        if (
+            left_array.shape != right_array.shape
+            or left_array.dtype != right_array.dtype
+            or not np.array_equal(left_array, right_array)
+        ):
+            raise ValueError(f"estimator identity mismatch for {label}")
+
+    exact_equal(result.trajectory.noise, action_noise, label="noise")
+    exact_equal(result.score_trajectory.noise, action_noise, label="noise")
+    expected_actions = result.trajectory.means + jp.asarray(
+        sigma, dtype=result.trajectory.means.dtype
+    ) * result.trajectory.noise.astype(result.trajectory.means.dtype)
+    exact_equal(
+        result.trajectory.actions, expected_actions, label="action equation"
+    )
+
+    def independently_reconstruct(trajectory):
+        raw_means = jax.vmap(
+            lambda observations: jax.vmap(
+                lambda observation: actor_apply(actor_params, observation)
+            )(observations)
+        )(jax.lax.stop_gradient(trajectory.normalized_observations))
+        means = raw_means.astype(trajectory.means.dtype)
+        returns = jax.vmap(
+            lambda rewards, dones: discounted_return_to_go(
+                rewards, dones, gamma=gamma
+            )
+        )(trajectory.rewards, trajectory.dones)
+        objectives = jax.vmap(
+            lambda rewards, dones: pathwise_negative_objective(
+                rewards, dones, gamma=gamma
+            )
+        )(trajectory.rewards, trajectory.dones)
+        losses = jax.vmap(
+            lambda candidate_means, actions, candidate_returns: (
+                detached_gaussian_score_loss(
+                    candidate_means,
+                    actions,
+                    candidate_returns,
+                    std=sigma,
+                )
+            )
+        )(means, trajectory.actions, returns)
+        return raw_means, means, returns, objectives, losses
+
+    path_rebuilt = independently_reconstruct(result.trajectory)
+    score_rebuilt = independently_reconstruct(result.score_trajectory)
+    (
+        path_raw_means,
+        path_means,
+        path_returns,
+        path_objectives,
+        path_losses,
+    ) = path_rebuilt
+    (
+        score_raw_means,
+        score_means,
+        score_returns,
+        score_objectives,
+        score_losses,
+    ) = score_rebuilt
+
+    def ulp_gate(actual, expected, *, source_dtype, ulps, label):
+        actual_array = np.asarray(jax.device_get(actual))
+        expected_array = np.asarray(jax.device_get(expected))
+        if actual_array.shape != expected_array.shape:
+            raise ValueError(f"estimator identity mismatch for {label}")
+        epsilon = np.finfo(np.dtype(source_dtype)).eps
+        errors = np.abs(actual_array.astype(np.float64) - expected_array)
+        scales = np.maximum(1.0, np.abs(expected_array.astype(np.float64)))
+        if not np.all(errors <= ulps * epsilon * scales):
+            raise ValueError(f"estimator identity mismatch for {label}")
+        return float(np.max(errors, initial=0.0))
+
+    mean_dtype = np.asarray(jax.device_get(path_raw_means)).dtype
+    mean_errors = (
+        ulp_gate(
+            result.trajectory.means,
+            path_means,
+            source_dtype=mean_dtype,
+            ulps=4,
+            label="independent means",
+        ),
+        ulp_gate(
+            result.score_means,
+            score_means,
+            source_dtype=np.asarray(jax.device_get(score_raw_means)).dtype,
+            ulps=4,
+            label="independent means",
+        ),
+    )
+    exact_equal(
+        result.pathwise_returns_to_go,
+        path_returns,
+        label="returns_to_go",
+    )
+    exact_equal(result.score_returns_to_go, score_returns, label="returns_to_go")
+    objective_errors = (
+        ulp_gate(
+            result.losses,
+            path_objectives,
+            source_dtype=np.asarray(
+                jax.device_get(result.trajectory.rewards)
+            ).dtype,
+            ulps=16,
+            label="independent objective_values",
+        ),
+        ulp_gate(
+            result.score_objectives,
+            score_objectives,
+            source_dtype=np.asarray(
+                jax.device_get(result.score_trajectory.rewards)
+            ).dtype,
+            ulps=16,
+            label="independent objective_values",
+        ),
+    )
+    loss_errors = (
+        ulp_gate(
+            result.pathwise_score_losses,
+            path_losses,
+            source_dtype=mean_dtype,
+            ulps=256,
+            label="independent score_losses",
+        ),
+        ulp_gate(
+            result.score_losses,
+            score_losses,
+            source_dtype=mean_dtype,
+            ulps=256,
+            label="independent score_losses",
+        ),
+    )
+    evidence = {
+        "mean_max_abs_error": max(mean_errors),
+        "objective_max_abs_error": max(objective_errors),
+        "score_loss_max_abs_error": max(loss_errors),
+        "mean_gate_ulps": 4,
+        "objective_gate_ulps": 16,
+        "score_loss_gate_ulps": 256,
+    }
+    engine_values = {
+        "pathwise_objectives": stable_pytree_sha256(result.losses),
+        "score_objectives": stable_pytree_sha256(result.score_objectives),
+        "pathwise_score_losses": stable_pytree_sha256(
+            result.pathwise_score_losses
+        ),
+        "score_score_losses": stable_pytree_sha256(result.score_losses),
+    }
+    pathwise_receipt = identity_receipt(
+        checkpoint_sha256=checkpoint_sha256,
+        hparams=hparams,
+        gamma=gamma,
+        sigma=sigma,
+        pathwise_clip_norm=pathwise_clip_norm,
+        actor_params=actor_params,
+        normalizer_state=normalizer_state,
+        initial_state=initial_state,
+        action_noise=action_noise,
+        trajectory=result.trajectory,
+        objective_values=path_objectives,
+        returns_to_go=path_returns,
+        score_losses=path_losses,
+        independent_means=path_means,
+        independent_objective_values=path_objectives,
+        independent_score_losses=path_losses,
+        numeric_equivalence_evidence=evidence,
+        engine_estimator_values=engine_values,
+    )
+
+    score_trajectory = result.score_trajectory._replace(
+        means=result.score_means
+    )
+    score_receipt = identity_receipt(
+        checkpoint_sha256=checkpoint_sha256,
+        hparams=hparams,
+        gamma=gamma,
+        sigma=sigma,
+        pathwise_clip_norm=pathwise_clip_norm,
+        actor_params=actor_params,
+        normalizer_state=normalizer_state,
+        initial_state=initial_state,
+        action_noise=action_noise,
+        trajectory=score_trajectory,
+        objective_values=score_objectives,
+        returns_to_go=score_returns,
+        score_losses=score_losses,
+        independent_means=score_means,
+        independent_objective_values=score_objectives,
+        independent_score_losses=score_losses,
+        numeric_equivalence_evidence=evidence,
+        engine_estimator_values=engine_values,
+    )
+    assert_matching_identity_receipts(pathwise_receipt, score_receipt)
+    return pathwise_receipt, score_receipt
 
 
 def assert_matching_identity_receipts(
@@ -721,63 +1565,12 @@ def _state_shape(
     return None
 
 
-def _require_equal(hparams: Mapping[str, Any], key: str, expected: Any) -> None:
-    actual = hparams.get(key)
-    if isinstance(expected, tuple) and isinstance(actual, (tuple, list)):
-        matches = tuple(actual) == expected
-    else:
-        matches = actual == expected
-    if key not in hparams or not matches:
-        raise ValueError(f"{key} must equal the frozen E064 value {expected!r}")
-
-
-def validate_e064_checkpoint_contract(
+def validate_e064_checkpoint_shapes(
     checkpoint_state: Any,
-    hparams: Mapping[str, Any],
     *,
-    expected_hparams: Mapping[str, Any],
-    expected_initial_state_signature: tuple,
-    checkpoint_path: str | Path | None = None,
-    expected_checkpoint_sha256: str | None = None,
-) -> ValidatedE064Contract:
-    """Validates the checkpoint, complete hparams, and carried-state shapes.
-
-    ``expected_hparams`` and ``expected_initial_state_signature`` are the
-    preregistered caller-owned contracts.  Equality is exact and the causal
-    safety requirements below are additionally enforced, so changing both an
-    input and its claimed expectation cannot enable a different audit.
-    """
-
-    if dict(hparams) != dict(expected_hparams):
-        raise ValueError("hparams do not match the complete frozen hparams mapping")
-    missing_hparams = E064_REQUIRED_HPARAM_KEYS.difference(hparams)
-    if missing_hparams:
-        raise ValueError(
-            "complete frozen hparams mapping is missing fields: "
-            + ", ".join(sorted(missing_hparams))
-        )
-
-    for key, expected in E064_RUNTIME_HPARAMS.items():
-        _require_equal(hparams, key, expected)
-    for key, value in hparams.items():
-        normalized_key = key.lower()
-        if "reset" in normalized_key and (
-            "noise" in normalized_key or "corrupt" in normalized_key
-        ) and value not in (0, 0.0, False, None):
-            raise ValueError(f"{key} must disable reset corruption")
-        if ("obs" in normalized_key or "observation" in normalized_key) and (
-            "noise" in normalized_key or "corrupt" in normalized_key
-        ) and value not in (0, 0.0, False, None, "identity"):
-            raise ValueError(f"{key} must select identity observation handling")
-
-    if (checkpoint_path is None) != (expected_checkpoint_sha256 is None):
-        raise ValueError(
-            "checkpoint_path and expected_checkpoint_sha256 must be supplied together"
-        )
-    if checkpoint_path is not None:
-        actual_checkpoint_sha256 = sha256_file(checkpoint_path)
-        if actual_checkpoint_sha256 != expected_checkpoint_sha256:
-            raise ValueError("checkpoint SHA-256 does not match the frozen contract")
+    expected_initial_state_signature: tuple | None = None,
+) -> ValidatedCheckpointShapes:
+    """Checks exact actor/normalizer shapes and carried population geometry."""
 
     actor_params = checkpoint_state.actor_params
     actor_signature = pytree_shape_signature(actor_params)
@@ -785,44 +1578,94 @@ def validate_e064_checkpoint_contract(
         raise ValueError(
             "actor parameter shapes must be exactly 154->512->512->29 with no LayerNorm"
         )
-    if any(not np.issubdtype(np.dtype(dtype), np.floating) for _, _, dtype in actor_signature):
+    if any(
+        not np.issubdtype(np.dtype(dtype), np.floating)
+        for _, _, dtype in actor_signature
+    ):
         raise ValueError("actor parameter leaves must all be floating-point arrays")
 
-    normalizer = checkpoint_state.normalizer
-    normalizer_tree = _normalizer_identity_tree(normalizer)
+    normalizer_tree = _normalizer_identity_tree(checkpoint_state.normalizer)
     normalizer_signature = pytree_shape_signature(normalizer_tree)
-    expected_normalizer_shapes = {
+    if _shape_map(normalizer_tree) != {
         "['count']": (),
         "['mean']": (154,),
         "['var']": (154,),
-    }
-    if _shape_map(normalizer_tree) != expected_normalizer_shapes:
-        raise ValueError("actor normalizer shapes must be mean/var (154,) and scalar count")
+    }:
+        raise ValueError(
+            "actor normalizer shapes must be mean/var (154,) and scalar count"
+        )
 
     initial_state = checkpoint_state.env_state
     initial_state_signature = pytree_shape_signature(initial_state)
-    if initial_state_signature != tuple(expected_initial_state_signature):
-        raise ValueError("initial-state shape signature does not match the frozen checkpoint")
+    if (
+        expected_initial_state_signature is not None
+        and initial_state_signature != tuple(expected_initial_state_signature)
+    ):
+        raise ValueError(
+            "initial-state shape signature does not match the frozen checkpoint"
+        )
     state_shapes = _shape_map(initial_state)
     for path, shape in state_shapes.items():
         if not shape or shape[0] != 64:
             raise ValueError(
                 f"initial-state shape {path} must carry exactly 64 environments"
             )
-    if _state_shape(state_shapes, "['obs']", ".obs") != (64, 154):
-        raise ValueError("initial-state shape ['obs'] must be exactly (64, 154)")
-    if _state_shape(state_shapes, "['reward']", ".reward") != (64,):
-        raise ValueError("initial-state shape ['reward'] must be exactly (64,)")
-    if _state_shape(state_shapes, "['done']", ".done") != (64,):
-        raise ValueError("initial-state shape ['done'] must be exactly (64,)")
-    if _state_shape(
-        state_shapes, "['info']['rng']", ".info['rng']"
-    ) != (64, 2):
-        raise ValueError("initial-state shape info.rng must be exactly (64, 2)")
-    if _state_shape(
-        state_shapes, "['info']['phase']", ".info['phase']"
-    ) != (64,):
-        raise ValueError("initial-state shape info.phase must be exactly (64,)")
+    required_shapes = (
+        (("['obs']", ".obs"), (64, 154), "['obs']"),
+        (("['reward']", ".reward"), (64,), "['reward']"),
+        (("['done']", ".done"), (64,), "['done']"),
+        (("['info']['rng']", ".info['rng']"), (64, 2), "info.rng"),
+        (("['info']['phase']", ".info['phase']"), (64,), "info.phase"),
+    )
+    for paths, expected_shape, label in required_shapes:
+        if _state_shape(state_shapes, *paths) != expected_shape:
+            raise ValueError(
+                f"initial-state shape {label} must be exactly {expected_shape}"
+            )
+    return ValidatedCheckpointShapes(
+        population=64,
+        horizon=48,
+        sigma=0.1,
+        actor_parameter_signature=actor_signature,
+        normalizer_signature=normalizer_signature,
+        initial_state_signature=initial_state_signature,
+    )
+
+
+def validate_e064_checkpoint_contract(
+    checkpoint_state: Any,
+    hparams: Mapping[str, Any],
+    *,
+    checkpoint_path: str | Path,
+) -> ValidatedE064Contract:
+    """Host-validates the literal registered E064 artifact and state."""
+
+    if (
+        set(hparams) != set(E064_FROZEN_HPARAMS)
+        or stable_mapping_sha256(hparams) != E064_HPARAMS_SHA256
+    ):
+        changed = sorted(
+            key
+            for key in set(hparams).union(E064_FROZEN_HPARAMS)
+            if hparams.get(key) != E064_FROZEN_HPARAMS.get(key)
+        )
+        label = changed[0] if changed else "mapping"
+        raise ValueError(
+            f"{label}: hparams must equal the literal frozen E064 hparams"
+        )
+    if sha256_file(checkpoint_path) != E064_CHECKPOINT_SHA256:
+        raise ValueError("checkpoint SHA-256 does not equal literal E064 checkpoint")
+
+    shapes = validate_e064_checkpoint_shapes(checkpoint_state)
+    actor_params = checkpoint_state.actor_params
+    normalizer_tree = _normalizer_identity_tree(checkpoint_state.normalizer)
+    initial_state = checkpoint_state.env_state
+    if stable_pytree_sha256(actor_params) != E064_ACTOR_PARAMETERS_SHA256:
+        raise ValueError("actor parameters do not equal literal E064 actor")
+    if stable_pytree_sha256(normalizer_tree) != E064_NORMALIZER_SHA256:
+        raise ValueError("normalizer does not equal literal E064 normalizer")
+    if stable_pytree_sha256(initial_state) != E064_INITIAL_STATE_SHA256:
+        raise ValueError("initial state does not equal literal E064 carried state")
 
     return ValidatedE064Contract(
         population=64,
@@ -830,13 +1673,13 @@ def validate_e064_checkpoint_contract(
         sigma=0.1,
         gamma=0.99,
         pathwise_clip_norm=1.0,
-        hparams_sha256=stable_mapping_sha256(hparams),
-        actor_parameters_sha256=stable_pytree_sha256(actor_params),
-        normalizer_sha256=stable_pytree_sha256(normalizer_tree),
-        initial_state_sha256=stable_pytree_sha256(initial_state),
-        env_variant=str(hparams["env_variant"]),
-        reference_sha256=str(hparams["reference_sha256"]),
-        actor_parameter_signature=actor_signature,
-        normalizer_signature=normalizer_signature,
-        initial_state_signature=initial_state_signature,
+        hparams_sha256=E064_HPARAMS_SHA256,
+        actor_parameters_sha256=E064_ACTOR_PARAMETERS_SHA256,
+        normalizer_sha256=E064_NORMALIZER_SHA256,
+        initial_state_sha256=E064_INITIAL_STATE_SHA256,
+        env_variant=str(E064_FROZEN_HPARAMS["env_variant"]),
+        reference_sha256=E064_REFERENCE_SHA256,
+        actor_parameter_signature=shapes.actor_parameter_signature,
+        normalizer_signature=shapes.normalizer_signature,
+        initial_state_signature=shapes.initial_state_signature,
     )
