@@ -5,8 +5,13 @@ import jax.numpy as jnp
 import numpy as np
 
 from src.algorithms.shac.gradient_audit import (
+    PHASE_BINS,
+    apply_functional_actor_step,
+    assert_matching_pytree_leaf_order,
     detached_gaussian_score_loss,
     discounted_return_to_go,
+    pytree_leaf_order,
+    summarize_per_env_gradient_geometry,
 )
 
 
@@ -127,6 +132,124 @@ class DetachedGaussianScoreLossTest(unittest.TestCase):
 
         np.testing.assert_array_equal(ratio, jnp.ones_like(ratio))
         np.testing.assert_array_equal(ppo_gradient, direct_gradient)
+
+
+class GradientGeometryTest(unittest.TestCase):
+    def test_sanitizes_a_nonfinite_environment_as_a_whole_before_clipping(self):
+        summary = summarize_per_env_gradient_geometry(
+            {
+                "w": jnp.array([[2.0, 0.0], [jnp.nan, 4.0]]),
+                "b": jnp.array([[0.0], [3.0]]),
+            },
+            max_norm=1.0,
+            initial_phases=jnp.array([0, 100]),
+        )
+
+        np.testing.assert_allclose(summary.raw_mean["w"], [1.0, 0.0])
+        np.testing.assert_allclose(summary.raw_mean["b"], [0.0])
+        np.testing.assert_allclose(summary.clipped_mean["w"], [0.5, 0.0])
+        np.testing.assert_allclose(summary.clipped_mean["b"], [0.0])
+        np.testing.assert_allclose(summary.finite_by_env, [True, False])
+        self.assertAlmostEqual(float(summary.finite_fraction), 0.5)
+        self.assertAlmostEqual(float(summary.clipping_fraction), 0.5)
+
+    def test_reports_raw_and_clipped_population_geometry(self):
+        summary = summarize_per_env_gradient_geometry(
+            {"w": jnp.array([[3.0, 0.0], [-1.0, 0.0], [1.0, 0.0]])},
+            max_norm=1.0,
+            initial_phases=jnp.array([4, 104, 204]),
+        )
+
+        np.testing.assert_allclose(summary.raw_mean["w"], [1.0, 0.0])
+        np.testing.assert_allclose(
+            summary.clipped_mean["w"], [1.0 / 3.0, 0.0]
+        )
+        np.testing.assert_allclose(summary.raw_norm_by_env, [3.0, 1.0, 1.0])
+        np.testing.assert_allclose(summary.clipped_norm_by_env, [1.0, 1.0, 1.0])
+        self.assertAlmostEqual(float(summary.clipping_fraction), 1.0 / 3.0)
+        self.assertAlmostEqual(float(summary.raw_trace_variance), 8.0 / 3.0)
+        self.assertAlmostEqual(float(summary.raw_snr), 1.0 / np.sqrt(8.0 / 3.0))
+        self.assertAlmostEqual(float(summary.clipped_trace_variance), 8.0 / 9.0)
+        self.assertAlmostEqual(
+            float(summary.clipped_snr), (1.0 / 3.0) / np.sqrt(8.0 / 9.0)
+        )
+        self.assertAlmostEqual(float(summary.negative_cosine_fraction), 1.0 / 3.0)
+        np.testing.assert_allclose(summary.contribution_to_aggregate_cosines, [1, -1, 1])
+        self.assertAlmostEqual(float(summary.raw_vs_clipped_cosine), 1.0)
+
+    def test_groups_contributions_by_the_five_fixed_initial_phase_bins(self):
+        summary = summarize_per_env_gradient_geometry(
+            {"w": jnp.eye(5)},
+            max_norm=1.0,
+            initial_phases=jnp.array([0, 100, 200, 300, 400]),
+        )
+
+        self.assertEqual(PHASE_BINS, ((0, 100), (100, 200), (200, 300), (300, 400), (400, 500)))
+        self.assertEqual(len(summary.phase_bins), 5)
+        self.assertEqual([int(item.count) for item in summary.phase_bins], [1] * 5)
+        self.assertEqual(
+            tuple((item.start, item.stop) for item in summary.phase_bins),
+            PHASE_BINS,
+        )
+        np.testing.assert_allclose(
+            [float(item.clipped_mean_norm) for item in summary.phase_bins],
+            np.ones(5),
+        )
+
+
+class PyTreeOrderAndFunctionalScalingTest(unittest.TestCase):
+    def test_leaf_order_is_stable_and_mismatches_fail_closed(self):
+        first = {"b": (jnp.array([1.0]),), "a": jnp.array([2.0, 3.0])}
+        same_structure = {"a": jnp.array([4.0, 5.0]), "b": (jnp.array([6.0]),)}
+        different_structure = {"a": (jnp.array([4.0, 5.0]),), "b": jnp.array([6.0])}
+
+        self.assertEqual(pytree_leaf_order(first), ("['a']", "['b'][0]"))
+        self.assertEqual(pytree_leaf_order(first), pytree_leaf_order(same_structure))
+        assert_matching_pytree_leaf_order(first, same_structure)
+        with self.assertRaisesRegex(ValueError, "leaf order"):
+            assert_matching_pytree_leaf_order(first, different_structure)
+
+    def test_jvp_scaling_matches_the_frozen_actor_output_rms(self):
+        params = {
+            "w": jnp.array([[1.0, -2.0], [0.5, 3.0]]),
+            "b": jnp.array([0.25, -0.5]),
+        }
+        observations = jnp.array([[1.0, 2.0], [-3.0, 0.5], [0.25, -1.0]])
+
+        def actor_apply(value, obs):
+            return obs @ value["w"] + value["b"]
+
+        first_direction = {
+            "w": jnp.array([[3.0, 0.0], [0.0, 0.0]]),
+            "b": jnp.array([0.0, 0.0]),
+        }
+        second_direction = {
+            "w": jnp.array([[0.0, 0.0], [0.0, -4.0]]),
+            "b": jnp.array([0.0, 2.0]),
+        }
+
+        first_params, first_summary = apply_functional_actor_step(
+            actor_apply, params, first_direction, observations, target_rms=0.01
+        )
+        second_params, second_summary = apply_functional_actor_step(
+            actor_apply, params, second_direction, observations, target_rms=0.01
+        )
+
+        self.assertNotEqual(float(first_summary.scale), float(second_summary.scale))
+        self.assertAlmostEqual(float(first_summary.linearized_rms), 0.01, places=7)
+        self.assertAlmostEqual(float(second_summary.linearized_rms), 0.01, places=7)
+        self.assertAlmostEqual(float(first_summary.output_rms), 0.01, places=7)
+        self.assertAlmostEqual(float(second_summary.output_rms), 0.01, places=7)
+        self.assertAlmostEqual(
+            float(first_summary.max_action_change),
+            float(jnp.max(jnp.abs(actor_apply(first_params, observations) - actor_apply(params, observations)))),
+            places=7,
+        )
+        self.assertAlmostEqual(
+            float(second_summary.max_action_change),
+            float(jnp.max(jnp.abs(actor_apply(second_params, observations) - actor_apply(params, observations)))),
+            places=7,
+        )
 
 
 if __name__ == "__main__":
