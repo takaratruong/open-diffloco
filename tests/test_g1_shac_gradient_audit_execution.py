@@ -16,6 +16,7 @@ from src.algorithms.shac.g1_gradient_audit_execution import (
     EstimatorShardEvidence,
     PreparedAuditExecution,
     _baseline_competence_receipt,
+    _prepare_e064_execution,
     make_frozen_action_noise,
     make_phase_rollout,
     replace_actor_parameters,
@@ -79,6 +80,84 @@ class CandidateCheckpointTest(unittest.TestCase):
         np.testing.assert_array_equal(candidate.actor_params["w"], [2.0])
         np.testing.assert_array_equal(candidate.untouched, state.untouched)
         np.testing.assert_array_equal(state.actor_params["w"], [1.0])
+
+
+class PreparedExecutionCapabilityTest(unittest.TestCase):
+    def test_exposes_only_the_engine_first_action_preparer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint_path = root / "checkpoint.pkl"
+            hparams_path = root / "hparams.json"
+            checkpoint_path.write_bytes(b"checkpoint")
+            hparams_path.write_text("{}")
+            contract = SimpleNamespace(
+                checkpoint=checkpoint_path,
+                hparams_path=hparams_path,
+                reference=root / "reference.npz",
+                solver_iterations=4,
+                solver_ls_iterations=5,
+            )
+            checkpoint = SimpleNamespace(normalizer="normalizer-state")
+            normalizer = object()
+            env = SimpleNamespace(
+                actor_frame_obs_dim=154,
+                reference_transitions=499,
+            )
+
+            def first_action_preparer(action_noise, env_index):
+                return action_noise, env_index
+
+            engine = SimpleNamespace(
+                contract="validated-contract",
+                actor_apply="actor-apply",
+                prepare_first_action_objective=first_action_preparer,
+            )
+            hparams = {
+                "env_variant": "g1_tracking_rmr_50hz_validated",
+                "reference_stride": 1,
+            }
+            with (
+                patch(
+                    "src.algorithms.shac.g1_gradient_audit_execution.pickle.load",
+                    return_value=checkpoint,
+                ),
+                patch(
+                    "src.algorithms.shac.g1_gradient_audit_execution.json.load",
+                    return_value=hparams,
+                ),
+                patch(
+                    "src.algorithms.shac.g1_gradient_audit_execution._capture_runtime_provenance",
+                    return_value={"git_clean": True},
+                ),
+                patch(
+                    "src.algorithms.shac.g1_gradient_audit_execution._validate_external_inputs",
+                    return_value={},
+                ),
+                patch(
+                    "src.algorithms.shac.g1_gradient_audit_execution._run_algorithmic_validity_checks",
+                    return_value={},
+                ),
+                patch(
+                    "src.algorithms.shac.g1_gradient_audit_execution.make_phase_rollout",
+                    return_value=lambda: None,
+                ),
+                patch(
+                    "src.algorithms.shac.g1_gradient_audit.prepare_e064_estimator_engine",
+                    return_value=engine,
+                ),
+                patch("src.core.data_structures.Normalizer", return_value=normalizer),
+                patch(
+                    "tools.evaluate_g1_tracking.make_evaluation_env",
+                    return_value=env,
+                ),
+            ):
+                prepared = _prepare_e064_execution(contract)
+
+            self.assertIs(
+                prepared.prepare_first_action_objective,
+                first_action_preparer,
+            )
+            self.assertFalse(hasattr(prepared, "prepared_engine"))
 
 
 class BaselineCompetenceReceiptTest(unittest.TestCase):
@@ -397,6 +476,10 @@ class RunAuditTest(unittest.TestCase):
                 actor_apply=lambda params, observations: observations * params["w"],
                 normalizer_state={"mean": jnp.array([0.0])},
                 estimate_shard=estimate_shard,
+                prepare_first_action_objective=lambda noise, env_index: (
+                    noise,
+                    env_index,
+                ),
                 stochastic_rollout=stochastic_rollout,
                 phase_rollout=phase_rollout,
                 validated_contract={"hparams_sha256": "c" * 64},
@@ -564,6 +647,10 @@ class RunAuditTest(unittest.TestCase):
                 estimate_shard=lambda seed: EstimatorShardEvidence(
                     self._gradient_result(seed), receipt, receipt
                 ),
+                prepare_first_action_objective=lambda noise, env_index: (
+                    noise,
+                    env_index,
+                ),
                 stochastic_rollout=lambda params, noise: complete_stochastic_trajectory(
                     jnp.ones((64, 48)),
                     jnp.zeros((64, 48), dtype=bool),
@@ -645,6 +732,10 @@ class RunAuditTest(unittest.TestCase):
                     self._gradient_result(seed),
                     {"identity": "pathwise"},
                     {"identity": "score"},
+                ),
+                prepare_first_action_objective=lambda noise, env_index: (
+                    noise,
+                    env_index,
                 ),
                 stochastic_rollout=must_not_run,
                 phase_rollout=must_not_run,

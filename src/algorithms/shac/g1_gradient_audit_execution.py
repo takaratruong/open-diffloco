@@ -139,6 +139,7 @@ class PreparedAuditExecution:
     actor_apply: Callable[[Any, jax.Array], jax.Array]
     normalizer_state: Any
     estimate_shard: Callable[[int], EstimatorShardEvidence]
+    prepare_first_action_objective: Callable[[jax.Array, int], Any]
     stochastic_rollout: Callable[[Any, jax.Array], Any]
     phase_rollout: Callable[..., Mapping[str, Any]]
     validated_contract: Any
@@ -803,6 +804,9 @@ def _prepare_e064_execution(contract: Any) -> PreparedAuditExecution:
         actor_apply=actor_apply,
         normalizer_state=checkpoint_state.normalizer,
         estimate_shard=estimate_shard,
+        prepare_first_action_objective=(
+            prepared_engine.prepare_first_action_objective
+        ),
         stochastic_rollout=stochastic_rollout,
         phase_rollout=phase_rollout,
         validated_contract=validated,
