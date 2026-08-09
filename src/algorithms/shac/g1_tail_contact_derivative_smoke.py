@@ -139,12 +139,18 @@ def _validate_nominal(diagnostic: FirstActionObjective) -> tuple[np.ndarray, ...
         raise ValueError("nominal action must have shape (29,)")
     if action.dtype != np.dtype(np.float64):
         raise TypeError("nominal action must have float64 dtype")
+    if not np.issubdtype(objective.dtype, np.floating):
+        raise TypeError("nominal objective must have floating dtype")
     if objective.shape != () or not np.isfinite(objective):
         raise ValueError("nominal objective must be a finite scalar")
     if dones.shape != (_HORIZON,):
         raise ValueError("nominal dones must have shape (48,)")
+    if dones.dtype != np.dtype(np.bool_):
+        raise TypeError("nominal dones must have bool dtype")
     if actions.shape != (_HORIZON, _ACTION_DIMENSION):
         raise ValueError("nominal trajectory actions must have shape (48, 29)")
+    if not np.issubdtype(actions.dtype, np.floating):
+        raise TypeError("nominal trajectory actions must have floating dtype")
     if not np.isfinite(action).all() or not np.isfinite(actions).all():
         raise ValueError("nominal action support must be finite")
     return action, objective, dones, actions

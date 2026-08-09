@@ -17,21 +17,33 @@ from src.algorithms.shac.g1_tail_contact_derivative_smoke import (
 
 
 class FakeFirstActionObjective:
-    def __init__(self):
+    def __init__(self, *, change_done=False, change_support=False):
         self.action = jnp.linspace(-0.5, 0.5, 29, dtype=jnp.float64)
+        self.change_done = change_done
+        self.change_support = change_support
+        self.events = None
+        self.record_events = False
         dones = jnp.zeros((48,), dtype=jnp.bool_)
         actions = jnp.tile(self.action[None, :], (48, 1))
         self.nominal_trajectory = SimpleNamespace(dones=dones, actions=actions)
 
     def objective(self, action):
+        if self.record_events and self.events is not None:
+            self.events.append("probe-objective")
         return jnp.sum(jnp.square(action))
 
     def rollout(self, action):
+        if self.record_events and self.events is not None:
+            self.events.append("probe-rollout")
+        changed_action = bool(jnp.any(action != self.action))
+        dones = self.nominal_trajectory.dones
+        actions = jnp.tile(action[None, :], (48, 1))
+        if self.change_done and changed_action:
+            dones = dones.at[0].set(True)
+        if self.change_support and changed_action:
+            actions = actions.at[0, 0].set(jnp.nan)
         return (
-            SimpleNamespace(
-                dones=self.nominal_trajectory.dones,
-                actions=jnp.tile(action[None, :], (48, 1)),
-            ),
+            SimpleNamespace(dones=dones, actions=actions),
             object(),
         )
 
@@ -47,6 +59,135 @@ class FakeFirstActionObjective:
 
 
 class CompiledTailContactDerivativeSmokeTest(unittest.TestCase):
+    def test_rejects_nonboolean_dones_before_kernel_compilation(self):
+        fake = FakeFirstActionObjective()
+        diagnostic = fake.build()._replace(
+            nominal_trajectory=SimpleNamespace(
+                dones=jnp.zeros((48,), dtype=jnp.int32),
+                actions=fake.nominal_trajectory.actions,
+            )
+        )
+
+        with self.assertRaisesRegex(TypeError, "nominal dones.*bool"):
+            compile_case_kernels(diagnostic)
+
+    def test_rejects_nonfloating_nominal_actions_before_kernel_compilation(self):
+        fake = FakeFirstActionObjective()
+        diagnostic = fake.build()._replace(
+            nominal_trajectory=SimpleNamespace(
+                dones=fake.nominal_trajectory.dones,
+                actions=jnp.zeros((48, 29), dtype=jnp.int32),
+            )
+        )
+
+        with self.assertRaisesRegex(TypeError, "trajectory actions.*floating"):
+            compile_case_kernels(diagnostic)
+
+    def test_rejects_nonfloating_nominal_objective_before_kernel_compilation(self):
+        fake = FakeFirstActionObjective()
+        diagnostic = fake.build()._replace(
+            nominal_objective=jnp.asarray(1, dtype=jnp.int32)
+        )
+
+        with self.assertRaisesRegex(TypeError, "nominal objective.*floating"):
+            compile_case_kernels(diagnostic)
+
+    def test_compile_durations_stop_after_each_explicit_compile(self):
+        original_jit = jax.jit
+        events = []
+        wrappers = []
+
+        class LoweredKernel:
+            def __init__(self, lowered):
+                self.lowered = lowered
+
+            def compile(self):
+                events.append("compile")
+                return self.lowered.compile()
+
+        class JittedKernel:
+            def __init__(self, function):
+                self.jitted = original_jit(function)
+
+            def lower(self, *args, **kwargs):
+                return LoweredKernel(self.jitted.lower(*args, **kwargs))
+
+        def capture_jit(function):
+            wrapper = JittedKernel(function)
+            wrappers.append(wrapper)
+            return wrapper
+
+        times = iter((10.0, 11.0, 20.0, 22.0))
+
+        def perf_counter():
+            events.append("perf")
+            return next(times)
+
+        with (
+            mock.patch.object(smoke.jax, "jit", side_effect=capture_jit),
+            mock.patch.object(smoke.time, "perf_counter", side_effect=perf_counter),
+        ):
+            compiled = compile_case_kernels(FakeFirstActionObjective().build())
+
+        self.assertEqual(len(wrappers), 2)
+        self.assertEqual(events, ["perf", "compile", "perf"] * 2)
+        self.assertEqual(compiled.reverse_compile_duration_seconds, 1.0)
+        self.assertEqual(compiled.forward_compile_duration_seconds, 2.0)
+
+    def test_cached_timers_stop_after_their_final_blocks(self):
+        fake = FakeFirstActionObjective()
+        compiled = compile_case_kernels(fake.build())
+        events = []
+        fake.events = events
+        fake.record_events = True
+
+        def reverse_kernel(*args, **kwargs):
+            events.append("reverse")
+            return compiled.reverse_kernel(*args, **kwargs)
+
+        def directional_jvp_kernel(*args, **kwargs):
+            events.append("jvp")
+            return compiled.directional_jvp_kernel(*args, **kwargs)
+
+        original_block_until_ready = jax.block_until_ready
+
+        def block_until_ready(value):
+            events.append("block")
+            return original_block_until_ready(value)
+
+        times = iter(float(value) for value in range(100, 113))
+
+        def perf_counter():
+            events.append("perf")
+            return next(times)
+
+        with (
+            mock.patch.object(
+                smoke.jax, "block_until_ready", side_effect=block_until_ready
+            ),
+            mock.patch.object(smoke.time, "perf_counter", side_effect=perf_counter),
+        ):
+            result = run_compiled_case_smoke(
+                replace(
+                    compiled,
+                    reverse_kernel=reverse_kernel,
+                    directional_jvp_kernel=directional_jvp_kernel,
+                )
+            )
+
+        expected = ["perf", "reverse", "block", "perf"]
+        for _ in range(3):
+            expected.append("perf")
+            expected.extend(["jvp", "block"] * 29)
+            expected.append("perf")
+        expected.extend(["perf", "probe-objective", "probe-rollout", "block", "perf"] * 2)
+        self.assertEqual(events, expected)
+        self.assertEqual(result.reverse_cached_duration_seconds, 1.0)
+        np.testing.assert_array_equal(
+            result.forward_cached_sweep_durations_seconds, np.ones((3,))
+        )
+        np.testing.assert_array_equal(result.probe_durations_seconds, np.ones((2,)))
+
     def test_lowers_and_compiles_both_kernels_without_execution_timing(self):
         original_jit = jax.jit
         wrappers = []
@@ -164,6 +305,90 @@ class CompiledTailContactDerivativeSmokeTest(unittest.TestCase):
             )
 
         self.assertEqual(events[1 : 1 + 2 * 3 * 29], ["jvp", "block"] * (3 * 29))
+
+    def test_rejects_reverse_or_forward_primal_drift(self):
+        compiled = compile_case_kernels(FakeFirstActionObjective().build())
+
+        def drifted_reverse(action):
+            return (
+                jnp.asarray(compiled.nominal_objective + 1.0),
+                jnp.zeros((29,), dtype=jnp.float64),
+            )
+
+        with self.assertRaisesRegex(ValueError, "reverse derivative primal"):
+            run_compiled_case_smoke(replace(compiled, reverse_kernel=drifted_reverse))
+
+        def drifted_forward(action, tangent):
+            return jnp.asarray(compiled.nominal_objective + 1.0), jnp.asarray(0.0)
+
+        with self.assertRaisesRegex(ValueError, "forward derivative primal"):
+            run_compiled_case_smoke(
+                replace(compiled, directional_jvp_kernel=drifted_forward)
+            )
+
+    def test_done_or_finite_support_change_invalidates_forward_gate(self):
+        for kwargs in (
+            {"change_done": True},
+            {"change_support": True},
+        ):
+            with self.subTest(kwargs=kwargs):
+                result = run_compiled_case_smoke(
+                    compile_case_kernels(FakeFirstActionObjective(**kwargs).build())
+                )
+                self.assertFalse(result.probes_preserve_done_and_support)
+                self.assertFalse(result.comparison.forward_valid)
+                self.assertTrue(result.execution_valid)
+                self.assertEqual(
+                    result.case_outcome, "forward-contact-derivative-invalid"
+                )
+
+    def test_nonfinite_forward_gradient_invalidates_forward_gate(self):
+        compiled = compile_case_kernels(FakeFirstActionObjective().build())
+
+        def nonfinite_forward(action, tangent):
+            return compiled.nominal_objective, jnp.asarray(jnp.nan)
+
+        result = run_compiled_case_smoke(
+            replace(compiled, directional_jvp_kernel=nonfinite_forward)
+        )
+
+        self.assertFalse(result.comparison.forward_finite)
+        self.assertFalse(result.comparison.forward_valid)
+
+    def test_forward_repeat_error_over_one_e_minus_six_invalidates_forward_gate(self):
+        compiled = compile_case_kernels(FakeFirstActionObjective().build())
+        calls = 0
+
+        def changing_forward(action, tangent):
+            nonlocal calls
+            sweep = calls // 29
+            calls += 1
+            gradient = 2.0 * action + sweep * 1e-5
+            return compiled.nominal_objective, jnp.vdot(gradient, tangent)
+
+        result = run_compiled_case_smoke(
+            replace(compiled, directional_jvp_kernel=changing_forward)
+        )
+
+        self.assertGreater(
+            result.comparison.forward_repeat_maximum_absolute_error, 1e-6
+        )
+        self.assertFalse(result.comparison.forward_repeat_valid)
+        self.assertFalse(result.comparison.forward_valid)
+
+    def test_forward_finite_difference_error_invalidates_forward_gate(self):
+        compiled = compile_case_kernels(FakeFirstActionObjective().build())
+
+        def zero_forward(action, tangent):
+            return compiled.nominal_objective, jnp.asarray(0.0)
+
+        result = run_compiled_case_smoke(
+            replace(compiled, directional_jvp_kernel=zero_forward)
+        )
+
+        self.assertTrue(result.comparison.forward_repeat_valid)
+        self.assertFalse(result.comparison.forward_fd_valid)
+        self.assertFalse(result.comparison.forward_valid)
 
     def test_uses_canonical_direction_and_centered_probes(self):
         fake = FakeFirstActionObjective()
