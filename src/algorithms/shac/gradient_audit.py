@@ -1,6 +1,7 @@
 """Pure score-estimator, geometry, and scaling primitives for SHAC audits."""
 
 from collections.abc import Callable
+from itertools import pairwise
 from typing import Any, NamedTuple
 
 import jax
@@ -24,6 +25,7 @@ PHASE_BINS = (
 )
 
 _FUNCTIONAL_RMS_CALIBRATION_STEPS = 8
+_FUNCTIONAL_RMS_BISECTION_STEPS = 32
 _FUNCTIONAL_RMS_RELATIVE_TOLERANCE = 5e-5
 
 
@@ -335,11 +337,12 @@ def apply_functional_actor_step(
     """Scales a parameter direction to a target actor-output RMS change.
 
     A JVP at the frozen parameters initializes the scale.  Eight deterministic
-    scalar target/exact-RMS corrections then calibrate nonlinear actor outputs;
-    this is not an objective line search.  The final exact RMS must meet the
-    target within a relative tolerance of ``5e-5``.  This admits the measured
-    float32 parameter-quantization floor while remaining much smaller than the
-    requested functional step.
+    scalar target/exact-RMS corrections then calibrate nonlinear actor outputs.
+    A passing legacy final point is returned unchanged.  Otherwise, the best
+    passing legacy point or a deterministic bisection of the narrowest adjacent
+    scale-sorted under/over bracket is selected; this is not an objective line
+    search.  The selected exact RMS must meet the target within a relative
+    tolerance of ``5e-5``.
     """
     if not jp.isfinite(target_rms) or target_rms <= 0.0:
         raise ValueError("target_rms must be finite and positive")
@@ -357,6 +360,7 @@ def apply_functional_actor_step(
         raise ValueError("parameter direction must produce a finite nonzero JVP")
     target = jp.asarray(target_rms, dtype=direction_rms.dtype)
     scale = target / direction_rms
+    evaluated_points = []
     for _ in range(_FUNCTIONAL_RMS_CALIBRATION_STEPS):
         _, _, output_rms = _candidate_actor_delta(
             actor_apply,
@@ -368,6 +372,7 @@ def apply_functional_actor_step(
         )
         if not bool(output_rms > 0.0):
             raise ValueError("exact action RMS must be nonzero")
+        evaluated_points.append((scale, output_rms))
         scale = scale * target / output_rms
     candidate_params, action_delta, output_rms = _candidate_actor_delta(
         actor_apply,
@@ -377,9 +382,114 @@ def apply_functional_actor_step(
         baseline_outputs,
         scale,
     )
+    evaluated_points.append((scale, output_rms))
     relative_error = jp.abs(output_rms - target) / target
-    if not bool(relative_error <= _FUNCTIONAL_RMS_RELATIVE_TOLERANCE):
+    if bool(relative_error <= _FUNCTIONAL_RMS_RELATIVE_TOLERANCE):
+        return candidate_params, FunctionalActorStepSummary(
+            scale=scale,
+            linearized_rms=jp.sqrt(jp.mean(jp.square(scale * output_tangent))),
+            output_rms=output_rms,
+            max_action_change=jp.max(jp.abs(action_delta)),
+        )
+
+    best_index = 0
+    best_relative_error = jp.abs(evaluated_points[0][1] - target) / target
+    for index, (_, point_rms) in enumerate(evaluated_points[1:], start=1):
+        point_relative_error = jp.abs(point_rms - target) / target
+        if bool(point_relative_error < best_relative_error):
+            best_index = index
+            best_relative_error = point_relative_error
+    if bool(best_relative_error <= _FUNCTIONAL_RMS_RELATIVE_TOLERANCE):
+        scale, _ = evaluated_points[best_index]
+        candidate_params, action_delta, output_rms = _candidate_actor_delta(
+            actor_apply,
+            params,
+            direction,
+            observations,
+            baseline_outputs,
+            scale,
+        )
+        return candidate_params, FunctionalActorStepSummary(
+            scale=scale,
+            linearized_rms=jp.sqrt(jp.mean(jp.square(scale * output_tangent))),
+            output_rms=output_rms,
+            max_action_change=jp.max(jp.abs(action_delta)),
+        )
+
+    scale_sorted_points = sorted(
+        evaluated_points,
+        key=lambda point: float(point[0]),
+    )
+    brackets = []
+    for left, right in pairwise(scale_sorted_points):
+        left_scale, left_rms = left
+        right_scale, right_rms = right
+        if bool(left_rms < target < right_rms):
+            brackets.append(
+                (
+                    float(right_scale - left_scale),
+                    float(left_scale),
+                    left,
+                    right,
+                )
+            )
+    if not brackets:
+        raise ValueError(
+            "exact action RMS calibration did not form an under/over bracket"
+        )
+    _, _, under, over = min(brackets, key=lambda item: (item[0], item[1]))
+    under_scale, under_rms = under
+    over_scale, over_rms = over
+    scale_dtype = jp.asarray(scale).dtype
+    under_scale = jp.asarray(under_scale, dtype=scale_dtype)
+    over_scale = jp.asarray(over_scale, dtype=scale_dtype)
+
+    for _ in range(_FUNCTIONAL_RMS_BISECTION_STEPS):
+        midpoint = jp.asarray(
+            (under_scale + over_scale) * jp.asarray(0.5, dtype=scale_dtype),
+            dtype=scale_dtype,
+        )
+        if bool((midpoint == under_scale) | (midpoint == over_scale)):
+            break
+        _, _, midpoint_rms = _candidate_actor_delta(
+            actor_apply,
+            params,
+            direction,
+            observations,
+            baseline_outputs,
+            midpoint,
+        )
+        if not bool(under_rms <= midpoint_rms <= over_rms):
+            raise ValueError(
+                "exact action RMS calibration bracket is nonmonotonic"
+            )
+        evaluated_points.append((midpoint, midpoint_rms))
+        if bool(midpoint_rms < target):
+            under_scale, under_rms = midpoint, midpoint_rms
+        elif bool(midpoint_rms > target):
+            over_scale, over_rms = midpoint, midpoint_rms
+        else:
+            break
+
+    for index, (_, point_rms) in enumerate(
+        evaluated_points[9:], start=9
+    ):
+        point_relative_error = jp.abs(point_rms - target) / target
+        if bool(point_relative_error < best_relative_error):
+            best_index = index
+            best_relative_error = point_relative_error
+    if not bool(best_relative_error <= _FUNCTIONAL_RMS_RELATIVE_TOLERANCE):
         raise ValueError("exact action RMS calibration did not converge")
+
+    scale, _ = evaluated_points[best_index]
+    candidate_params, action_delta, output_rms = _candidate_actor_delta(
+        actor_apply,
+        params,
+        direction,
+        observations,
+        baseline_outputs,
+        scale,
+    )
     return candidate_params, FunctionalActorStepSummary(
         scale=scale,
         linearized_rms=jp.sqrt(jp.mean(jp.square(scale * output_tangent))),

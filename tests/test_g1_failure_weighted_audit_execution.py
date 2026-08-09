@@ -323,6 +323,65 @@ class FailureWeightedExecutionTest(unittest.TestCase):
                 )
                 np.testing.assert_array_equal(candidate.untouched, state.untouched)
 
+    def test_rejects_tampered_functional_step_summary(self):
+        from src.algorithms.shac.g1_failure_weighted_audit import (
+            build_failure_weighted_candidates,
+        )
+        from src.algorithms.shac.g1_failure_weighted_audit_execution import (
+            _candidate_reconstruction,
+        )
+
+        actor_params = {
+            "w": jnp.asarray([[1.0], [0.5]], dtype=jnp.float64)
+        }
+        aggregation = SimpleNamespace(
+            uniform_mean={
+                "w": jnp.asarray([[0.5], [0.25]], dtype=jnp.float64)
+            },
+            tail_mean={
+                "w": jnp.asarray([[0.25], [0.75]], dtype=jnp.float64)
+            },
+            normalized_observations=jnp.asarray(
+                [[1.0, 0.5]], dtype=jnp.float64
+            ),
+        )
+        actor_apply = lambda params, observations: observations @ params["w"]
+        candidates = build_failure_weighted_candidates(
+            actor_apply=actor_apply,
+            actor_params=actor_params,
+            uniform_gradient=aggregation.uniform_mean,
+            tail_gradient=aggregation.tail_mean,
+            normalized_observations=aggregation.normalized_observations,
+            target_rms=0.01,
+        )
+        tampered_steps = {
+            **candidates.functional_steps,
+            "uniform": {
+                **candidates.functional_steps["uniform"],
+                "output_rms": candidates.functional_steps["uniform"][
+                    "output_rms"
+                ]
+                + 1.0,
+            },
+        }
+        tampered_candidates = SimpleNamespace(
+            baseline=candidates.baseline,
+            uniform=candidates.uniform,
+            tail=candidates.tail,
+            functional_steps=tampered_steps,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "uniform functional step summary.*exactly"
+        ):
+            _candidate_reconstruction(
+                actor_apply=actor_apply,
+                actor_params=actor_params,
+                aggregation=aggregation,
+                candidates=tampered_candidates,
+                target_rms=0.01,
+            )
+
     def test_refuses_to_overwrite_completed_manifest_before_preparation(self):
         from src.algorithms.shac.g1_failure_weighted_audit_execution import run_audit
 

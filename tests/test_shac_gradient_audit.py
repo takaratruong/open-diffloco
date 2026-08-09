@@ -15,6 +15,44 @@ from src.algorithms.shac.gradient_audit import (
 )
 
 
+def legacy_functional_actor_step(
+    actor_apply, params, direction, observations, *, target_rms
+):
+    """Reproduce the pre-bracketing calibration for bit-exact regressions."""
+    baseline_outputs = actor_apply(params, observations)
+    _, output_tangent = jax.jvp(
+        lambda value: actor_apply(value, observations),
+        (params,),
+        (direction,),
+    )
+    direction_rms = jnp.sqrt(jnp.mean(jnp.square(output_tangent)))
+    target = jnp.asarray(target_rms, dtype=direction_rms.dtype)
+    scale = target / direction_rms
+    evaluated = []
+
+    def evaluate(candidate_scale):
+        candidate = jax.tree_util.tree_map(
+            lambda value, delta: value + candidate_scale * delta,
+            params,
+            direction,
+        )
+        action_delta = actor_apply(candidate, observations) - baseline_outputs
+        output_rms = jnp.sqrt(jnp.mean(jnp.square(action_delta)))
+        evaluated.append((candidate_scale, output_rms))
+        return candidate, action_delta, output_rms
+
+    for _ in range(8):
+        _, _, output_rms = evaluate(scale)
+        scale = scale * target / output_rms
+    candidate, action_delta, output_rms = evaluate(scale)
+    return candidate, {
+        "scale": scale,
+        "linearized_rms": jnp.sqrt(jnp.mean(jnp.square(scale * output_tangent))),
+        "output_rms": output_rms,
+        "max_action_change": jnp.max(jnp.abs(action_delta)),
+    }, evaluated
+
+
 class DiscountedReturnToGoTest(unittest.TestCase):
     def test_accumulates_normal_transitions_to_fragment_end(self):
         returns = discounted_return_to_go(
@@ -334,6 +372,162 @@ class PyTreeOrderAndFunctionalScalingTest(unittest.TestCase):
         np.testing.assert_array_equal(summary.output_rms, jnp.abs(exact_delta[0, 0]))
         self.assertGreater(float(relative_error), 2e-5)
         self.assertLessEqual(float(relative_error), 5e-5)
+
+    def test_bracketed_bisection_selects_passing_global_best_when_final_correction_fails(
+        self,
+    ):
+        params = {"p": jnp.array(0.01, dtype=jnp.float32)}
+        direction = {"p": jnp.array(1.0, dtype=jnp.float32)}
+
+        def actor_apply(value, observations):
+            del observations
+            return jnp.reshape(jnp.square(value["p"]), (1, 1))
+
+        legacy_candidate, legacy_summary, legacy_evaluated = (
+            legacy_functional_actor_step(
+                actor_apply,
+                params,
+                direction,
+                jnp.zeros((1, 1), dtype=jnp.float32),
+                target_rms=0.01,
+            )
+        )
+        del legacy_candidate
+        legacy_relative_error = (
+            jnp.abs(legacy_summary["output_rms"] - 0.01) / 0.01
+        )
+        self.assertEqual(len(legacy_evaluated), 9)
+        self.assertGreater(float(legacy_relative_error), 5e-5)
+
+        candidate, summary = apply_functional_actor_step(
+            actor_apply,
+            params,
+            direction,
+            jnp.zeros((1, 1), dtype=jnp.float32),
+            target_rms=0.01,
+        )
+
+        relative_error = jnp.abs(summary.output_rms - 0.01) / 0.01
+        self.assertLessEqual(float(relative_error), 5e-5)
+        exact_rms = jnp.sqrt(
+            jnp.mean(jnp.square(actor_apply(candidate, None) - actor_apply(params, None)))
+        )
+        np.testing.assert_array_equal(summary.output_rms, exact_rms)
+
+    def test_fails_when_corrections_do_not_form_an_under_over_bracket(self):
+        params = {"p": jnp.array(0.0, dtype=jnp.float32)}
+        direction = {"p": jnp.array(1.0, dtype=jnp.float32)}
+
+        def actor_apply(value, observations):
+            del observations
+            return jnp.reshape(jnp.clip(value["p"], -0.001, 0.001), (1, 1))
+
+        with self.assertRaisesRegex(ValueError, "under/over bracket"):
+            apply_functional_actor_step(
+                actor_apply,
+                params,
+                direction,
+                jnp.zeros((1, 1), dtype=jnp.float32),
+                target_rms=0.01,
+            )
+
+    def test_bracketed_calibration_is_deterministic_and_dtype_exact(self):
+        params = {"p": jnp.array(0.01, dtype=jnp.float32)}
+        direction = {"p": jnp.array(1.0, dtype=jnp.float32)}
+        observations = jnp.zeros((1, 1), dtype=jnp.float32)
+
+        def actor_apply(value, observations):
+            del observations
+            return jnp.reshape(jnp.square(value["p"]), (1, 1))
+
+        first_candidate, first_summary = apply_functional_actor_step(
+            actor_apply, params, direction, observations, target_rms=0.01
+        )
+        second_candidate, second_summary = apply_functional_actor_step(
+            actor_apply, params, direction, observations, target_rms=0.01
+        )
+
+        np.testing.assert_array_equal(first_candidate["p"], second_candidate["p"])
+        self.assertEqual(first_candidate["p"].dtype, params["p"].dtype)
+        self.assertEqual(first_summary.scale.dtype, jnp.dtype(jnp.float32))
+        for first, second in zip(first_summary, second_summary, strict=True):
+            np.testing.assert_array_equal(first, second)
+
+    def test_passing_legacy_final_point_remains_bit_exact(self):
+        params = {"p": jnp.array(1.0, dtype=jnp.float32)}
+        direction = {"p": jnp.array(1.0, dtype=jnp.float32)}
+        observations = jnp.zeros((1, 1), dtype=jnp.float32)
+
+        def actor_apply(value, observations):
+            del observations
+            return jnp.reshape(jnp.square(value["p"]), (1, 1))
+
+        expected_candidate, expected_summary, _ = legacy_functional_actor_step(
+            actor_apply,
+            params,
+            direction,
+            observations,
+            target_rms=0.01,
+        )
+        candidate, summary = apply_functional_actor_step(
+            actor_apply,
+            params,
+            direction,
+            observations,
+            target_rms=0.01,
+        )
+
+        np.testing.assert_array_equal(candidate["p"], expected_candidate["p"])
+        for field, expected in expected_summary.items():
+            np.testing.assert_array_equal(getattr(summary, field), expected)
+
+    def test_earlier_passing_legacy_global_best_is_selected_when_final_fails(self):
+        params = {"p": jnp.array(1.9999312162399292, dtype=jnp.float32)}
+        direction = {"p": jnp.array(1.0, dtype=jnp.float32)}
+        observations = jnp.zeros((1, 1), dtype=jnp.float32)
+
+        def actor_apply(value, observations):
+            del observations
+            return jnp.reshape(jnp.square(value["p"]), (1, 1))
+
+        _, _, legacy_evaluated = legacy_functional_actor_step(
+            actor_apply,
+            params,
+            direction,
+            observations,
+            target_rms=0.01,
+        )
+        target = jnp.asarray(0.01, dtype=jnp.float32)
+        relative_errors = [
+            jnp.abs(output_rms - target) / target
+            for _, output_rms in legacy_evaluated
+        ]
+        best_index = min(
+            range(len(relative_errors)), key=lambda index: float(relative_errors[index])
+        )
+        self.assertLess(best_index, len(legacy_evaluated) - 1)
+        self.assertLessEqual(float(relative_errors[best_index]), 5e-5)
+        self.assertGreater(float(relative_errors[-1]), 5e-5)
+
+        candidate, summary = apply_functional_actor_step(
+            actor_apply,
+            params,
+            direction,
+            observations,
+            target_rms=0.01,
+        )
+        expected_scale = legacy_evaluated[best_index][0]
+        expected_candidate = jax.tree_util.tree_map(
+            lambda value, delta: value + expected_scale * delta,
+            params,
+            direction,
+        )
+
+        np.testing.assert_array_equal(summary.scale, expected_scale)
+        np.testing.assert_array_equal(candidate["p"], expected_candidate["p"])
+        np.testing.assert_array_equal(
+            summary.output_rms, legacy_evaluated[best_index][1]
+        )
 
     def test_rejects_nonfinite_actor_unused_direction_leaf(self):
         params = {"used": jnp.array(1.0), "unused": jnp.array(0.0)}

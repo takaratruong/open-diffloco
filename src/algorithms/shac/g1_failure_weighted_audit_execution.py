@@ -173,7 +173,7 @@ def _candidate_reconstruction(
                 f"{label} aggregate dtype/tree differs from actor parameters"
             )
         direction = jax.tree_util.tree_map(lambda leaf: -leaf, gradient)
-        reconstructed, _summary = apply_functional_actor_step(
+        reconstructed, summary = apply_functional_actor_step(
             actor_apply,
             actor_params,
             direction,
@@ -182,6 +182,11 @@ def _candidate_reconstruction(
         )
         candidate = getattr(candidates, label)
         _assert_exact_tree(candidate, reconstructed, label=f"{label} candidate")
+        _assert_exact_tree(
+            to_finite_json(summary),
+            candidates.functional_steps[label],
+            label=f"{label} functional step summary",
+        )
         if _tree_signature(candidate) != baseline_signature:
             raise ValueError(f"{label} candidate dtype/tree differs from baseline")
         hashes[label] = stable_pytree_sha256(candidate)
