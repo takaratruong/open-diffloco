@@ -7,9 +7,11 @@ whether a full forward-mode SHAC experiment is warranted.
 
 from __future__ import annotations
 
+import resource
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 import jax
@@ -30,6 +32,9 @@ _FINITE_DIFFERENCE_EPSILON = 0.001
 _CANONICAL_SHARD_SEED = 0
 _CANONICAL_PHASE_BIN = 0
 _CANONICAL_DIRECTION_SEED = 12001
+_MINIMUM_DEVICE_HEADROOM_BYTES = 2 * 1024**3
+_MAXIMUM_PROJECTED_TWENTY_CASE_SECONDS = 3600.0
+_FORBIDDEN_EXPERIMENT = "E-20260809-012"
 
 
 @dataclass(frozen=True)
@@ -335,3 +340,297 @@ def run_compiled_case_smoke(compiled: CompiledCaseSmoke) -> CaseSmokeReceipt:
         execution_valid=True,
         case_outcome=_case_outcome(comparison),
     )
+
+
+def _validate_operational_output(output_dir: Path) -> Path:
+    output_dir = Path(output_dir).resolve()
+    for candidate in (output_dir, *output_dir.parents):
+        if (
+            candidate.name == _FORBIDDEN_EXPERIMENT
+            and candidate.parent.name == "runs"
+        ):
+            raise ValueError(
+                "the operational smoke must not write within runs/E-20260809-012"
+            )
+    receipt_path = output_dir / "smoke_receipt.json"
+    if receipt_path.exists():
+        raise FileExistsError("smoke receipt already exists; refusing to overwrite it")
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError("smoke output directory must be empty")
+    return receipt_path
+
+
+def _select_bin_zero(losses: Any, phases: Any) -> dict[str, Any]:
+    losses_array = np.asarray(jax.device_get(losses))
+    phases_array = np.asarray(jax.device_get(phases))
+    if losses_array.shape != (64,) or phases_array.shape != (64,):
+        raise ValueError("authoritative shard-0 losses and phases must have shape (64,)")
+    if not np.issubdtype(losses_array.dtype, np.floating):
+        raise TypeError("authoritative shard-0 losses must have floating dtype")
+    if not np.isfinite(losses_array).all():
+        raise ValueError("authoritative shard-0 losses must be finite")
+    if not np.issubdtype(phases_array.dtype, np.integer):
+        raise TypeError("authoritative shard-0 phases must have integer dtype")
+    eligible = np.flatnonzero((phases_array >= 0) & (phases_array < 100))
+    if eligible.size == 0:
+        raise ValueError("authoritative shard 0 has no phase-bin-0 fragment")
+    # np.argmax is stable: an exact loss tie selects the lower environment index.
+    environment_index = int(eligible[int(np.argmax(losses_array[eligible]))])
+    return {
+        "shard_seed": _CANONICAL_SHARD_SEED,
+        "phase_bin": _CANONICAL_PHASE_BIN,
+        "environment_index": environment_index,
+        "initial_phase": int(phases_array[environment_index]),
+        "loss": float(losses_array[environment_index]),
+    }
+
+
+def _default_memory_snapshot() -> dict[str, Any]:
+    """Return best-effort allocator telemetry without making it a dependency."""
+
+    try:
+        device = jax.devices()[0]
+        stats = device.memory_stats()
+    except (AttributeError, IndexError, RuntimeError, TypeError) as error:
+        return {"available": False, "reason": type(error).__name__}
+    if not isinstance(stats, Mapping):
+        return {"available": False, "reason": "allocator-stats-unavailable"}
+    normalized = {}
+    for key in ("bytes_in_use", "peak_bytes_in_use", "bytes_limit"):
+        value = stats.get(key)
+        if isinstance(value, (int, np.integer)):
+            normalized[key] = int(value)
+    available = "peak_bytes_in_use" in normalized and "bytes_limit" in normalized
+    return {
+        "available": available,
+        "device": str(device),
+        **normalized,
+        **({} if available else {"reason": "required-counters-unavailable"}),
+    }
+
+
+def _default_source_hashes(e011_run_dir: Path) -> dict[str, str]:
+    from tools.audit_g1_shac_gradient_quality import sha256_file
+
+    relative_paths = (
+        Path("experiment.yaml"),
+        Path("run.json"),
+        Path("seed-1/evidence/manifest.json"),
+        Path("seed-1/evidence/outcome.json"),
+        Path("seed-1/evidence/validity.json"),
+        Path("seed-1/evidence/failure_weight_receipts.json"),
+        Path("seed-1/evidence/estimator_receipts.json"),
+    )
+    return {
+        path.as_posix(): sha256_file(Path(e011_run_dir) / path)
+        for path in relative_paths
+    }
+
+
+def _memory_gate(snapshots: list[dict[str, Any]]) -> tuple[bool, int | None]:
+    available = [snapshot for snapshot in snapshots if snapshot.get("available")]
+    if not available:
+        # Completion without an allocator/OOM failure is the documented fallback.
+        return True, None
+    headroom = min(
+        int(snapshot["bytes_limit"]) - int(snapshot["peak_bytes_in_use"])
+        for snapshot in available
+    )
+    return headroom >= _MINIMUM_DEVICE_HEADROOM_BYTES, headroom
+
+
+def run_one_case_smoke(
+    contract: Any,
+    e011_run_dir: Path,
+    *,
+    load_source_receipts_impl: Callable[[Path], Any] | None = None,
+    prepare_e064_execution_impl: Callable[[Any], Any] | None = None,
+    make_action_noise_impl: Callable[[int], Any] | None = None,
+    compile_case_kernels_impl: Callable[[Any], CompiledCaseSmoke] | None = None,
+    run_compiled_case_smoke_impl: Callable[[CompiledCaseSmoke], Any] | None = None,
+    memory_snapshot_impl: Callable[[], dict[str, Any]] | None = None,
+    source_hashes_impl: Callable[[Path], Mapping[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Replay E011 shard 0 and publish the only permitted operational smoke."""
+
+    from src.algorithms.shac.g1_gradient_audit_runner import to_finite_json
+    from tools.audit_g1_shac_gradient_quality import write_json_atomically
+
+    total_started = time.perf_counter()
+    receipt_path = _validate_operational_output(Path(contract.output_dir))
+    memory_snapshot = memory_snapshot_impl or _default_memory_snapshot
+    memory_snapshots = [{"boundary": "start", **memory_snapshot()}]
+
+    if load_source_receipts_impl is None:
+        from src.algorithms.shac.g1_tail_contact_derivative_source import (
+            load_e011_source_receipts,
+        )
+
+        load_source_receipts_impl = load_e011_source_receipts
+    source_started = time.perf_counter()
+    source = load_source_receipts_impl(Path(e011_run_dir))
+    source_load_duration = time.perf_counter() - source_started
+
+    if prepare_e064_execution_impl is None:
+        from src.algorithms.shac.g1_gradient_audit_execution import (
+            _prepare_e064_execution,
+        )
+
+        prepare_e064_execution_impl = _prepare_e064_execution
+    preparation_started = time.perf_counter()
+    prepared = prepare_e064_execution_impl(contract)
+    preparation_duration = time.perf_counter() - preparation_started
+    memory_snapshots.append({"boundary": "after-e064-preparation", **memory_snapshot()})
+
+    if make_action_noise_impl is None:
+        from src.algorithms.shac.g1_gradient_audit_execution import (
+            make_frozen_action_noise,
+        )
+
+        make_action_noise_impl = make_frozen_action_noise
+    action_noise = make_action_noise_impl(_CANONICAL_SHARD_SEED)
+    shard_started = time.perf_counter()
+    with prepared.gradient_solver_context():
+        evidence = prepared.estimate_shard(_CANONICAL_SHARD_SEED)
+    jax.block_until_ready(
+        (evidence.result.losses, evidence.result.trajectory.initial_phase)
+    )
+    shard_duration = time.perf_counter() - shard_started
+    memory_snapshots.append({"boundary": "after-shard-zero", **memory_snapshot()})
+
+    actual_pathwise = to_finite_json(dict(evidence.pathwise_receipt))
+    actual_score = to_finite_json(dict(evidence.score_receipt))
+    expected_estimators = to_finite_json(
+        dict(source.estimator_receipts["per_shard"]["0"]["pathwise"])
+    )
+    if actual_pathwise != actual_score:
+        raise ValueError("shard-0 pathwise and score estimator receipts differ")
+    if actual_pathwise != expected_estimators:
+        raise ValueError("shard-0 estimator receipt differs from the E011 source")
+
+    source_losses = np.asarray(source.losses_by_shard[0], dtype=np.float64)
+    source_phases = np.asarray(source.initial_phases_by_shard[0])
+    actual_losses = np.asarray(jax.device_get(evidence.result.losses))
+    actual_phases = np.asarray(jax.device_get(evidence.result.trajectory.initial_phase))
+    losses_exact = bool(np.array_equal(actual_losses, source_losses))
+    phases_exact = bool(np.array_equal(actual_phases, source_phases))
+    if not losses_exact:
+        raise ValueError("shard-0 losses differ from the E011 source")
+    if not phases_exact:
+        raise ValueError("shard-0 initial phases differ from the E011 source")
+    source_case = _select_bin_zero(source_losses, source_phases)
+    actual_case = _select_bin_zero(actual_losses, actual_phases)
+    selection_exact = source_case == actual_case
+    if not selection_exact:
+        raise ValueError("shard-0 bin-0 rank-zero selection differs from E011")
+
+    compile_impl = compile_case_kernels_impl or compile_case_kernels
+    run_impl = run_compiled_case_smoke_impl or run_compiled_case_smoke
+    with prepared.gradient_solver_context():
+        objective_started = time.perf_counter()
+        diagnostic = prepared.prepare_first_action_objective(
+            action_noise,
+            actual_case["environment_index"],
+            expected_shared_trajectory=evidence.result.trajectory,
+        )
+        jax.block_until_ready(
+            (diagnostic.nominal_first_action, diagnostic.nominal_objective)
+        )
+        objective_duration = time.perf_counter() - objective_started
+        compiled = compile_impl(diagnostic)
+        numerical = run_impl(compiled)
+    memory_snapshots.append({"boundary": "after-derivatives", **memory_snapshot()})
+
+    cached_case_duration = float(
+        shard_duration
+        + objective_duration
+        + numerical.reverse_cached_duration_seconds
+        + np.sum(numerical.forward_cached_sweep_durations_seconds)
+        + np.sum(numerical.probe_durations_seconds)
+    )
+    total_elapsed = time.perf_counter() - total_started
+    projected_twenty_case_seconds = float(total_elapsed + 19 * cached_case_duration)
+    memory_valid, minimum_headroom = _memory_gate(memory_snapshots)
+    projection_valid = (
+        projected_twenty_case_seconds <= _MAXIMUM_PROJECTED_TWENTY_CASE_SECONDS
+    )
+    authoritative_binding = {
+        "estimator_receipts_exact": True,
+        "losses_exact": losses_exact,
+        "initial_phases_exact": phases_exact,
+        "selected_case_exact": selection_exact,
+        "all_exact": bool(losses_exact and phases_exact and selection_exact),
+    }
+    decision_gates = {
+        "authoritative_binding": authoritative_binding["all_exact"],
+        "forward_valid": bool(numerical.comparison.forward_valid),
+        "probes_preserve_done_and_support": bool(
+            numerical.probes_preserve_done_and_support
+        ),
+        "execution_valid": bool(numerical.execution_valid),
+        "projection_within_one_hour": projection_valid,
+        "memory_headroom_valid": memory_valid,
+    }
+    decision = (
+        "authorize-forward-shac-method"
+        if all(decision_gates.values())
+        else "abandon-forward-shac-mechanism"
+    )
+    hashes = (source_hashes_impl or _default_source_hashes)(Path(e011_run_dir))
+    receipt = to_finite_json(
+        {
+            "schema": "g1-tail-contact-one-case-smoke-v1",
+            "decision": decision,
+            "decision_gates": decision_gates,
+            "authoritative_binding": authoritative_binding,
+            "selected_case": actual_case,
+            "source_selected_case": source_case,
+            "source": {
+                "e011_run_dir": str(Path(e011_run_dir).resolve()),
+                "e011_evidence_dir": str(source.evidence_dir),
+                "e011_verdict": source.outcome["verdict"],
+                "file_sha256": dict(hashes),
+                "checkpoint": str(getattr(contract, "checkpoint", "")),
+                "checkpoint_sha256": getattr(contract, "checkpoint_sha256", ""),
+                "reference": str(getattr(contract, "reference", "")),
+                "reference_sha256": getattr(contract, "reference_sha256", ""),
+            },
+            "runtime_provenance": dict(prepared.runtime_provenance),
+            "external_inputs": dict(prepared.external_inputs),
+            "numerical": numerical,
+            "timings_seconds": {
+                "source_receipt_load": source_load_duration,
+                "e064_preparation": preparation_duration,
+                "shard_estimator": shard_duration,
+                "first_action_objective_preparation": objective_duration,
+                "reverse_compile": numerical.reverse_compile_duration_seconds,
+                "forward_compile": numerical.forward_compile_duration_seconds,
+                "reverse_cached": numerical.reverse_cached_duration_seconds,
+                "forward_cached_sweeps": numerical.forward_cached_sweep_durations_seconds,
+                "probes": numerical.probe_durations_seconds,
+                "cached_case": cached_case_duration,
+                "total_smoke_elapsed": total_elapsed,
+                "projected_twenty_case": projected_twenty_case_seconds,
+                "projection_formula": "total_smoke_elapsed + 19 * cached_case",
+            },
+            "resources": {
+                "host_ru_maxrss": int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss),
+                "host_ru_maxrss_units": "KiB-on-Linux",
+                "device_memory_snapshots": memory_snapshots,
+                "minimum_headroom_bytes": minimum_headroom,
+                "headroom_rule_bytes": _MINIMUM_DEVICE_HEADROOM_BYTES,
+                "unavailable_allocator_rule": "valid only when the live process completes without allocator/OOM failure",
+            },
+            "fixed_thresholds": {
+                "finite_difference_epsilon": _FINITE_DIFFERENCE_EPSILON,
+                "forward_repeat_maximum_absolute_error": 1e-6,
+                "projected_twenty_case_maximum_seconds": _MAXIMUM_PROJECTED_TWENTY_CASE_SECONDS,
+                "minimum_device_headroom_bytes": _MINIMUM_DEVICE_HEADROOM_BYTES,
+            },
+            "reverse_mode_role": "telemetry-only",
+            "no_training_update": True,
+            "e012_artifacts_written": False,
+        }
+    )
+    write_json_atomically(receipt_path, receipt)
+    return receipt
