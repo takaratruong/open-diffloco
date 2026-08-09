@@ -18,7 +18,7 @@ class DiscountedReturnToGoTest(unittest.TestCase):
             gamma=0.5,
         )
 
-        np.testing.assert_array_equal(returns, jnp.array([2.75, 3.5, 3.0]))
+        np.testing.assert_array_equal(returns, jnp.array([2.75, 1.75, 0.75]))
 
     def test_done_cuts_off_future_episode_rewards(self):
         returns = discounted_return_to_go(
@@ -27,7 +27,7 @@ class DiscountedReturnToGoTest(unittest.TestCase):
             gamma=0.5,
         )
 
-        np.testing.assert_array_equal(returns, jnp.array([2.0, 2.0, 102.0, 4.0]))
+        np.testing.assert_array_equal(returns, jnp.array([2.0, 1.0, 102.0, 2.0]))
 
     def test_final_terminal_keeps_its_immediate_reward(self):
         returns = discounted_return_to_go(
@@ -36,7 +36,7 @@ class DiscountedReturnToGoTest(unittest.TestCase):
             gamma=0.99,
         )
 
-        np.testing.assert_array_equal(returns, jnp.array([7.93, 7.0]))
+        np.testing.assert_array_equal(returns, jnp.array([7.93, 6.93]))
 
 
 class DetachedGaussianScoreLossTest(unittest.TestCase):
@@ -77,6 +77,19 @@ class DetachedGaussianScoreLossTest(unittest.TestCase):
 
         np.testing.assert_array_equal(detached_gradient, jnp.array([[-4.0]]))
         np.testing.assert_array_equal(attached_gradient, jnp.zeros_like(mean))
+
+    def test_return_coefficients_are_detached(self):
+        mean = jnp.array([[0.25], [0.75]])
+        actions = jnp.array([[0.75], [0.25]])
+        returns = jnp.array([2.0, -3.0])
+
+        gradient = jax.grad(
+            lambda value: detached_gaussian_score_loss(
+                mean, actions, value, std=0.5
+            )
+        )(returns)
+
+        np.testing.assert_array_equal(gradient, jnp.zeros_like(returns))
 
     def test_ratio_one_ppo_clipped_surrogate_gradient_equals_score_loss(self):
         mean = jnp.array([[-0.25], [0.75]])

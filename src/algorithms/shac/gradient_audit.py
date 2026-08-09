@@ -10,22 +10,36 @@ def discounted_return_to_go(
     *,
     gamma: float,
 ) -> jax.Array:
-    """Returns discounted rewards through each episode boundary.
+    """Returns actor-loss score coefficients through episode boundaries.
 
     ``dones[t]`` marks that transition ``t`` as terminal, so its immediate
     reward remains in the return while rewards from later transitions do not.
+    Each reward retains the outer discount accumulated from the start of its
+    episode, matching the production actor loss; that discount resets after a
+    done transition.
     The leading axis is time; all remaining axes are independent trajectories.
     """
 
+    def advance_discount(discount, done):
+        next_discount = jp.where(done, 1.0, discount * gamma)
+        return next_discount, discount
+
+    _, outer_discounts = jax.lax.scan(
+        advance_discount,
+        jp.ones_like(rewards[0]),
+        dones,
+    )
+    discounted_rewards = outer_discounts * rewards
+
     def accumulate(next_return, transition):
         reward, done = transition
-        current_return = reward + gamma * jp.where(done, 0.0, next_return)
+        current_return = reward + jp.where(done, 0.0, next_return)
         return current_return, current_return
 
     _, reversed_returns = jax.lax.scan(
         accumulate,
         jp.zeros_like(rewards[0]),
-        (jp.flip(rewards, axis=0), jp.flip(dones, axis=0)),
+        (jp.flip(discounted_rewards, axis=0), jp.flip(dones, axis=0)),
     )
     return jp.flip(reversed_returns, axis=0)
 
