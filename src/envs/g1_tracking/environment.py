@@ -16,6 +16,10 @@ from src.envs.g1_tracking.reference import (
     RMR_G1_BODY_NAMES,
     load_mujoco_reference,
 )
+from src.envs.g1_tracking.randomization import (
+    G1RandomizationRanges,
+    sample_g1_randomization,
+)
 from src.envs.g1_tracking.reward import (
     quaternion_error_magnitude,
     rmr_regularization_reward,
@@ -130,7 +134,12 @@ class G1TrackingEnv:
         physics_timestep: float | None = None,
         solver_iterations: int = 1,
         solver_ls_iterations: int = 5,
+        domain_randomization: bool = False,
+        friction_range: tuple[float, float] = (1.0, 1.0),
         mass_range: tuple[float, float] = (1.0, 1.0),
+        kp_range: tuple[float, float] = (35.0, 35.0),
+        kd_range: tuple[float, float] = (0.5, 0.5),
+        com_offset_range: tuple[float, float, float] = (0.0, 0.0, 0.0),
         effort_limit_scale: float = 1.0,
         termination_margin_weight: float = 0.0,
         reference_reset_noise_scale: float = 0.0,
@@ -237,17 +246,50 @@ class G1TrackingEnv:
         self.carried_reset_qpos = None
         self.carried_reset_qvel = None
         self.carried_reset_phase = None
-        mass_values = np.asarray(mass_range, dtype=np.float64)
+        if not isinstance(domain_randomization, bool):
+            raise ValueError("domain_randomization must be boolean")
+        self.domain_randomization = domain_randomization
+
+        def positive_pair(name, values):
+            array = np.asarray(values, dtype=np.float64)
+            if (
+                array.shape != (2,)
+                or not np.isfinite(array).all()
+                or np.any(array <= 0.0)
+                or array[0] > array[1]
+            ):
+                raise ValueError(
+                    f"{name} must be an ordered pair of positive finite values"
+                )
+            return array
+
+        friction_values = positive_pair("friction_range", friction_range)
+        mass_values = positive_pair("mass_range", mass_range)
+        kp_values = positive_pair("kp_range", kp_range)
+        kd_values = positive_pair("kd_range", kd_range)
+        com_values = np.asarray(com_offset_range, dtype=np.float64)
         if (
-            mass_values.shape != (2,)
-            or not np.isfinite(mass_values).all()
-            or np.any(mass_values <= 0.0)
-            or mass_values[0] != mass_values[1]
+            com_values.shape != (3,)
+            or not np.isfinite(com_values).all()
+            or np.any(com_values < 0.0)
         ):
             raise ValueError(
-                "mass_range must be an equal pair of positive finite scales"
+                "com_offset_range must contain three non-negative finite values"
             )
-        self.body_mass_scale = float(mass_values[0])
+        if not self.domain_randomization and mass_values[0] != mass_values[1]:
+            raise ValueError(
+                "mass_range must be equal when domain_randomization is disabled"
+            )
+        self.body_mass_scale = (
+            1.0 if self.domain_randomization else float(mass_values[0])
+        )
+        self.randomization_ranges = G1RandomizationRanges(
+            friction=tuple(float(value) for value in friction_values),
+            mass=tuple(float(value) for value in mass_values),
+            kp_scale=tuple(float(value / 35.0) for value in kp_values),
+            kd_scale=tuple(float(value / 0.5) for value in kd_values),
+            com_offset=tuple(float(value) for value in com_values),
+        )
 
         self.xml_path = str(Path(xml_path))
         self.reference_path = str(Path(reference_path))
@@ -270,6 +312,10 @@ class G1TrackingEnv:
         self.mj_model.body_mass[1:] *= self.body_mass_scale
         self.mj_model.body_inertia[1:] *= self.body_mass_scale
         self.mjx_model = mjx.put_model(self.mj_model)
+        self.base_friction = self.mjx_model.geom_friction
+        self.base_mass = self.mjx_model.body_mass
+        self.base_inertia = self.mjx_model.body_inertia
+        self.base_ipos = self.mjx_model.body_ipos
 
         self.controller = load_rmr_controller(
             self.mj_model, self.controller_path
@@ -283,6 +329,7 @@ class G1TrackingEnv:
         self.reference_length = self.reference.qpos.shape[0]
         self.body_ids = tuple(self.reference.body_ids)
         self.anchor_body_id = self.body_ids[0]
+        self.pelvis_body_id = self.anchor_body_id
         self.distal_body_slots = (3, 6, 10, 13)
 
         self.qpos_reference = jp.asarray(self.reference.qpos)
@@ -596,7 +643,10 @@ class G1TrackingEnv:
         rng: jax.Array,
         phase: jax.Array,
         difficulty: jax.Array,
+        randomization: dict[str, jax.Array] | None = None,
     ) -> dict:
+        if randomization is None:
+            randomization = self._nominal_randomization()
         return {
             "step": jp.array(0, dtype=jp.int32),
             "phase": phase.astype(jp.int32),
@@ -606,7 +656,56 @@ class G1TrackingEnv:
             "foot_bump_ou": jp.zeros((4, 3)),
             "foot_normal_forces": jp.zeros(4),
             "terminal": jp.array(0.0),
+            **randomization,
         }
+
+    @staticmethod
+    def _nominal_randomization() -> dict[str, jax.Array]:
+        return {
+            "friction_scale": jp.array(1.0),
+            "mass_scale": jp.array(1.0),
+            "kp_scale": jp.array(1.0),
+            "kd_scale": jp.array(1.0),
+            "com_offset": jp.zeros(3),
+        }
+
+    def _sample_randomization(
+        self,
+        key: jax.Array,
+        difficulty: jax.Array,
+    ) -> dict[str, jax.Array]:
+        if not self.domain_randomization:
+            return self._nominal_randomization()
+        return sample_g1_randomization(
+            key,
+            difficulty,
+            self.randomization_ranges,
+        )
+
+    def _get_randomized_model(self, info: dict):
+        """Materialize one environment's MJX model from carried parameters."""
+        if not self.domain_randomization:
+            return self.mjx_model
+        body_ipos = self.base_ipos.at[self.pelvis_body_id].add(
+            info["com_offset"]
+        )
+        return self.mjx_model.replace(
+            geom_friction=self.base_friction * info["friction_scale"],
+            body_mass=self.base_mass * info["mass_scale"],
+            body_inertia=self.base_inertia * info["mass_scale"],
+            body_ipos=body_ipos,
+        )
+
+    def _data_from_state(
+        self,
+        *,
+        qpos: jax.Array,
+        qvel: jax.Array,
+        randomization: dict[str, jax.Array],
+    ) -> mjx.Data:
+        model = self._get_randomized_model(randomization)
+        data = mjx.make_data(model).replace(qpos=qpos, qvel=qvel)
+        return mjx.forward(model, data)
 
     def _init_metrics(self) -> dict:
         zero = jp.float32(0.0)
@@ -657,8 +756,14 @@ class G1TrackingEnv:
         rng: jax.Array,
         difficulty: jax.Array,
         phase: jax.Array,
+        randomization: dict[str, jax.Array] | None = None,
     ) -> EnvState:
-        info = self._base_info(rng=rng, phase=phase, difficulty=difficulty)
+        info = self._base_info(
+            rng=rng,
+            phase=phase,
+            difficulty=difficulty,
+            randomization=randomization,
+        )
         actor_frame = self._get_actor_obs(data, info)
         actor_history = jp.repeat(
             actor_frame[None, :], self.actor_history_len, axis=0
@@ -702,7 +807,18 @@ class G1TrackingEnv:
 
     def reset(self, rng: jax.Array, difficulty: jax.Array) -> EnvState:
         if self.carried_reset_bank_path is not None:
-            rng, phase_key, bank_key, choice_key = jax.random.split(rng, 4)
+            if self.domain_randomization:
+                rng, phase_key, bank_key, choice_key, randomization_key = (
+                    jax.random.split(rng, 5)
+                )
+                randomization = self._sample_randomization(
+                    randomization_key, difficulty
+                )
+            else:
+                rng, phase_key, bank_key, choice_key = jax.random.split(
+                    rng, 4
+                )
+                randomization = self._nominal_randomization()
             reference_phase = jax.random.randint(
                 phase_key,
                 (),
@@ -735,16 +851,27 @@ class G1TrackingEnv:
                 self.carried_reset_qvel[bank_index],
                 self.qvel_reference[reference_phase],
             )
-            data = mjx.make_data(self.mjx_model).replace(qpos=qpos, qvel=qvel)
-            data = mjx.forward(self.mjx_model, data)
+            data = self._data_from_state(
+                qpos=qpos,
+                qvel=qvel,
+                randomization=randomization,
+            )
             return self._initial_state_from_data(
                 data=data,
                 rng=rng,
                 difficulty=difficulty,
                 phase=phase,
+                randomization=randomization,
             )
         if self.reference_reset_noise_scale == 0.0:
-            rng, phase_key = jax.random.split(rng)
+            if self.domain_randomization:
+                rng, phase_key, randomization_key = jax.random.split(rng, 3)
+                randomization = self._sample_randomization(
+                    randomization_key, difficulty
+                )
+            else:
+                rng, phase_key = jax.random.split(rng)
+                randomization = self._nominal_randomization()
             phase = jax.random.randint(
                 phase_key,
                 (),
@@ -752,11 +879,38 @@ class G1TrackingEnv:
                 maxval=self.reference_length - 2,
                 dtype=jp.int32,
             )
-            return self.reset_at_phase(rng, difficulty, phase)
+            if not self.domain_randomization:
+                return self.reset_at_phase(rng, difficulty, phase)
+            data = self._data_from_state(
+                qpos=self.qpos_reference[phase],
+                qvel=self.qvel_reference[phase],
+                randomization=randomization,
+            )
+            return self._initial_state_from_data(
+                data=data,
+                rng=rng,
+                difficulty=difficulty,
+                phase=phase,
+                randomization=randomization,
+            )
 
-        rng, phase_key, pose_key, velocity_key, joint_key = jax.random.split(
-            rng, 5
-        )
+        if self.domain_randomization:
+            (
+                rng,
+                phase_key,
+                pose_key,
+                velocity_key,
+                joint_key,
+                randomization_key,
+            ) = jax.random.split(rng, 6)
+            randomization = self._sample_randomization(
+                randomization_key, difficulty
+            )
+        else:
+            rng, phase_key, pose_key, velocity_key, joint_key = (
+                jax.random.split(rng, 5)
+            )
+            randomization = self._nominal_randomization()
         phase = jax.random.randint(
             phase_key,
             (),
@@ -799,13 +953,17 @@ class G1TrackingEnv:
         )
         qvel = self.qvel_reference[phase].at[:6].add(velocity_delta)
 
-        data = mjx.make_data(self.mjx_model).replace(qpos=qpos, qvel=qvel)
-        data = mjx.forward(self.mjx_model, data)
+        data = self._data_from_state(
+            qpos=qpos,
+            qvel=qvel,
+            randomization=randomization,
+        )
         return self._initial_state_from_data(
             data=data,
             rng=rng,
             difficulty=difficulty,
             phase=phase,
+            randomization=randomization,
         )
 
     def termination_errors(
@@ -876,18 +1034,21 @@ class G1TrackingEnv:
     def step(self, state: EnvState, action: jax.Array) -> EnvState:
         action = self._prepare_action(action)
         position_target = self.position_target(state, action, prepared=True)
+        model = self._get_randomized_model(state.info)
+        kp = self.kp * state.info["kp_scale"]
+        kd = self.kd * state.info["kd_scale"]
 
         def physics_step(data, _):
             torque = jp.clip(
-                self.kp * (position_target - data.qpos[7:])
-                - self.kd * data.qvel[6:],
+                kp * (position_target - data.qpos[7:])
+                - kd * data.qvel[6:],
                 -self.effort_limit,
                 self.effort_limit,
             )
             applied = jp.zeros(self.mj_model.nv).at[6:].set(torque)
             return (
                 mjx.step(
-                    self.mjx_model,
+                    model,
                     data.replace(qfrc_applied=applied),
                 ),
                 None,

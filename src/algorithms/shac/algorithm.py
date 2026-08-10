@@ -249,6 +249,7 @@ def train(
     terrain_bump_std: float = 0.4,
     terrain_bump_decay: float = 0.4,
     terrain: bool = False,
+    domain_randomization: bool = False,
     # Annealing
     zero_difficulty_frac: float = 0.0,
     curriculum_grace: int = None,
@@ -550,6 +551,7 @@ def train(
                 "reference_reset_noise_scale": reference_reset_noise_scale,
                 "reference_residual_control": reference_residual_control,
                 "reference_residual_scale": reference_residual_scale,
+                "domain_randomization": domain_randomization,
                 "carried_reset_bank_path": carried_reset_bank_path,
                 "carried_reset_probability": carried_reset_probability,
                 "carried_reset_bank_start": carried_reset_bank_start,
@@ -1634,6 +1636,7 @@ def train(
         "terrain_bump_std": terrain_bump_std,
         "terrain_bump_decay": terrain_bump_decay,
         "terrain": terrain,
+        "domain_randomization": domain_randomization,
         "zero_difficulty_frac": zero_difficulty_frac,
         "curriculum_grace": curriculum_grace,
         "curriculum_steps": curriculum_steps,
