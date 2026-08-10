@@ -230,6 +230,18 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
 
         self.assertEqual(args.body_mass_scale, 1.15)
 
+    def test_evaluator_cli_accepts_named_solver_profile(self):
+        args = build_parser().parse_args(
+            [
+                "--output-dir",
+                "/tmp/g1-evaluation",
+                "--solver-profile",
+                "g1-4x5",
+            ]
+        )
+
+        self.assertEqual(args.solver_profile, "g1-4x5")
+
     def test_evaluator_transports_a_fixed_effort_limit_scale(self):
         shifted = make_evaluation_env(
             "g1_tracking_rmr_50hz_validated",

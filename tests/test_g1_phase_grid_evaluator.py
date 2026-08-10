@@ -126,6 +126,9 @@ class G1PhaseGridEvaluatorTest(unittest.TestCase):
             command[command.index("--solver-ls-iterations") + 1], "5"
         )
         self.assertEqual(
+            command[command.index("--solver-profile") + 1], "g1-4x5"
+        )
+        self.assertEqual(
             command[command.index("--actor-history-len") + 1], "10"
         )
         self.assertIn("--reference-residual-control", command)

@@ -1,6 +1,7 @@
 """Paired replay-free evaluation and side-by-side G1/reference video."""
 
 import argparse
+from contextlib import nullcontext
 import math
 import pickle
 from pathlib import Path
@@ -16,6 +17,11 @@ from src.core.networks import Actor
 from src.core.rmr_policy import bound_residual_action
 from src.core.rmr_policy import apply_trainable_rmr_policy
 from src.envs.g1_tracking.environment import G1TrackingEnv
+from src.envs.g1_tracking.solver_profiles import (
+    SOLVER_PROFILES,
+    get_solver_profile,
+    solver_context,
+)
 from src.envs.go2.environment import get_go2_env_class
 from tools.prepare_g1_rmr_reference import sha256_file
 
@@ -273,6 +279,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--residual-action-scale", type=float, default=0.0)
     parser.add_argument("--solver-iterations", type=int)
     parser.add_argument("--solver-ls-iterations", type=int)
+    parser.add_argument(
+        "--solver-profile",
+        choices=tuple(sorted(SOLVER_PROFILES)),
+    )
     parser.add_argument("--body-mass-scale", type=float, default=1.0)
     parser.add_argument("--effort-limit-scale", type=float, default=1.0)
     parser.add_argument("--full-rmr-actor", action="store_true")
@@ -305,6 +315,19 @@ def main() -> None:
         parser.error("--action-gain must be between 0 and 1")
     if args.max_steps is not None and args.max_steps < 1:
         parser.error("--max-steps must be positive")
+    profile = (
+        None
+        if args.solver_profile is None
+        else get_solver_profile(args.solver_profile)
+    )
+    if profile is not None and (
+        args.solver_iterations not in (None, profile.iterations)
+        or args.solver_ls_iterations not in (None, profile.ls_iterations)
+    ):
+        parser.error("solver iteration arguments do not match --solver-profile")
+    if profile is not None:
+        args.solver_iterations = profile.iterations
+        args.solver_ls_iterations = profile.ls_iterations
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     env = make_evaluation_env(
@@ -463,7 +486,11 @@ def main() -> None:
                 actor.apply(actor_params, normalized).astype(jnp.float64),
                 args.action_gain,
             )
-        state = env.step(state, action)
+        step_scope = (
+            nullcontext() if profile is None else solver_context(profile)
+        )
+        with step_scope:
+            state = env.step(state, action)
         next_phase = min(
             phase + env.reference_stride,
             env.reference_length - 1,
@@ -551,6 +578,7 @@ def main() -> None:
         "jax_enable_x64": bool(jax.config.x64_enabled),
         "solver_iterations": int(env.mj_model.opt.iterations),
         "solver_ls_iterations": int(env.mj_model.opt.ls_iterations),
+        "solver_profile": args.solver_profile,
         "body_mass_scale": env.body_mass_scale,
         "effort_limit_scale": env.effort_limit_scale,
         "reference_path": str(reference_path),

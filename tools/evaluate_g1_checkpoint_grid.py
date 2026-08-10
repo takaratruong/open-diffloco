@@ -122,6 +122,7 @@ def build_evaluator_command(
         "--solver-ls-iterations",
         "--actor-history-len",
         "--reference-residual-scale",
+        "--solver-profile",
     ):
         index = command.index(option)
         del command[index : index + 2]

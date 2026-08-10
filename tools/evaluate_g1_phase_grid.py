@@ -123,6 +123,8 @@ def build_evaluator_command(
         str(profile.iterations),
         "--solver-ls-iterations",
         str(profile.ls_iterations),
+        "--solver-profile",
+        solver_profile,
         "--actor-history-len",
         "10",
         "--reference-residual-control",
