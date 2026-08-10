@@ -76,6 +76,23 @@ class CanonicalG1ShacRunnerTest(unittest.TestCase):
             {"solver_profile", "solver_iterations"},
         )
 
+    def test_canonical_kwargs_transport_exact_resume_checkpoint(self):
+        from tools.run_canonical_g1_shac import build_canonical_kwargs
+
+        checkpoint = Path("/tmp/canonical/checkpoint_step_2359296.pkl")
+        resumed = build_canonical_kwargs(
+            "g1-4x5",
+            Path("/tmp/dance.npz"),
+            seed=0,
+            resume_from=checkpoint,
+        )
+        fresh = build_canonical_kwargs(
+            "g1-4x5", Path("/tmp/dance.npz"), seed=0
+        )
+
+        self.assertEqual(resumed["resume_from"], str(checkpoint.resolve()))
+        self.assertNotIn("resume_from", fresh)
+
     def test_parser_rejects_scientific_overrides(self):
         from tools.run_canonical_g1_shac import build_parser
 

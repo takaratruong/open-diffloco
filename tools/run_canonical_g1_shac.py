@@ -21,10 +21,11 @@ def build_canonical_kwargs(
     profile_name: str,
     reference_path: str | Path,
     seed: int,
+    resume_from: str | Path | None = None,
 ) -> dict:
     """Return the complete scientific contract; callers cannot override it."""
     profile = get_solver_profile(profile_name)
-    return {
+    kwargs = {
         "total_steps": 8_000_000,
         "unroll_length": 12,
         "num_envs": 256,
@@ -75,6 +76,9 @@ def build_canonical_kwargs(
         "solver_iterations": profile.iterations,
         "solver_ls_iterations": profile.ls_iterations,
     }
+    if resume_from is not None:
+        kwargs["resume_from"] = str(Path(resume_from).resolve())
+    return kwargs
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -99,6 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("canonical_g1_runs"),
     )
+    parser.add_argument("--resume-from", type=Path)
     return parser
 
 
@@ -111,6 +116,7 @@ def main() -> None:
         args.solver_profile,
         args.reference_path.resolve(),
         args.seed,
+        resume_from=args.resume_from,
     )
     profile = get_solver_profile(args.solver_profile)
     previous_directory = Path.cwd()
