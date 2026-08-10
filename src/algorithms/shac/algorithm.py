@@ -261,6 +261,7 @@ def train(
     checkpoint_interval: int = 10_000,
     max_episode_length: int = 5000,
     actor_history_len: int = 10,
+    actor_observation_noise: bool = False,
     env_variant: str = "blind_nolinvel_nokinref",
     actor_per_env_grad_clip: float = None,
     critic_per_env_grad_clip: float = None,
@@ -514,6 +515,10 @@ def train(
                 max_episode_length = resumed_hparams["max_episode_length"]
             if "actor_history_len" in resumed_hparams:
                 actor_history_len = resumed_hparams["actor_history_len"]
+            if "actor_observation_noise" in resumed_hparams:
+                actor_observation_noise = resumed_hparams[
+                    "actor_observation_noise"
+                ]
             if "actor_per_env_grad_clip" in resumed_hparams:
                 actor_per_env_grad_clip = resumed_hparams[
                     "actor_per_env_grad_clip"
@@ -552,6 +557,7 @@ def train(
                 "reference_residual_control": reference_residual_control,
                 "reference_residual_scale": reference_residual_scale,
                 "domain_randomization": domain_randomization,
+                "actor_observation_noise": actor_observation_noise,
                 "carried_reset_bank_path": carried_reset_bank_path,
                 "carried_reset_probability": carried_reset_probability,
                 "carried_reset_bank_start": carried_reset_bank_start,
@@ -1644,6 +1650,7 @@ def train(
         "best_reward": best_reward,
         "max_episode_length": max_episode_length,
         "actor_history_len": actor_history_len,
+        "actor_observation_noise": actor_observation_noise,
         "actor_per_env_grad_clip": actor_per_env_grad_clip,
         "critic_per_env_grad_clip": critic_per_env_grad_clip,
         "actor_bootstrap_scale": actor_bootstrap_scale,

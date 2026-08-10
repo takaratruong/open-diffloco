@@ -47,6 +47,55 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
             state.info["bootstrap_critic_obs"].shape, (286,)
         )
 
+    def test_canonical_actor_noise_leaves_reference_and_actions_clean(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        env = G1TrackingEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+            actor_observation_noise=True,
+        )
+
+        mask = np.asarray(env.actor_noise_mask)
+        self.assertEqual(mask.shape, (154,))
+        np.testing.assert_array_equal(mask[:58], 0.0)
+        np.testing.assert_array_equal(mask[58:64], 0.05)
+        np.testing.assert_array_equal(mask[64:67], 0.2)
+        np.testing.assert_array_equal(mask[67:96], 0.01)
+        np.testing.assert_array_equal(mask[96:125], 0.01)
+        np.testing.assert_array_equal(mask[125:154], 0.0)
+
+    def test_canonical_actor_noise_is_bounded_and_tiled_over_history(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        env = G1TrackingEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=10,
+            actor_observation_noise=True,
+        )
+        obs = jnp.zeros(env.actor_obs_dim)
+
+        noisy = env._apply_obs_noise(obs, jax.random.PRNGKey(19))
+        tiled_mask = jnp.tile(env.actor_noise_mask, env.actor_history_len)
+
+        self.assertEqual(env.actor_obs_dim, 10 * env.actor_frame_obs_dim)
+        self.assertTrue(bool(jnp.all(jnp.abs(noisy) <= tiled_mask)))
+        self.assertGreater(float(jnp.linalg.norm(noisy)), 0.0)
+        np.testing.assert_array_equal(noisy[tiled_mask == 0.0], 0.0)
+
+    def test_actor_observation_noise_is_opt_in(self):
+        obs = jnp.arange(self.env.actor_obs_dim, dtype=jnp.float64)
+
+        unchanged = self.env._apply_obs_noise(
+            obs, jax.random.PRNGKey(20)
+        )
+
+        np.testing.assert_array_equal(unchanged, obs)
+
     def test_fixed_mass_scale_changes_only_non_world_mass_and_inertia(self):
         from src.envs.g1_tracking.environment import G1TrackingEnv
 

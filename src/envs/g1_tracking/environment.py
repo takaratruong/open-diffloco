@@ -126,6 +126,7 @@ class G1TrackingEnv:
         reference_path: str = DEFAULT_REFERENCE_PATH,
         controller_path: str = DEFAULT_CONTROLLER_PATH,
         actor_history_len: int = 1,
+        actor_observation_noise: bool = False,
         physics_substeps: int = 5,
         reference_stride: int = 1,
         reward_scale: float = 1.0,
@@ -152,6 +153,9 @@ class G1TrackingEnv:
     ):
         if actor_history_len < 1:
             raise ValueError("actor_history_len must be at least one")
+        if not isinstance(actor_observation_noise, bool):
+            raise ValueError("actor_observation_noise must be boolean")
+        self.actor_observation_noise = actor_observation_noise
         if physics_substeps < 1:
             raise ValueError("physics_substeps must be at least one")
         if reference_stride < 1:
@@ -473,6 +477,16 @@ class G1TrackingEnv:
         self.actor_history_len = actor_history_len
         self.actor_frame_obs_dim = 154
         self.actor_obs_dim = self.actor_frame_obs_dim * actor_history_len
+        self.actor_noise_mask = jp.concatenate(
+            (
+                jp.zeros(58),
+                jp.full(6, 0.05),
+                jp.full(3, 0.2),
+                jp.full(29, 0.01),
+                jp.full(29, 0.01),
+                jp.zeros(29),
+            )
+        )
         self.critic_obs_dim = 286
 
         # Compatibility fields consumed by the unchanged Open-DiffLoco SHAC
@@ -1277,10 +1291,18 @@ class G1TrackingEnv:
         return action[self.actor_to_model_permutation]
 
     def _apply_obs_noise(
-        self, obs: jax.Array, _rng: jax.Array
+        self, obs: jax.Array, rng: jax.Array
     ) -> jax.Array:
-        """The first registered discriminator intentionally has no obs noise."""
-        return obs
+        """Apply bounded noise only to the actor's current-state fields."""
+        if not self.actor_observation_noise:
+            return obs
+        noise_mask = jp.tile(self.actor_noise_mask, self.actor_history_len)
+        return obs + jax.random.uniform(
+            rng,
+            obs.shape,
+            minval=-noise_mask,
+            maxval=noise_mask,
+        )
 
     def normalize_actor_obs(
         self, normalizer, norm_state, obs: jax.Array
