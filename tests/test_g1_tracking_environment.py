@@ -168,6 +168,81 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         for value in components.values():
             self.assertAlmostEqual(float(value), 1.0, places=5)
 
+    def test_reference_residual_zero_is_phase_target(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        env = G1TrackingEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+            actor_joint_order="source",
+            reference_residual_control=True,
+            reference_residual_scale=0.5,
+        )
+        state = env.reset_at_phase(
+            jax.random.PRNGKey(29),
+            jnp.array(0.0),
+            jnp.array(17),
+        )
+
+        target = env.position_target(state, jnp.zeros(env.action_dim))
+
+        np.testing.assert_allclose(
+            target,
+            env.qpos_reference[17, 7:],
+            rtol=0.0,
+            atol=0.0,
+        )
+        self.assertTrue(env.squash_actor_actions)
+
+    def test_reference_residual_uses_source_order_and_half_scale(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        env = G1TrackingEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+            actor_joint_order="source",
+            reference_residual_control=True,
+            reference_residual_scale=0.5,
+        )
+        state = env.reset_at_phase(
+            jax.random.PRNGKey(31),
+            jnp.array(0.0),
+            jnp.array(17),
+        )
+        residual = jnp.linspace(-0.8, 0.8, env.action_dim)
+        residual_model_order = residual[env.actor_to_model_permutation]
+
+        target = env.position_target(state, residual)
+        expected = (
+            env.qpos_reference[17, 7:]
+            + 0.5 * residual_model_order * env.action_scales
+        )
+
+        np.testing.assert_allclose(target, expected, rtol=0.0, atol=1e-12)
+
+    def test_reference_residual_options_are_validated(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        for scale in (0.0, -1.0, float("nan"), float("inf"), True):
+            with self.subTest(scale=scale):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "reference_residual_scale",
+                ):
+                    G1TrackingEnv(
+                        reference_residual_control=True,
+                        reference_residual_scale=scale,
+                    )
+        with self.assertRaisesRegex(
+            ValueError,
+            "reference_residual_control",
+        ):
+            G1TrackingEnv(reference_residual_control=1)
+
     def test_reference_reset_noise_is_default_off_and_validated(self):
         from src.envs.g1_tracking.environment import G1TrackingEnv
 

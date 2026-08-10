@@ -134,6 +134,8 @@ class G1TrackingEnv:
         effort_limit_scale: float = 1.0,
         termination_margin_weight: float = 0.0,
         reference_reset_noise_scale: float = 0.0,
+        reference_residual_control: bool = False,
+        reference_residual_scale: float = 0.5,
         carried_reset_bank_path: str | None = None,
         carried_reset_probability: float = 0.0,
         carried_reset_bank_start: int = 0,
@@ -179,6 +181,18 @@ class G1TrackingEnv:
                 "reference_reset_noise_scale must be non-negative and finite"
             )
         self.reference_reset_noise_scale = float(reference_reset_noise_scale)
+        if not isinstance(reference_residual_control, bool):
+            raise ValueError("reference_residual_control must be boolean")
+        if (
+            isinstance(reference_residual_scale, bool)
+            or not np.isfinite(reference_residual_scale)
+            or reference_residual_scale <= 0.0
+        ):
+            raise ValueError(
+                "reference_residual_scale must be positive and finite"
+            )
+        self.reference_residual_control = reference_residual_control
+        self.reference_residual_scale = float(reference_residual_scale)
         if (
             isinstance(carried_reset_probability, bool)
             or not np.isfinite(carried_reset_probability)
@@ -384,7 +398,9 @@ class G1TrackingEnv:
         self.reference_stride = reference_stride
         self.reward_scale = reward_scale
         self.clip_actions = clip_actions
-        self.squash_actor_actions = clip_actions
+        self.squash_actor_actions = (
+            clip_actions or self.reference_residual_control
+        )
         self.dt = float(self.mj_model.opt.timestep * self.n_frames)
         self.control_reference_dt = self.dt
         if self.reference.fps is not None:
@@ -859,7 +875,7 @@ class G1TrackingEnv:
     @functools.partial(jax.checkpoint, static_argnums=(0,))
     def step(self, state: EnvState, action: jax.Array) -> EnvState:
         action = self._prepare_action(action)
-        position_target = self.default_joints + action * self.action_scales
+        position_target = self.position_target(state, action, prepared=True)
 
         def physics_step(data, _):
             torque = jp.clip(
@@ -1073,6 +1089,24 @@ class G1TrackingEnv:
             done=done,
             info=next_info,
             metrics=metrics,
+        )
+
+    def position_target(
+        self,
+        state: EnvState,
+        action: jax.Array,
+        *,
+        prepared: bool = False,
+    ) -> jax.Array:
+        """Convert an actor action into a model-order joint position target."""
+        if not prepared:
+            action = self._prepare_action(action)
+        if not self.reference_residual_control:
+            return self.default_joints + action * self.action_scales
+        phase = state.info["phase"]
+        return (
+            self.qpos_reference[phase, 7:]
+            + self.reference_residual_scale * action * self.action_scales
         )
 
     def _prepare_action(self, action: jax.Array) -> jax.Array:
