@@ -105,8 +105,8 @@ def build_evaluator_command(
     reference: Path,
     output_dir: Path,
 ) -> list[str]:
-    """Build the existing strict evaluator command at exact phase zero."""
-    return build_phase_command(
+    """Build the legacy compact-actor evaluator at exact phase zero."""
+    command = build_phase_command(
         python=python,
         evaluator=evaluator,
         checkpoint=checkpoint,
@@ -114,6 +114,27 @@ def build_evaluator_command(
         output_dir=output_dir,
         phase=0,
     )
+    command[command.index("--env-variant") + 1] = (
+        "g1_tracking_rmr_50hz_validated"
+    )
+    for option in (
+        "--solver-iterations",
+        "--solver-ls-iterations",
+        "--actor-history-len",
+        "--reference-residual-scale",
+    ):
+        index = command.index(option)
+        del command[index : index + 2]
+    command.remove("--reference-residual-control")
+    reference_index = command.index("--reference-path")
+    command[reference_index:reference_index] = [
+        "--actor-hidden",
+        "512",
+        "512",
+        "--no-actor-layer-norm",
+        "--random-actor-output-head",
+    ]
+    return command
 
 
 def main() -> None:

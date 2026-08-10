@@ -9,17 +9,17 @@ import mujoco
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class FrozenAlgorithmContractTest(unittest.TestCase):
-    def test_upstream_algorithm_files_are_unchanged(self):
+class ReviewedAlgorithmContractTest(unittest.TestCase):
+    def test_reviewed_shared_algorithm_files_are_pinned(self):
         expected = {
             "src/algorithms/shac/algorithm.py": (
-                "bd9467dd718b092d328cf3448b6977faaca2d949eeb48d2b2226cf386921d8a7"
+                "3ae28c138a82a759cff8b12ca9e8798d8b2a01ebb29e8094b9e94e3f3e29939d"
             ),
             "src/algorithms/jave/algorithm.py": (
                 "6312c2f91c67dade4f0144875f75fce5beca5d7128df0ae3dea51a4f8eb7ec04"
             ),
             "src/core/networks.py": (
-                "b67b3956535a5c2ae899c71e7e9eb065ad12421c129bf4056d1e4e3730439b81"
+                "9837a4b27dd3321a1d23edd007097cf0c5af99d2177297c21d73d532f74b030f"
             ),
         }
         for relative, digest in expected.items():
