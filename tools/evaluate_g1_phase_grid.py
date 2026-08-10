@@ -19,6 +19,11 @@ from matplotlib import pyplot as plt  # noqa: E402
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from src.envs.g1_tracking.solver_profiles import (
+    SOLVER_PROFILES,
+    get_solver_profile,
+)
+
 
 PHASES = (0, 100, 200, 300, 400)
 REFERENCE_SHA256 = (
@@ -40,6 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phases", nargs=5, type=int, default=PHASES)
     parser.add_argument("--checkpoint-sha256", default=CHECKPOINT_SHA256)
     parser.add_argument("--reference-sha256", default=REFERENCE_SHA256)
+    parser.add_argument(
+        "--solver-profile",
+        choices=tuple(sorted(SOLVER_PROFILES)),
+        default="g1-4x5",
+    )
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument(
         "--evaluator",
@@ -90,8 +100,10 @@ def build_evaluator_command(
     reference: Path,
     output_dir: Path,
     phase: int,
+    solver_profile: str = "g1-4x5",
 ) -> list[str]:
     """Build one exact existing-evaluator command without changing behavior."""
+    profile = get_solver_profile(solver_profile)
     return [
         str(python),
         str(evaluator),
@@ -106,12 +118,16 @@ def build_evaluator_command(
         "--render-every",
         "2",
         "--env-variant",
-        "g1_tracking_rmr_50hz_validated",
-        "--actor-hidden",
-        "512",
-        "512",
-        "--no-actor-layer-norm",
-        "--random-actor-output-head",
+        "g1_tracking_rmr_50hz_source_step",
+        "--solver-iterations",
+        str(profile.iterations),
+        "--solver-ls-iterations",
+        str(profile.ls_iterations),
+        "--actor-history-len",
+        "10",
+        "--reference-residual-control",
+        "--reference-residual-scale",
+        "0.5",
         "--reference-path",
         str(reference),
         "--reference-stride",
@@ -142,6 +158,7 @@ def build_phase_grid_payload(
     *,
     checkpoint_sha256: str,
     reference_sha256: str,
+    solver_profile: str = "g1-4x5",
 ) -> dict[str, Any]:
     """Build the canonical finite phase-grid comparison payload."""
     if set(summaries) != set(PHASES):
@@ -164,7 +181,34 @@ def build_phase_grid_payload(
         "decision": classify_phase_grid(survival, completed),
         "checkpoint_sha256": checkpoint_sha256,
         "reference_sha256": reference_sha256,
+        "solver_profile": solver_profile,
     }
+
+
+def enrich_phase_summary(
+    summary: dict[str, Any],
+    *,
+    solver_profile: str,
+    checkpoint_sha256: str,
+) -> dict[str, Any]:
+    """Attach the nominal replay-free protocol beside every phase video."""
+    return {
+        **summary,
+        "solver_profile": solver_profile,
+        "checkpoint_sha256": checkpoint_sha256,
+        "randomization": "disabled-nominal",
+        "actor_observation_noise": False,
+        "reset_mode": "exact-reference-phase",
+    }
+
+
+def _write_summary(path: Path, summary: dict[str, Any]) -> None:
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
 
 
 def make_contact_sheet(frames: list[np.ndarray], output: Path) -> None:
@@ -238,6 +282,12 @@ def main() -> None:
     validate_phase_summary(
         summaries[0], phase=0, reference_sha256=reference_sha256
     )
+    summaries[0] = enrich_phase_summary(
+        summaries[0],
+        solver_profile=args.solver_profile,
+        checkpoint_sha256=checkpoint_sha256,
+    )
+    _write_summary(phase_zero_output / "summary.json", summaries[0])
 
     children = []
     for phase, gpu_id in zip(PHASES[1:], gpu_ids):
@@ -249,6 +299,7 @@ def main() -> None:
             reference=args.reference_path,
             output_dir=phase_output,
             phase=phase,
+            solver_profile=args.solver_profile,
         )
         environment = os.environ.copy()
         environment.update(
@@ -294,6 +345,12 @@ def main() -> None:
         validate_phase_summary(
             summary, phase=phase, reference_sha256=reference_sha256
         )
+        summary = enrich_phase_summary(
+            summary,
+            solver_profile=args.solver_profile,
+            checkpoint_sha256=checkpoint_sha256,
+        )
+        _write_summary(phase_output / "summary.json", summary)
         summaries[phase] = summary
         frames = imageio.mimread(phase_output / "evaluation.mp4")
         make_contact_sheet(frames, phase_output / "contact_sheet.png")
@@ -302,6 +359,7 @@ def main() -> None:
         summaries,
         checkpoint_sha256=checkpoint_sha256,
         reference_sha256=reference_sha256,
+        solver_profile=args.solver_profile,
     )
     payload["summaries"] = {
         str(phase): summaries[phase] for phase in PHASES

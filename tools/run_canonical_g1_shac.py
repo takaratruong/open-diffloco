@@ -70,7 +70,7 @@ def build_canonical_kwargs(
         "reference_residual_control": True,
         "reference_residual_scale": 0.5,
         "reference_path": str(reference_path),
-        "reference_stride": 2,
+        "reference_stride": 1,
         "solver_profile": profile_name,
         "solver_iterations": profile.iterations,
         "solver_ls_iterations": profile.ls_iterations,

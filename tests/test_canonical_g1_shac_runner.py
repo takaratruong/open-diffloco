@@ -55,6 +55,7 @@ class CanonicalG1ShacRunnerTest(unittest.TestCase):
         self.assertEqual(kwargs["curriculum_grace"], 800_000)
         self.assertEqual(kwargs["curriculum_steps"], 6_400_000)
         self.assertEqual(kwargs["reference_path"], "/tmp/dance.npz")
+        self.assertEqual(kwargs["reference_stride"], 1)
         self.assertEqual(kwargs["seed"], 42)
 
     def test_solver_profiles_change_only_registered_solver_fields(self):

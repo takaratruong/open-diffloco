@@ -186,6 +186,20 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         self.assertEqual(candidate.mj_model.opt.iterations, 4)
         self.assertEqual(candidate.mj_model.opt.ls_iterations, 10)
 
+    def test_evaluator_can_recreate_canonical_actor_observation_and_control(self):
+        candidate = make_evaluation_env(
+            "g1_tracking_rmr_50hz_source_step",
+            actor_history_len=10,
+            reference_residual_control=True,
+            reference_residual_scale=0.5,
+        )
+
+        self.assertEqual(candidate.actor_history_len, 10)
+        self.assertEqual(candidate.actor_obs_dim, 1540)
+        self.assertTrue(candidate.reference_residual_control)
+        self.assertEqual(candidate.reference_residual_scale, 0.5)
+        self.assertFalse(candidate.actor_observation_noise)
+
     def test_validated_evaluator_uses_smallest_passing_solver_budget(self):
         validated = make_evaluation_env(
             "g1_tracking_rmr_50hz_validated"

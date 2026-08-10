@@ -11,6 +11,7 @@ from tools.evaluate_g1_phase_grid import (
     build_evaluator_command,
     build_phase_grid_payload,
     classify_phase_grid,
+    enrich_phase_summary,
     make_contact_sheet,
     validate_grid,
     validate_phase_summary,
@@ -45,6 +46,7 @@ class G1PhaseGridEvaluatorTest(unittest.TestCase):
             args.reference_sha256,
             "bf8c8b407062d1b309440f4c1787c345b04d79501ea75f615e5b41c0c5ebb6db",
         )
+        self.assertEqual(args.solver_profile, "g1-4x5")
 
     def test_grid_requires_exact_registered_phases_and_four_gpus(self) -> None:
         validate_grid(PHASES, ("1", "2", "3", "4"))
@@ -96,6 +98,7 @@ class G1PhaseGridEvaluatorTest(unittest.TestCase):
             reference=Path("/artifacts/reference.npz"),
             output_dir=Path("/run/phase_100"),
             phase=100,
+            solver_profile="g1-4x5",
         )
 
         self.assertEqual(
@@ -115,7 +118,18 @@ class G1PhaseGridEvaluatorTest(unittest.TestCase):
         )
         self.assertEqual(command[command.index("--phase") + 1], "100")
         self.assertEqual(command[command.index("--seed") + 1], "0")
-        self.assertIn("g1_tracking_rmr_50hz_validated", command)
+        self.assertIn("g1_tracking_rmr_50hz_source_step", command)
+        self.assertEqual(
+            command[command.index("--solver-iterations") + 1], "4"
+        )
+        self.assertEqual(
+            command[command.index("--solver-ls-iterations") + 1], "5"
+        )
+        self.assertEqual(
+            command[command.index("--actor-history-len") + 1], "10"
+        )
+        self.assertIn("--reference-residual-control", command)
+        self.assertNotIn("--random-actor-output-head", command)
 
     def test_phase_summary_must_match_exact_phase_and_reference(self) -> None:
         summary = {
@@ -148,6 +162,7 @@ class G1PhaseGridEvaluatorTest(unittest.TestCase):
             summaries,
             checkpoint_sha256="checkpoint-sha",
             reference_sha256="reference-sha",
+            solver_profile="g1-4x5",
         )
 
         self.assertEqual(payload["phases"], list(PHASES))
@@ -155,6 +170,22 @@ class G1PhaseGridEvaluatorTest(unittest.TestCase):
         self.assertEqual(payload["decision"], "broad-phase-local-competence")
         self.assertEqual(payload["checkpoint_sha256"], "checkpoint-sha")
         self.assertEqual(payload["reference_sha256"], "reference-sha")
+        self.assertEqual(payload["solver_profile"], "g1-4x5")
+
+    def test_phase_sidecar_records_nominal_replay_free_protocol(self) -> None:
+        summary = {"steps": 12}
+
+        enriched = enrich_phase_summary(
+            summary,
+            solver_profile="upstream-1x5",
+            checkpoint_sha256="checkpoint-sha",
+        )
+
+        self.assertEqual(enriched["solver_profile"], "upstream-1x5")
+        self.assertEqual(enriched["checkpoint_sha256"], "checkpoint-sha")
+        self.assertEqual(enriched["randomization"], "disabled-nominal")
+        self.assertFalse(enriched["actor_observation_noise"])
+        self.assertEqual(enriched["reset_mode"], "exact-reference-phase")
 
     def test_contact_sheet_is_written_from_finite_rgb_frames(self) -> None:
         frames = [

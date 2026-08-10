@@ -1122,6 +1122,7 @@ def train(
         actor_grad_norm = compute_grad_norm(grads)
 
         updates, new_actor_opt = actor_opt.update(grads, state.actor_opt)
+        actor_update_norm = compute_grad_norm(updates)
         new_actor_params = optax.apply_updates(state.actor_params, updates)
 
         # Critic updates
@@ -1314,6 +1315,7 @@ def train(
             "cmd_yaw": jp.mean(trajs["cmd_yaw"]),
             "contact": jp.mean(final_states.metrics["contact_force"]),
             "actor_grad": actor_grad_norm,
+            "actor_update_norm": actor_update_norm,
             "actor_grad_finite_fraction": actor_grad_stats["finite_fraction"],
             "actor_grad_raw_median": actor_grad_stats["raw_norm_median"],
             "actor_grad_raw_max": actor_grad_stats["raw_norm_max"],
@@ -1506,6 +1508,9 @@ def train(
                         "height": float(metrics["height"]),
                         "tilt": float(metrics["tilt"]),
                         "actor_grad": float(metrics["actor_grad"]),
+                        "actor_update_norm": float(
+                            metrics["actor_update_norm"]
+                        ),
                         "actor_bootstrap_scale_current": float(
                             metrics["actor_bootstrap_scale_current"]
                         ),

@@ -44,6 +44,9 @@ def make_evaluation_env(
     effort_limit_scale: float = 1.0,
     reference_path: str | Path | None = None,
     reference_stride: int | None = None,
+    actor_history_len: int = 1,
+    reference_residual_control: bool = False,
+    reference_residual_scale: float = 0.5,
 ) -> G1TrackingEnv:
     """Build an exact-termination task on the requested control timebase."""
     if variant not in EVALUATION_ENV_VARIANTS:
@@ -51,9 +54,12 @@ def make_evaluation_env(
     if (solver_iterations is None) != (solver_ls_iterations is None):
         raise ValueError("both solver iteration budgets must be provided")
     kwargs = {
-        "actor_history_len": 1,
+        "actor_history_len": actor_history_len,
+        "actor_observation_noise": False,
         "mass_range": (body_mass_scale, body_mass_scale),
         "effort_limit_scale": effort_limit_scale,
+        "reference_residual_control": reference_residual_control,
+        "reference_residual_scale": reference_residual_scale,
     }
     if reference_path is not None:
         kwargs["reference_path"] = str(reference_path)
@@ -255,6 +261,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--reference-path", type=Path)
     parser.add_argument("--reference-stride", type=int)
+    parser.add_argument("--actor-history-len", type=int, default=1)
+    parser.add_argument(
+        "--reference-residual-control", action="store_true"
+    )
+    parser.add_argument(
+        "--reference-residual-scale", type=float, default=0.5
+    )
     parser.add_argument("--render-every", type=int, default=2)
     parser.add_argument("--action-gain", type=float, default=1.0)
     parser.add_argument("--residual-action-scale", type=float, default=0.0)
@@ -302,6 +315,9 @@ def main() -> None:
         effort_limit_scale=args.effort_limit_scale,
         reference_path=args.reference_path,
         reference_stride=args.reference_stride,
+        actor_history_len=args.actor_history_len,
+        reference_residual_control=args.reference_residual_control,
+        reference_residual_scale=args.reference_residual_scale,
     )
     controller_sources = (
         args.checkpoint,
