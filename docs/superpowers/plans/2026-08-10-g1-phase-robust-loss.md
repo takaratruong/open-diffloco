@@ -43,7 +43,6 @@ import jax.numpy as jnp
 import numpy as np
 
 from src.algorithms.shac.phase_weighting import (
-    aggregate_phase_weighted_gradients,
     phase_bin_indices,
     phase_robust_weights,
 )
@@ -81,11 +80,6 @@ def test_equal_bin_losses_produce_unit_detached_weights():
         )(losses),
         np.zeros((5, 5)),
     )
-    gradients = {"w": jnp.arange(10, dtype=jnp.float32).reshape(5, 2)}
-    weighted = aggregate_phase_weighted_gradients(
-        gradients, result.env_weights
-    )
-    np.testing.assert_allclose(weighted["w"], gradients["w"].mean(axis=0))
 ```
 
 - [ ] **Step 2: Run the focused tests and verify RED**
@@ -217,7 +211,21 @@ def test_unique_hard_bin_is_largest_bounded_and_mean_one():
     np.testing.assert_allclose(result.env_weights.mean(), 1.0, atol=1e-7)
 
 
+def test_equal_weights_reproduce_the_unweighted_gradient_mean():
+    from src.algorithms.shac.phase_weighting import (
+        aggregate_phase_weighted_gradients,
+    )
+
+    gradients = {"w": jnp.arange(10, dtype=jnp.float32).reshape(5, 2)}
+    weighted = aggregate_phase_weighted_gradients(gradients, jnp.ones(5))
+    np.testing.assert_allclose(weighted["w"], gradients["w"].mean(axis=0))
+
+
 def test_nonfinite_gradient_elements_have_no_numerator_or_denominator():
+    from src.algorithms.shac.phase_weighting import (
+        aggregate_phase_weighted_gradients,
+    )
+
     gradients = {
         "w": jnp.array([[2.0, jnp.inf], [4.0, 8.0], [jnp.nan, 14.0]])
     }
@@ -227,6 +235,10 @@ def test_nonfinite_gradient_elements_have_no_numerator_or_denominator():
 
 
 def test_no_finite_gradient_contributor_emits_zero():
+    from src.algorithms.shac.phase_weighting import (
+        aggregate_phase_weighted_gradients,
+    )
+
     aggregate = aggregate_phase_weighted_gradients(
         {"w": jnp.array([[jnp.nan], [jnp.inf]])}, jnp.ones(2)
     )
