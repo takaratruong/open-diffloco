@@ -6,17 +6,10 @@ import jax
 import jax.numpy as jp
 
 
-def aggregate_per_env_gradients(
+def per_env_gradient_statistics(
     per_env_grads: Any,
-    *,
-    max_norm: float,
-) -> tuple[Any, dict[str, jax.Array]]:
-    """Sanitizes and norm-clips each environment before taking its mean.
-
-    Differentiable contact can produce a finite but extreme gradient for one
-    rollout.  Clipping only the already-averaged gradient bounds the optimizer
-    step but does not stop that rollout from determining the update direction.
-    """
+) -> dict[str, jax.Array]:
+    """Measure each rollout gradient without changing aggregation semantics."""
     leaves = jax.tree_util.tree_leaves(per_env_grads)
     if not leaves:
         raise ValueError("per_env_grads must contain at least one array")
@@ -37,6 +30,30 @@ def aggregate_per_env_gradients(
         )
 
     raw_norm = jp.sqrt(squared_norm)
+    return {
+        "finite_fraction": jp.mean(finite_by_env.astype(jp.float32)),
+        "raw_norm_median": jp.median(raw_norm),
+        "raw_norm_max": jp.max(raw_norm),
+        "finite_by_env": finite_by_env,
+        "raw_norm_by_env": raw_norm,
+    }
+
+
+def aggregate_per_env_gradients(
+    per_env_grads: Any,
+    *,
+    max_norm: float,
+) -> tuple[Any, dict[str, jax.Array]]:
+    """Sanitizes and norm-clips each environment before taking its mean.
+
+    Differentiable contact can produce a finite but extreme gradient for one
+    rollout.  Clipping only the already-averaged gradient bounds the optimizer
+    step but does not stop that rollout from determining the update direction.
+    """
+    stats = per_env_gradient_statistics(per_env_grads)
+    finite_by_env = stats["finite_by_env"]
+    raw_norm = stats["raw_norm_by_env"]
+    num_envs = raw_norm.shape[0]
     scale = jp.minimum(1.0, max_norm / jp.maximum(raw_norm, 1e-12))
     scale = jp.where(finite_by_env, scale, 0.0)
 
@@ -46,11 +63,4 @@ def aggregate_per_env_gradients(
         return jp.mean(safe_leaf * scale.reshape(broadcast_shape), axis=0)
 
     aggregated = jax.tree_util.tree_map(clip_and_average, per_env_grads)
-    stats = {
-        "finite_fraction": jp.mean(finite_by_env.astype(jp.float32)),
-        "raw_norm_median": jp.median(raw_norm),
-        "raw_norm_max": jp.max(raw_norm),
-        "finite_by_env": finite_by_env,
-        "raw_norm_by_env": raw_norm,
-    }
     return aggregated, stats

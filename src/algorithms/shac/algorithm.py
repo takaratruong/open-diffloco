@@ -27,7 +27,10 @@ from src.core.rmr_policy import (
 from src.envs.go2.environment import Go2Env
 from src.envs.go2.terrain import differentiated_ou_foot_forces
 from src.core.utils import compute_grad_norm
-from src.algorithms.shac.gradients import aggregate_per_env_gradients
+from src.algorithms.shac.gradients import (
+    aggregate_per_env_gradients,
+    per_env_gradient_statistics,
+)
 from src.algorithms.shac.microbatch import (
     flatten_population,
     mean_shard_trees,
@@ -960,23 +963,13 @@ def train(
                 per_env_grads, max_norm=max_norm
             )
 
-        leaves = jax.tree_util.tree_leaves(per_env_grads)
-        shard_size = leaves[0].shape[0]
         grads = jax.tree_util.tree_map(
             lambda grad: jp.nanmean(grad, axis=0), per_env_grads
         )
         grads = jax.tree_util.tree_map(
             lambda grad: jp.where(jp.isfinite(grad), grad, 0.0), grads
         )
-        return grads, {
-            "finite_fraction": jp.array(1.0, dtype=jp.float32),
-            "raw_norm_median": jp.array(jp.nan, dtype=jp.float32),
-            "raw_norm_max": jp.array(jp.nan, dtype=jp.float32),
-            "finite_by_env": jp.ones((shard_size,), dtype=jp.bool_),
-            "raw_norm_by_env": jp.full(
-                (shard_size,), jp.nan, dtype=jp.float32
-            ),
-        }
+        return grads, per_env_gradient_statistics(per_env_grads)
 
     @jax.jit
     def train_step(state: TrainState):

@@ -3,10 +3,29 @@ import unittest
 import jax.numpy as jnp
 import numpy as np
 
-from src.algorithms.shac.gradients import aggregate_per_env_gradients
+from src.algorithms.shac.gradients import (
+    aggregate_per_env_gradients,
+    per_env_gradient_statistics,
+)
 
 
 class PerEnvironmentGradientAggregationTest(unittest.TestCase):
+    def test_statistics_report_nonfinite_rollouts_without_aggregating(self):
+        gradients = {
+            "w": jnp.array([[3.0, 4.0], [jnp.nan, 9.0]]),
+            "b": jnp.array([[0.0], [2.0]]),
+        }
+
+        stats = per_env_gradient_statistics(gradients)
+
+        self.assertAlmostEqual(float(stats["finite_fraction"]), 0.5)
+        np.testing.assert_array_equal(
+            stats["finite_by_env"], np.array([True, False])
+        )
+        np.testing.assert_allclose(
+            stats["raw_norm_by_env"], np.array([5.0, np.sqrt(85.0)])
+        )
+
     def test_extreme_rollout_cannot_determine_aggregate_direction(self):
         gradients = {
             "w": jnp.array(
