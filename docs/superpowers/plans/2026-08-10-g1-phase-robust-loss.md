@@ -194,7 +194,7 @@ Expected: the two initial tests pass.
 
 ```python
 def test_unique_hard_bin_is_largest_bounded_and_mean_one():
-    losses = jnp.array([1.0, 1.0, 1.0, 5.0, 1.0, 1.0])
+    losses = jnp.array([1.0, 1.0, 1.0, 1.0, 5.0, 1.0])
     phases = jnp.array([0, 50, 100, 200, 300, 400])
     result = jax.jit(
         lambda x: phase_robust_weights(
