@@ -69,7 +69,8 @@ Open-DiffLoco SHAC contract:
 - 256 environments and horizon 12 (3,072 transitions per actor update)
 - 8,000,000 requested transitions, producing 2,604 complete actor updates
 - 16 critic updates per actor update
-- actor MLP 512--256--128 with LayerNorm, ELU, zero-initialized tanh head
+- actor MLP 512--256--128 with LayerNorm, ELU, and a zero-initialized tanh
+  residual head
 - critic MLP 512--256--128 with LayerNorm and ELU
 - actor learning rate 5e-3 and critic learning rate 5e-4
 - action noise linearly annealed from 0.5 to 0.32
@@ -95,7 +96,7 @@ outlier dominates an update or creates nonfinite state.
 The following differences are intentional and must remain identical across
 the solver pair:
 
-- 29 G1 actions and the corrected source joint order
+- 29 G1 residual actions and the corrected source joint order
 - the corrected RMR reference-conditioned actor and critic observations
 - the RMR full-body tracking reward, action-rate penalty, joint-limit penalty,
   and strict termination contract
@@ -104,9 +105,20 @@ the solver pair:
 - G1 per-joint PD action scales and effort limits
 - float64 MJX physics with float32 networks
 
-The tanh head and action clipping are restored for this canonical comparison.
-An unbounded linear-head successor is a separate action-support ablation, not
-part of the solver comparison.
+The G1 actor preserves the semantic purpose of Open-DiffLoco's initialization.
+Its zero head means "apply the nominal target," not "pull every reference phase
+back to the static home pose." At phase `p`, the executed position target is
+
+`q_ref[p] + 0.5 * tanh(residual_logits) * rmr_action_scale`.
+
+Reparameterized Gaussian action noise is added to the normalized residual and
+clipped to `[-1, 1]` before the residual is added to the reference target. Thus
+the initial deterministic controller tracks the phase-appropriate reference
+pose, while its exploration geometry retains Open-DiffLoco's bounded tanh
+action and 0.5 action scale. The literal zero-to-static-home initialization is
+already represented by Lane A's untouched upstream humanoid control and is not
+duplicated in the G1 solver pair. An unbounded linear-head successor remains a
+separate action-support ablation.
 
 ## Domain-randomization mapping
 
@@ -165,6 +177,9 @@ Before launching Lane B:
   a preregistered floating-point envelope
 - a two-environment differentiated smoke proves distinct randomized models,
   finite rewards, finite actor/critic gradients, and a finite optimizer update
+- an initialization test proves that a zero actor head produces the exact
+  phase-relative reference target, while residual bounds and noise operate in
+  normalized residual coordinates
 - effective hyperparameters and solver provenance are serialized and checked
   before training
 - the solver arms start from byte-identical actor, critic, optimizer,
