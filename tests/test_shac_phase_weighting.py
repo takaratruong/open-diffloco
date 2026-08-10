@@ -1,11 +1,52 @@
+import inspect
+
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from src.algorithms.shac.phase_weighting import (
     phase_bin_indices,
     phase_robust_weights,
 )
+
+
+def test_train_phase_weighting_defaults_are_disabled_and_fixed():
+    from src.algorithms.shac.algorithm import train
+
+    parameters = inspect.signature(train).parameters
+    assert parameters["actor_phase_robust_weighting"].default is False
+    assert parameters["actor_phase_bin_count"].default == 5
+    assert parameters["actor_phase_robust_fraction"].default == 0.5
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"actor_phase_robust_weighting": "yes"}, "must be boolean"),
+        ({"actor_phase_bin_count": 0}, "must be positive"),
+        ({"actor_phase_robust_fraction": float("nan")}, "must be in"),
+        (
+            {
+                "actor_phase_robust_weighting": True,
+                "gradient_accumulation_steps": 2,
+            },
+            "requires one population shard",
+        ),
+        (
+            {
+                "actor_phase_robust_weighting": True,
+                "actor_per_env_grad_clip": 1.0,
+            },
+            "cannot combine with per-env clipping",
+        ),
+    ],
+)
+def test_train_rejects_invalid_phase_weighting_contracts(kwargs, message):
+    from src.algorithms.shac.algorithm import train
+
+    with pytest.raises(ValueError, match=message):
+        train(**kwargs)
 
 
 def test_five_bins_cover_all_499_start_phases():

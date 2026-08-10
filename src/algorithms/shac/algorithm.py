@@ -10,9 +10,6 @@ import math
 from datetime import datetime
 from pathlib import Path
 
-# Set to True to enable per-foot normal force logging
-DEBUG_FOOT_CONTACTS = False
-
 import jax
 import jax.numpy as jp
 import optax
@@ -31,6 +28,10 @@ from src.algorithms.shac.gradients import (
     aggregate_per_env_gradients,
     per_env_gradient_statistics,
 )
+from src.algorithms.shac.phase_weighting import (
+    aggregate_phase_weighted_gradients,
+    phase_robust_weights,
+)
 from src.algorithms.shac.microbatch import (
     flatten_population,
     mean_shard_trees,
@@ -43,6 +44,10 @@ from src.algorithms.shac.initialization import (
     canonicalize_tree_like,
     commit_tree_to_local_device,
 )
+
+
+# Set to True to enable per-foot normal force logging.
+DEBUG_FOOT_CONTACTS = False
 
 
 def load_checkpoint(path: str):
@@ -271,6 +276,9 @@ def train(
     env_variant: str = "blind_nolinvel_nokinref",
     actor_per_env_grad_clip: float = None,
     critic_per_env_grad_clip: float = None,
+    actor_phase_robust_weighting: bool = False,
+    actor_phase_bin_count: int = 5,
+    actor_phase_robust_fraction: float = 0.5,
     actor_bootstrap_scale: float = 1.0,
     actor_bootstrap_delay_steps: int = 0,
     actor_hidden: tuple[int, ...] = (512, 256, 128),
@@ -367,6 +375,34 @@ def train(
     ):
         raise ValueError(
             "gradient_accumulation_steps must be a positive integer"
+        )
+    if not isinstance(actor_phase_robust_weighting, bool):
+        raise ValueError("actor_phase_robust_weighting must be boolean")
+    if (
+        isinstance(actor_phase_bin_count, bool)
+        or not isinstance(actor_phase_bin_count, int)
+        or actor_phase_bin_count < 1
+    ):
+        raise ValueError("actor_phase_bin_count must be positive")
+    if (
+        isinstance(actor_phase_robust_fraction, bool)
+        or not math.isfinite(actor_phase_robust_fraction)
+        or not 0.0 <= actor_phase_robust_fraction <= 1.0
+    ):
+        raise ValueError("actor_phase_robust_fraction must be in [0, 1]")
+    if actor_phase_robust_weighting and gradient_accumulation_steps != 1:
+        raise ValueError(
+            "phase-robust weighting requires one population shard"
+        )
+    if actor_phase_robust_weighting and actor_per_env_grad_clip is not None:
+        raise ValueError(
+            "phase-robust weighting cannot combine with per-env clipping"
+        )
+    if actor_phase_robust_weighting and not env_variant.startswith(
+        "g1_tracking"
+    ):
+        raise ValueError(
+            "phase-robust weighting requires G1 reference phases"
         )
     if (
         isinstance(actor_bootstrap_delay_steps, bool)
@@ -1001,6 +1037,10 @@ def train(
         updated_env_state = state.env_state.replace(
             info={**state.env_state.info, "difficulty": per_env_difficulty}
         )
+        if actor_phase_robust_weighting:
+            actor_start_phases = jax.lax.stop_gradient(
+                updated_env_state.info["phase"]
+            )
 
         # Pre-sample all stochastic inputs (reparameterization)
         all_action_noise = jax.random.normal(
@@ -1050,9 +1090,24 @@ def train(
                 current_noise_std,
                 current_actor_bootstrap_scale,
             )
-            grads, actor_grad_stats = aggregate_env_gradients(
-                per_env_grads, actor_per_env_grad_clip
-            )
+            if actor_phase_robust_weighting:
+                phase_weighting = phase_robust_weights(
+                    losses,
+                    actor_start_phases,
+                    phase_count=int(env.reference_transitions),
+                    bin_count=actor_phase_bin_count,
+                    robust_fraction=actor_phase_robust_fraction,
+                )
+                grads = aggregate_phase_weighted_gradients(
+                    per_env_grads, phase_weighting.env_weights
+                )
+                actor_grad_stats = per_env_gradient_statistics(
+                    per_env_grads
+                )
+            else:
+                grads, actor_grad_stats = aggregate_env_gradients(
+                    per_env_grads, actor_per_env_grad_clip
+                )
         else:
             sharded_env_state = reshape_population(
                 updated_env_state,
@@ -1349,6 +1404,16 @@ def train(
             "foot_normal_RL": jp.mean(trajs["foot_normal_RL"]),
             "foot_normal_RR": jp.mean(trajs["foot_normal_RR"]),
         }
+        if actor_phase_robust_weighting:
+            metrics.update(
+                {
+                    "actor_phase_bin_counts": phase_weighting.bin_counts,
+                    "actor_phase_bin_losses": phase_weighting.bin_losses,
+                    "actor_phase_bin_weights": phase_weighting.bin_weights,
+                    "actor_phase_weighting_valid": phase_weighting.valid,
+                    "actor_loss_weighted": phase_weighting.weighted_loss,
+                }
+            )
 
         return new_state, metrics
 
@@ -1487,54 +1552,76 @@ def train(
                         + f"{float(metrics['critic_grad_finite_fraction']):.3f}"
                     )
 
-                diag_log.append(
-                    {
-                        "step": int(state.step),
-                        "reward": reward,
-                        "difficulty": diff,
-                        "vel_x": vel_x,
-                        "vel_y": vel_y,
-                        "yaw_rate": yaw_rate,
-                        "cmd_x": cmd_x,
-                        "cmd_y": cmd_y,
-                        "cmd_yaw": cmd_yaw,
-                        "track_vx": trk_vx,
-                        "track_vy": trk_vy,
-                        "track_yaw": trk_yaw,
-                        "rew_vel_x": float(metrics["rew_vel_x"]),
-                        "rew_vel_y": float(metrics["rew_vel_y"]),
-                        "rew_yaw": float(metrics["rew_yaw"]),
-                        "pen_rate": float(metrics["pen_rate"]),
-                        "height": float(metrics["height"]),
-                        "tilt": float(metrics["tilt"]),
-                        "actor_grad": float(metrics["actor_grad"]),
-                        "actor_update_norm": float(
-                            metrics["actor_update_norm"]
-                        ),
-                        "actor_bootstrap_scale_current": float(
-                            metrics["actor_bootstrap_scale_current"]
-                        ),
-                        "actor_grad_raw_median": float(
-                            metrics["actor_grad_raw_median"]
-                        ),
-                        "actor_grad_raw_max": float(
-                            metrics["actor_grad_raw_max"]
-                        ),
-                        "actor_grad_finite_fraction": float(
-                            metrics["actor_grad_finite_fraction"]
-                        ),
-                        "critic_loss": float(metrics["critic_loss"]),
-                        "critic_grad_raw_median": float(
-                            metrics["critic_grad_raw_median"]
-                        ),
-                        "critic_grad_raw_max": float(
-                            metrics["critic_grad_raw_max"]
-                        ),
-                        "critic_grad_finite_fraction": float(
-                            metrics["critic_grad_finite_fraction"]
-                        ),
-                    }
-                )
+                diag_entry = {
+                    "step": int(state.step),
+                    "reward": reward,
+                    "difficulty": diff,
+                    "vel_x": vel_x,
+                    "vel_y": vel_y,
+                    "yaw_rate": yaw_rate,
+                    "cmd_x": cmd_x,
+                    "cmd_y": cmd_y,
+                    "cmd_yaw": cmd_yaw,
+                    "track_vx": trk_vx,
+                    "track_vy": trk_vy,
+                    "track_yaw": trk_yaw,
+                    "rew_vel_x": float(metrics["rew_vel_x"]),
+                    "rew_vel_y": float(metrics["rew_vel_y"]),
+                    "rew_yaw": float(metrics["rew_yaw"]),
+                    "pen_rate": float(metrics["pen_rate"]),
+                    "height": float(metrics["height"]),
+                    "tilt": float(metrics["tilt"]),
+                    "actor_grad": float(metrics["actor_grad"]),
+                    "actor_update_norm": float(
+                        metrics["actor_update_norm"]
+                    ),
+                    "actor_bootstrap_scale_current": float(
+                        metrics["actor_bootstrap_scale_current"]
+                    ),
+                    "actor_grad_raw_median": float(
+                        metrics["actor_grad_raw_median"]
+                    ),
+                    "actor_grad_raw_max": float(
+                        metrics["actor_grad_raw_max"]
+                    ),
+                    "actor_grad_finite_fraction": float(
+                        metrics["actor_grad_finite_fraction"]
+                    ),
+                    "critic_loss": float(metrics["critic_loss"]),
+                    "critic_grad_raw_median": float(
+                        metrics["critic_grad_raw_median"]
+                    ),
+                    "critic_grad_raw_max": float(
+                        metrics["critic_grad_raw_max"]
+                    ),
+                    "critic_grad_finite_fraction": float(
+                        metrics["critic_grad_finite_fraction"]
+                    ),
+                }
+                if actor_phase_robust_weighting:
+                    diag_entry.update(
+                        {
+                            "actor_phase_bin_counts": np.asarray(
+                                metrics["actor_phase_bin_counts"]
+                            ).tolist(),
+                            "actor_phase_bin_losses": np.asarray(
+                                metrics["actor_phase_bin_losses"]
+                            ).tolist(),
+                            "actor_phase_bin_weights": np.asarray(
+                                metrics["actor_phase_bin_weights"]
+                            ).tolist(),
+                            "actor_phase_weighting_valid": bool(
+                                metrics["actor_phase_weighting_valid"]
+                            ),
+                            "actor_loss_unweighted": float(
+                                metrics["actor_loss"]
+                            ),
+                            "actor_loss_weighted": float(
+                                metrics["actor_loss_weighted"]
+                            ),
+                        }
+                    )
+                diag_log.append(diag_entry)
             else:
                 print(
                     f"{state.step:7d} | {reward:7.3f} | {trk_vx:7.3f} | {trk_vy:7.3f} | "
@@ -1685,6 +1772,9 @@ def train(
         "actor_observation_noise": actor_observation_noise,
         "actor_per_env_grad_clip": actor_per_env_grad_clip,
         "critic_per_env_grad_clip": critic_per_env_grad_clip,
+        "actor_phase_robust_weighting": actor_phase_robust_weighting,
+        "actor_phase_bin_count": actor_phase_bin_count,
+        "actor_phase_robust_fraction": actor_phase_robust_fraction,
         "actor_bootstrap_scale": actor_bootstrap_scale,
         "actor_bootstrap_delay_steps": actor_bootstrap_delay_steps,
         "actor_hidden": list(actor_hidden),
