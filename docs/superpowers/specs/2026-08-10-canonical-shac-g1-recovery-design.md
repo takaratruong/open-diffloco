@@ -145,9 +145,11 @@ so Lane B requires an explicit per-environment model path. The mapping is:
 
 All sampled physical parameters are stored in environment state, are carried
 through steps, are resampled only on reset, and affect both forward dynamics
-and differentiated rollouts. Tests must prove that difficulty zero is nominal,
-difficulty one reaches every registered range, and two environments can carry
-different models inside the same vectorized update.
+and differentiated rollouts. Matching upstream semantics, friction and mass
+are fully randomized even at difficulty zero; gains are nominal and COM offset
+is zero at difficulty zero, then reach their complete registered ranges at
+difficulty one. Tests must prove those boundaries and that two environments
+can carry different models inside the same vectorized update.
 
 ## Evaluation and decision rules
 
