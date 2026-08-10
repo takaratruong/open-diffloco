@@ -9,6 +9,11 @@ from src.algorithms.shac.algorithm import train
 from src.core.rmr_policy import rmr_policy_from_state_dict
 from src.envs.g1_tracking.environment import DEFAULT_REFERENCE_PATH
 from src.envs.g1_tracking.fixed_solver import fixed_mjx_solver_outer_loop
+from src.envs.g1_tracking.solver_profiles import (
+    SOLVER_PROFILES,
+    get_solver_profile,
+    solver_context,
+)
 from tools.run_g1_tracking_shac import (
     build_train_kwargs as build_100hz_train_kwargs,
     configure_jax,
@@ -48,6 +53,7 @@ def build_train_kwargs(
     resume_from: str | Path | None = None,
     reference_path: str | Path = DEFAULT_REFERENCE_PATH,
     reference_stride: int = 2,
+    solver_profile: str | None = None,
 ) -> dict:
     if (
         isinstance(gradient_accumulation_steps, bool)
@@ -87,6 +93,14 @@ def build_train_kwargs(
         raise ValueError(
             "validated_task already includes unbounded source actions"
         )
+    if solver_profile is not None and (validated_task or unbounded_actions):
+        raise ValueError(
+            "solver_profile cannot be combined with legacy validated_task "
+            "or unbounded_actions switches"
+        )
+    profile = (
+        None if solver_profile is None else get_solver_profile(solver_profile)
+    )
     if source_actor_policy is None and residual_action_scale != 0.0:
         raise ValueError(
             "residual_action_scale requires source_actor_policy"
@@ -170,13 +184,24 @@ def build_train_kwargs(
             "gae_lambda": 0.95,
             "max_episode_length": 60,
             "env_variant": (
-                "g1_tracking_rmr_50hz_validated"
-                if validated_task
+                "g1_tracking_rmr_50hz_source_step"
+                if profile is not None
                 else (
-                    "g1_tracking_rmr_50hz_unbounded"
-                    if unbounded_actions
-                    else "g1_tracking_rmr_50hz"
+                    "g1_tracking_rmr_50hz_validated"
+                    if validated_task
+                    else (
+                        "g1_tracking_rmr_50hz_unbounded"
+                        if unbounded_actions
+                        else "g1_tracking_rmr_50hz"
+                    )
                 )
+            ),
+            "solver_profile": solver_profile,
+            "solver_iterations": (
+                1 if profile is None else profile.iterations
+            ),
+            "solver_ls_iterations": (
+                5 if profile is None else profile.ls_iterations
             ),
             "source_actor_policy": source_actor_policy,
             "initial_full_actor_policy": initial_full_actor_policy,
@@ -250,6 +275,10 @@ def main() -> None:
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--unbounded-actions", action="store_true")
     parser.add_argument("--validated-task", action="store_true")
+    parser.add_argument(
+        "--solver-profile",
+        choices=tuple(sorted(SOLVER_PROFILES)),
+    )
     parser.add_argument("--source-policy-checkpoint", type=Path)
     parser.add_argument("--initialize-full-policy-from", type=Path)
     parser.add_argument("--residual-action-scale", type=float, default=0.1)
@@ -303,11 +332,16 @@ def main() -> None:
         if args.initialize_full_policy_from is not None
         else None
     )
-    solver_scope = (
-        fixed_mjx_solver_outer_loop()
-        if args.validated_task
-        else nullcontext()
-    )
+    if args.solver_profile is not None:
+        solver_scope = solver_context(
+            get_solver_profile(args.solver_profile)
+        )
+    else:
+        solver_scope = (
+            fixed_mjx_solver_outer_loop()
+            if args.validated_task
+            else nullcontext()
+        )
     with solver_scope:
         train(
             **build_train_kwargs(
@@ -358,6 +392,7 @@ def main() -> None:
                 resume_from=args.resume,
                 reference_path=args.reference_path,
                 reference_stride=args.reference_stride,
+                solver_profile=args.solver_profile,
             )
         )
 

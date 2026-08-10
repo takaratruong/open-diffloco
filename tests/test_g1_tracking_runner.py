@@ -244,6 +244,38 @@ class G1TrackingRunnerTest(unittest.TestCase):
             "g1_tracking_rmr_50hz_validated",
         )
 
+    def test_native_rmr_runner_transports_named_solver_profile(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        kwargs = build_train_kwargs(
+            steps=8_000_000,
+            num_envs=256,
+            seed=3,
+            checkpoint_interval=393_216,
+            solver_profile="g1-4x5",
+        )
+
+        self.assertEqual(
+            kwargs["env_variant"],
+            "g1_tracking_rmr_50hz_source_step",
+        )
+        self.assertEqual(kwargs["solver_profile"], "g1-4x5")
+        self.assertEqual(kwargs["solver_iterations"], 4)
+        self.assertEqual(kwargs["solver_ls_iterations"], 5)
+
+    def test_named_solver_profile_rejects_legacy_task_switches(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        with self.assertRaisesRegex(ValueError, "solver_profile"):
+            build_train_kwargs(
+                steps=65_536,
+                num_envs=256,
+                seed=3,
+                checkpoint_interval=16_384,
+                validated_task=True,
+                solver_profile="g1-4x5",
+            )
+
     def test_native_rmr_runner_transports_a_fixed_body_mass_scale(self):
         from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
 

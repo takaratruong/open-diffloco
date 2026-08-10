@@ -250,6 +250,9 @@ def train(
     terrain_bump_decay: float = 0.4,
     terrain: bool = False,
     domain_randomization: bool = False,
+    solver_profile: str | None = None,
+    solver_iterations: int = 1,
+    solver_ls_iterations: int = 5,
     # Annealing
     zero_difficulty_frac: float = 0.0,
     curriculum_grace: int = None,
@@ -426,6 +429,16 @@ def train(
         or reference_stride < 1
     ):
         raise ValueError("reference_stride must be a positive integer")
+    for name, value in (
+        ("solver_iterations", solver_iterations),
+        ("solver_ls_iterations", solver_ls_iterations),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 1
+        ):
+            raise ValueError(f"{name} must be a positive integer")
     effective_num_envs = num_envs * gradient_accumulation_steps
     steps_per_actor_update = effective_num_envs * unroll_length
 
@@ -478,6 +491,18 @@ def train(
             reference_reset_noise_scale = resumed_hparams.get(
                 "reference_reset_noise_scale", reference_reset_noise_scale
             )
+            domain_randomization = resumed_hparams.get(
+                "domain_randomization", domain_randomization
+            )
+            solver_profile = resumed_hparams.get(
+                "solver_profile", solver_profile
+            )
+            solver_iterations = resumed_hparams.get(
+                "solver_iterations", solver_iterations
+            )
+            solver_ls_iterations = resumed_hparams.get(
+                "solver_ls_iterations", solver_ls_iterations
+            )
             carried_reset_bank_path = resumed_hparams.get(
                 "carried_reset_bank_path", carried_reset_bank_path
             )
@@ -489,6 +514,10 @@ def train(
             )
             if "kp_range" in resumed_hparams:
                 kp_range = tuple(resumed_hparams["kp_range"])
+            if "friction_range" in resumed_hparams:
+                friction_range = tuple(resumed_hparams["friction_range"])
+            if "mass_range" in resumed_hparams:
+                mass_range = tuple(resumed_hparams["mass_range"])
             if "kd_range" in resumed_hparams:
                 kd_range = tuple(resumed_hparams["kd_range"])
             if "com_offset_range" in resumed_hparams:
@@ -558,6 +587,8 @@ def train(
                 "reference_residual_scale": reference_residual_scale,
                 "domain_randomization": domain_randomization,
                 "actor_observation_noise": actor_observation_noise,
+                "solver_iterations": solver_iterations,
+                "solver_ls_iterations": solver_ls_iterations,
                 "carried_reset_bank_path": carried_reset_bank_path,
                 "carried_reset_probability": carried_reset_probability,
                 "carried_reset_bank_start": carried_reset_bank_start,
@@ -1643,6 +1674,9 @@ def train(
         "terrain_bump_decay": terrain_bump_decay,
         "terrain": terrain,
         "domain_randomization": domain_randomization,
+        "solver_profile": solver_profile,
+        "solver_iterations": solver_iterations,
+        "solver_ls_iterations": solver_ls_iterations,
         "zero_difficulty_frac": zero_difficulty_frac,
         "curriculum_grace": curriculum_grace,
         "curriculum_steps": curriculum_steps,
