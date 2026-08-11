@@ -523,6 +523,129 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         np.testing.assert_allclose(state.data.qvel, qvel[1], atol=1e-7)
         self.assertEqual(env.carried_reset_bank_size, 1)
 
+    def test_carried_reset_bank_restores_complete_actor_context(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        phases = np.array([21, 37], dtype=np.int32)
+        template = G1TrackingEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=10,
+            actor_reference_lookahead_steps=(4, 8, 12),
+            actor_reference_preview_mode="delta",
+        )
+        qpos = np.asarray(template.qpos_reference[phases]).copy()
+        qvel = np.asarray(template.qvel_reference[phases]).copy()
+        last_act = np.stack(
+            (
+                np.linspace(-0.4, 0.4, template.action_dim),
+                np.linspace(0.3, -0.3, template.action_dim),
+            )
+        )
+        histories = []
+        for index, phase in enumerate(phases):
+            reference_state = template.reset_at_phase(
+                jax.random.PRNGKey(80 + index),
+                jnp.array(0.0),
+                jnp.array(phase),
+            )
+            info = {
+                **reference_state.info,
+                "last_act": jnp.asarray(last_act[index]),
+            }
+            current_frame = np.asarray(
+                template._get_actor_obs(reference_state.data, info)
+            )
+            history = np.repeat(current_frame[None, :], 10, axis=0)
+            history[:-1, 0] += np.linspace(0.01, 0.09, 9)
+            histories.append(history)
+        actor_obs_history = np.stack(histories)
+
+        with tempfile.TemporaryDirectory() as directory:
+            bank_path = Path(directory) / "context_carried_reset_bank.npz"
+            np.savez_compressed(
+                bank_path,
+                phase=phases,
+                qpos=qpos,
+                qvel=qvel,
+                last_act=last_act,
+                actor_obs_history=actor_obs_history,
+            )
+            env = G1TrackingEnv(
+                xml_path=str(MODEL),
+                reference_path=str(REFERENCE),
+                controller_path=str(CONTROLLER),
+                actor_history_len=10,
+                actor_reference_lookahead_steps=(4, 8, 12),
+                actor_reference_preview_mode="delta",
+                carried_reset_bank_path=str(bank_path),
+                carried_reset_probability=1.0,
+                carried_reset_bank_start=1,
+            )
+
+            state = env.reset(jax.random.PRNGKey(29), jnp.array(0.0))
+
+        self.assertTrue(env.carried_reset_restores_actor_context)
+        self.assertEqual(int(state.info["phase"]), 37)
+        np.testing.assert_allclose(
+            state.info["last_act"], last_act[1], rtol=0.0, atol=0.0
+        )
+        np.testing.assert_allclose(
+            state.info["actor_obs_history"],
+            actor_obs_history[1],
+            rtol=0.0,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            state.obs,
+            actor_obs_history[1].reshape(-1),
+            rtol=0.0,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            state.info["bootstrap_obs"],
+            actor_obs_history[1].reshape(-1),
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    def test_carried_reset_bank_rejects_partial_or_invalid_actor_context(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        phase = np.array([21], dtype=np.int32)
+        qpos = np.asarray(self.env.qpos_reference[phase]).copy()
+        qvel = np.asarray(self.env.qvel_reference[phase]).copy()
+        base = {"phase": phase, "qpos": qpos, "qvel": qvel}
+        invalid_contexts = (
+            {"last_act": np.zeros((1, 29))},
+            {"actor_obs_history": np.zeros((1, 10, 154))},
+            {
+                "last_act": np.zeros((1, 28)),
+                "actor_obs_history": np.zeros((1, 10, 154)),
+            },
+            {
+                "last_act": np.zeros((1, 29)),
+                "actor_obs_history": np.full((1, 10, 154), np.nan),
+            },
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for index, context in enumerate(invalid_contexts):
+                with self.subTest(index=index):
+                    bank_path = Path(directory) / f"invalid_{index}.npz"
+                    np.savez_compressed(bank_path, **base, **context)
+                    with self.assertRaisesRegex(
+                        ValueError, "carried reset bank actor context"
+                    ):
+                        G1TrackingEnv(
+                            xml_path=str(MODEL),
+                            reference_path=str(REFERENCE),
+                            controller_path=str(CONTROLLER),
+                            actor_history_len=10,
+                            carried_reset_bank_path=str(bank_path),
+                            carried_reset_probability=1.0,
+                        )
+
     def test_carried_reset_bank_is_default_off_and_validated(self):
         from src.envs.g1_tracking.environment import G1TrackingEnv
 

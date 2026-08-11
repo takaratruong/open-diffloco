@@ -300,6 +300,9 @@ class G1TrackingEnv:
         self.carried_reset_qpos = None
         self.carried_reset_qvel = None
         self.carried_reset_phase = None
+        self.carried_reset_last_act = None
+        self.carried_reset_actor_obs_history = None
+        self.carried_reset_restores_actor_context = False
         if not isinstance(domain_randomization, bool):
             raise ValueError("domain_randomization must be boolean")
         self.domain_randomization = domain_randomization
@@ -395,6 +398,7 @@ class G1TrackingEnv:
 
         self.qpos_reference = jp.asarray(self.reference.qpos)
         self.qvel_reference = jp.asarray(self.reference.qvel)
+        carried_context = None
         if self.carried_reset_bank_path is not None:
             bank_path = Path(self.carried_reset_bank_path)
             if not bank_path.is_file():
@@ -406,11 +410,28 @@ class G1TrackingEnv:
                     carried_qpos = np.asarray(archive["qpos"], dtype=np.float64)
                     carried_qvel = np.asarray(archive["qvel"], dtype=np.float64)
                     carried_phase_raw = np.asarray(archive["phase"])
+                    context_presence = (
+                        "last_act" in archive,
+                        "actor_obs_history" in archive,
+                    )
+                    if all(context_presence):
+                        carried_context = (
+                            np.asarray(archive["last_act"], dtype=np.float64),
+                            np.asarray(
+                                archive["actor_obs_history"],
+                                dtype=np.float64,
+                            ),
+                        )
             except (KeyError, OSError, ValueError) as error:
                 raise ValueError(
                     "carried reset bank must be a readable NPZ with "
                     "qpos, qvel, and phase"
                 ) from error
+            if any(context_presence) and not all(context_presence):
+                raise ValueError(
+                    "carried reset bank actor context requires both "
+                    "last_act and actor_obs_history"
+                )
             if carried_phase_raw.ndim != 1:
                 raise ValueError("carried reset bank phase must be a vector")
             carried_phase = carried_phase_raw.astype(np.int32)
@@ -537,6 +558,32 @@ class G1TrackingEnv:
         )
         self.actor_frame_obs_dim = 154 + self.actor_future_reference_dim
         self.actor_obs_dim = self.actor_frame_obs_dim * actor_history_len
+        if carried_context is not None:
+            carried_last_act, carried_actor_obs_history = carried_context
+            expected_rows = int(carried_phase.shape[0])
+            if (
+                carried_last_act.shape != (expected_rows, self.action_dim)
+                or carried_actor_obs_history.shape
+                != (
+                    expected_rows,
+                    self.actor_history_len,
+                    self.actor_frame_obs_dim,
+                )
+                or not np.isfinite(carried_last_act).all()
+                or not np.isfinite(carried_actor_obs_history).all()
+            ):
+                raise ValueError(
+                    "carried reset bank actor context has invalid shape or "
+                    "non-finite values"
+                )
+            bank_slice = slice(self.carried_reset_bank_start, None)
+            self.carried_reset_last_act = jp.asarray(
+                carried_last_act[bank_slice]
+            )
+            self.carried_reset_actor_obs_history = jp.asarray(
+                carried_actor_obs_history[bank_slice]
+            )
+            self.carried_reset_restores_actor_context = True
         self.actor_noise_mask = jp.concatenate(
             (
                 jp.zeros(58),
@@ -877,6 +924,8 @@ class G1TrackingEnv:
         phase: jax.Array,
         randomization: dict[str, jax.Array] | None = None,
         phase_sampler_failed_count: jax.Array | None = None,
+        last_act: jax.Array | None = None,
+        actor_obs_history: jax.Array | None = None,
     ) -> EnvState:
         info = self._base_info(
             rng=rng,
@@ -885,9 +934,13 @@ class G1TrackingEnv:
             randomization=randomization,
             phase_sampler_failed_count=phase_sampler_failed_count,
         )
+        if last_act is not None:
+            info = {**info, "last_act": jp.asarray(last_act)}
         actor_frame = self._get_actor_obs(data, info)
-        actor_history = jp.repeat(
-            actor_frame[None, :], self.actor_history_len, axis=0
+        actor_history = (
+            jp.repeat(actor_frame[None, :], self.actor_history_len, axis=0)
+            if actor_obs_history is None
+            else jp.asarray(actor_obs_history)
         )
         critic_obs = self._get_critic_obs(data, info)
         info = {
@@ -1010,14 +1063,37 @@ class G1TrackingEnv:
                 qvel=qvel,
                 randomization=randomization,
             )
-            return self._initial_state_from_data(
+            last_act = (
+                jp.where(
+                    use_carried,
+                    self.carried_reset_last_act[bank_index],
+                    jp.zeros(self.action_dim),
+                )
+                if self.carried_reset_restores_actor_context
+                else None
+            )
+            state = self._initial_state_from_data(
                 data=data,
                 rng=rng,
                 difficulty=difficulty,
                 phase=phase,
                 randomization=randomization,
                 phase_sampler_failed_count=phase_sampler_failed_count,
+                last_act=last_act,
             )
+            if not self.carried_reset_restores_actor_context:
+                return state
+            actor_history = jp.where(
+                use_carried,
+                self.carried_reset_actor_obs_history[bank_index],
+                state.info["actor_obs_history"],
+            )
+            info = {
+                **state.info,
+                "actor_obs_history": actor_history,
+                "bootstrap_obs": actor_history.reshape(-1),
+            }
+            return state.replace(obs=actor_history.reshape(-1), info=info)
         if self.reference_reset_noise_scale == 0.0:
             if self.domain_randomization:
                 rng, phase_key, randomization_key = jax.random.split(rng, 3)
