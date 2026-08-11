@@ -47,6 +47,7 @@ class G1PhaseGridEvaluatorTest(unittest.TestCase):
             "bf8c8b407062d1b309440f4c1787c345b04d79501ea75f615e5b41c0c5ebb6db",
         )
         self.assertEqual(args.solver_profile, "g1-4x5")
+        self.assertEqual(args.actor_reference_lookahead_steps, ())
 
     def test_grid_requires_exact_registered_phases_and_four_gpus(self) -> None:
         validate_grid(PHASES, ("1", "2", "3", "4"))
@@ -133,6 +134,45 @@ class G1PhaseGridEvaluatorTest(unittest.TestCase):
         )
         self.assertIn("--reference-residual-control", command)
         self.assertNotIn("--random-actor-output-head", command)
+        self.assertNotIn("--actor-reference-lookahead-steps", command)
+
+    def test_child_command_forwards_exact_future_reference_layout(self) -> None:
+        command = build_evaluator_command(
+            python=Path("/env/python"),
+            evaluator=Path("/repo/tools/evaluate_g1_tracking.py"),
+            checkpoint=Path("/artifacts/policy_final.pkl"),
+            reference=Path("/artifacts/reference.npz"),
+            output_dir=Path("/run/phase_300"),
+            phase=300,
+            solver_profile="g1-4x5",
+            actor_reference_lookahead_steps=(4, 8, 12),
+        )
+
+        index = command.index("--actor-reference-lookahead-steps")
+        self.assertEqual(command[index + 1 : index + 4], ["4", "8", "12"])
+
+        args = build_parser().parse_args(
+            [
+                "--checkpoint",
+                "/artifacts/policy.pkl",
+                "--reference-path",
+                "/artifacts/reference.npz",
+                "--phase-zero-dir",
+                "/artifacts/phase0",
+                "--output-dir",
+                "/run/evidence",
+                "--gpu-ids",
+                "1",
+                "2",
+                "3",
+                "4",
+                "--actor-reference-lookahead-steps",
+                "4",
+                "8",
+                "12",
+            ]
+        )
+        self.assertEqual(args.actor_reference_lookahead_steps, [4, 8, 12])
 
     def test_phase_summary_must_match_exact_phase_and_reference(self) -> None:
         summary = {

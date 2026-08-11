@@ -50,6 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=tuple(sorted(SOLVER_PROFILES)),
         default="g1-4x5",
     )
+    parser.add_argument(
+        "--actor-reference-lookahead-steps",
+        type=int,
+        nargs="+",
+        default=(),
+    )
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument(
         "--evaluator",
@@ -101,10 +107,11 @@ def build_evaluator_command(
     output_dir: Path,
     phase: int,
     solver_profile: str = "g1-4x5",
+    actor_reference_lookahead_steps: tuple[int, ...] = (),
 ) -> list[str]:
     """Build one exact existing-evaluator command without changing behavior."""
     profile = get_solver_profile(solver_profile)
-    return [
+    command = [
         str(python),
         str(evaluator),
         "--checkpoint",
@@ -135,6 +142,14 @@ def build_evaluator_command(
         "--reference-stride",
         "1",
     ]
+    if actor_reference_lookahead_steps:
+        command.extend(
+            [
+                "--actor-reference-lookahead-steps",
+                *(str(step) for step in actor_reference_lookahead_steps),
+            ]
+        )
+    return command
 
 
 def validate_phase_summary(
@@ -302,6 +317,9 @@ def main() -> None:
             output_dir=phase_output,
             phase=phase,
             solver_profile=args.solver_profile,
+            actor_reference_lookahead_steps=tuple(
+                args.actor_reference_lookahead_steps
+            ),
         )
         environment = os.environ.copy()
         environment.update(

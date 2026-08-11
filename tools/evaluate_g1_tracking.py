@@ -51,6 +51,7 @@ def make_evaluation_env(
     reference_path: str | Path | None = None,
     reference_stride: int | None = None,
     actor_history_len: int = 1,
+    actor_reference_lookahead_steps: tuple[int, ...] = (),
     reference_residual_control: bool = False,
     reference_residual_scale: float = 0.5,
 ) -> G1TrackingEnv:
@@ -61,6 +62,7 @@ def make_evaluation_env(
         raise ValueError("both solver iteration budgets must be provided")
     kwargs = {
         "actor_history_len": actor_history_len,
+        "actor_reference_lookahead_steps": actor_reference_lookahead_steps,
         "actor_observation_noise": False,
         "mass_range": (body_mass_scale, body_mass_scale),
         "effort_limit_scale": effort_limit_scale,
@@ -269,6 +271,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference-stride", type=int)
     parser.add_argument("--actor-history-len", type=int, default=1)
     parser.add_argument(
+        "--actor-reference-lookahead-steps",
+        type=int,
+        nargs="+",
+        default=(),
+    )
+    parser.add_argument(
         "--reference-residual-control", action="store_true"
     )
     parser.add_argument(
@@ -339,6 +347,9 @@ def main() -> None:
         reference_path=args.reference_path,
         reference_stride=args.reference_stride,
         actor_history_len=args.actor_history_len,
+        actor_reference_lookahead_steps=tuple(
+            args.actor_reference_lookahead_steps
+        ),
         reference_residual_control=args.reference_residual_control,
         reference_residual_scale=args.reference_residual_scale,
     )
@@ -585,6 +596,9 @@ def main() -> None:
         "reference_sha256": sha256_file(reference_path),
         "reference_fps": env.reference.fps,
         "reference_stride": env.reference_stride,
+        "actor_reference_lookahead_steps": list(
+            env.actor_reference_lookahead_steps
+        ),
         "reference_states": env.reference_length,
         "reference_transitions": env.reference_transitions,
         "evaluation_start_phase": args.phase,

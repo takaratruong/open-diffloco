@@ -46,6 +46,7 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         self.assertIsNone(args.max_steps)
         self.assertEqual(args.reference_path, Path("/tmp/dance.npz"))
         self.assertEqual(args.reference_stride, 1)
+        self.assertEqual(args.actor_reference_lookahead_steps, ())
 
     def test_complete_suffix_uses_every_carried_reference_transition(self):
         self.assertEqual(remaining_reference_transitions(500, 0, 1), 499)
@@ -199,6 +200,21 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         self.assertTrue(candidate.reference_residual_control)
         self.assertEqual(candidate.reference_residual_scale, 0.5)
         self.assertFalse(candidate.actor_observation_noise)
+
+    def test_evaluator_can_recreate_future_reference_actor_observation(self):
+        candidate = make_evaluation_env(
+            "g1_tracking_rmr_50hz_source_step",
+            actor_history_len=10,
+            actor_reference_lookahead_steps=(4, 8, 12),
+            reference_residual_control=True,
+            reference_residual_scale=0.5,
+        )
+
+        self.assertEqual(
+            candidate.actor_reference_lookahead_steps, (4, 8, 12)
+        )
+        self.assertEqual(candidate.actor_frame_obs_dim, 328)
+        self.assertEqual(candidate.actor_obs_dim, 3280)
 
     def test_validated_evaluator_uses_smallest_passing_solver_budget(self):
         validated = make_evaluation_env(
