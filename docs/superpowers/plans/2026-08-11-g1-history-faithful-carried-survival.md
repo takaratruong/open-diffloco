@@ -12,7 +12,7 @@
 
 - Parent checkpoint is exact E008 step 1,327,104 with SHA-256 `fbea5e272d1431c08753a3600014623cd5577e34e01aeeba18b16af46d369377`.
 - Reference SHA-256 is `bf8c8b407062d1b309440f4c1787c345b04d79501ea75f615e5b41c0c5ebb6db`.
-- Source starts are exactly `0/100/200/300/400`, with expected E008 survival `70/63/95/70/44`.
+- Source starts are exactly `0/100/200/300/400`, with same-GPU E008 survival `75/63/94/74/45`; retain archived cross-GPU `70/63/95/70/44` as secondary evidence.
 - Retain states 6 through 29 transitions before each terminal transition: exactly 24 rows per source and 120 rows total.
 - Carried reset probability is exactly 0.5; bank start is 0.
 - Training is exactly 64 effective-512 H12 updates: 393,216 transitions from step 1,327,104 to 1,720,320.
@@ -55,7 +55,7 @@ Also test that only one of the two context arrays raises `ValueError`, wrong sha
 Run:
 
 ```bash
-JAX_ENABLE_X64=1 micromamba run -n diffsim python -m pytest \
+JAX_ENABLE_X64=1 conda run -n diffsim python -m pytest \
   tests/test_g1_tracking_environment.py \
   -k 'carried_reset' -q
 ```
@@ -85,9 +85,9 @@ In the carried-reset branch, select one bank index for all arrays. For a context
 Run:
 
 ```bash
-JAX_ENABLE_X64=1 micromamba run -n diffsim python -m pytest \
+JAX_ENABLE_X64=1 conda run -n diffsim python -m pytest \
   tests/test_g1_tracking_environment.py -q
-micromamba run -n diffsim ruff check \
+conda run -n diffsim ruff check \
   src/envs/g1_tracking/environment.py tests/test_g1_tracking_environment.py
 ```
 
@@ -115,12 +115,12 @@ git commit -m "feat: restore carried actor context"
 
 - [ ] **Step 1: Write failing pure selector and schema tests**
 
-Use synthetic rollouts with survival `(70,63,95,70,44)`. Assert each source yields exactly 24 indices, `transitions_to_terminal` is exactly `29,28,...,6`, total rows are 120, phases advance by one, and all required arrays remain row-aligned. Reject wrong source survival, terminal source rows, hard-limit violations, non-finite arrays, non-normalized quaternions, mismatched history dimensions, and a last history frame inconsistent with the stored fresh actor frame.
+Use synthetic rollouts with survival `(75,63,94,74,45)`. Assert each source yields exactly 24 indices, `transitions_to_terminal` is exactly `29,28,...,6`, total rows are 120, phases advance by one, and all required arrays remain row-aligned. Reject wrong source survival, terminal source rows, hard-limit violations, non-finite arrays, non-normalized quaternions, mismatched history dimensions, and a last history frame inconsistent with the stored fresh actor frame.
 
 - [ ] **Step 2: Run the new module test and confirm RED**
 
 ```bash
-micromamba run -n diffsim python -m pytest \
+conda run -n diffsim python -m pytest \
   tests/test_g1_history_carried_reset_bank.py -q
 ```
 
@@ -174,13 +174,13 @@ compilation is reused.
 - [ ] **Step 5: Run tests and static checks**
 
 ```bash
-micromamba run -n diffsim python -m pytest \
+conda run -n diffsim python -m pytest \
   tests/test_g1_history_carried_reset_bank.py \
   tests/test_evaluate_g1_flax_phase_grid.py -q
-micromamba run -n diffsim ruff check \
+conda run -n diffsim ruff check \
   tools/build_g1_history_carried_reset_bank.py \
   tests/test_g1_history_carried_reset_bank.py
-micromamba run -n diffsim python -m py_compile \
+conda run -n diffsim python -m py_compile \
   tools/build_g1_history_carried_reset_bank.py
 ```
 
@@ -236,7 +236,7 @@ Also assert the parser requires `--carried-reset-bank` and
 - [ ] **Step 2: Run the focused tests and confirm RED**
 
 ```bash
-micromamba run -n diffsim python -m pytest \
+conda run -n diffsim python -m pytest \
   tests/test_shac_exact_resume.py \
   tests/test_g1_frozen_residual_carried_continuation_runner.py -q
 ```
@@ -262,18 +262,18 @@ probability, offsets, horizon, optimizer, batch, CAGrad, or budget.
 - [ ] **Step 5: Run focused and neighboring tests**
 
 ```bash
-micromamba run -n diffsim python -m pytest \
+conda run -n diffsim python -m pytest \
   tests/test_shac_exact_resume.py \
   tests/test_g1_frozen_residual_preview_runner.py \
   tests/test_g1_frozen_residual_carried_continuation_runner.py \
   tests/test_shac_microbatch.py \
   tests/test_shac_cagrad_integration.py -q
-micromamba run -n diffsim ruff check \
+conda run -n diffsim ruff check \
   src/algorithms/shac/algorithm.py \
   tools/run_g1_frozen_residual_carried_continuation.py \
   tests/test_shac_exact_resume.py \
   tests/test_g1_frozen_residual_carried_continuation_runner.py
-micromamba run -n diffsim python -m py_compile \
+conda run -n diffsim python -m py_compile \
   src/algorithms/shac/algorithm.py \
   tools/run_g1_frozen_residual_carried_continuation.py
 ```
@@ -306,7 +306,7 @@ git commit -m "feat: add carried-survival continuation"
 - [ ] **Step 1: Run the complete focused regression suite**
 
 ```bash
-JAX_ENABLE_X64=1 micromamba run -n diffsim python -m pytest \
+JAX_ENABLE_X64=1 conda run -n diffsim python -m pytest \
   tests/test_g1_tracking_environment.py \
   tests/test_g1_history_carried_reset_bank.py \
   tests/test_shac_exact_resume.py \
@@ -360,7 +360,8 @@ transition/update counts, and absence of timeout.
 - [ ] **Step 7: Curate the result and choose the next causal action**
 
 Advance only if the selected vector is componentwise at least
-`70/63/95/70/44` and lexicographically exceeds `44/70/68.4`. If valid but below
+`75/63/94/74/45` and lexicographically exceeds `45/74/70.2`. Also report the
+archived `70/63/95/70/44` gate secondarily. If valid but below
 the gate, retain E008 and design the deferred terminal-value intervention. If
 invalid, repair only the invalid boundary. Update canonical state, rebuild the
 vault, validate the registry, run focused registry tests, and commit the curated

@@ -5,12 +5,13 @@ import pytest
 
 from tools.build_g1_history_carried_reset_bank import (
     select_preterminal_indices,
+    source_rollout_step_limit,
     validate_history_bank,
 )
 
 
 SOURCE_PHASES = (0, 100, 200, 300, 400)
-SURVIVAL = (70, 63, 95, 70, 44)
+SURVIVAL = (75, 63, 94, 74, 45)
 HISTORY_LEN = 10
 FRAME_DIM = 328
 
@@ -69,6 +70,13 @@ def test_selects_exact_twenty_four_state_preterminal_band() -> None:
 
     np.testing.assert_array_equal(indices, np.arange(41, 65))
     np.testing.assert_array_equal(70 - indices, np.arange(29, 5, -1))
+
+
+def test_source_rollout_observes_full_suffix_instead_of_expected_count() -> None:
+    assert source_rollout_step_limit(499, 0) == 499
+    assert source_rollout_step_limit(499, 400) == 99
+    with pytest.raises(ValueError, match="source phase"):
+        source_rollout_step_limit(499, 499)
 
 
 def test_valid_history_bank_preserves_exact_source_contract() -> None:

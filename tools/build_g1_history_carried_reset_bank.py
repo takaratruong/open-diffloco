@@ -15,7 +15,7 @@ import numpy as np
 
 PROTOCOL = "g1-history-carried-reset-bank-v1"
 SOURCE_PHASES = (0, 100, 200, 300, 400)
-SOURCE_SURVIVAL = (70, 63, 95, 70, 44)
+SOURCE_SURVIVAL = (75, 63, 94, 74, 45)
 HISTORY_LEN = 10
 LOOKAHEAD_STEPS = (4, 8, 12)
 RESIDUAL_HIDDEN = 256
@@ -47,6 +47,22 @@ def select_preterminal_indices(
     return np.flatnonzero(
         (remaining >= min_remaining) & (remaining <= max_remaining)
     )
+
+
+def source_rollout_step_limit(
+    reference_transitions: int, source_phase: int
+) -> int:
+    """Return the complete suffix length, independent of expected failure."""
+    if (
+        isinstance(reference_transitions, bool)
+        or not isinstance(reference_transitions, int)
+        or reference_transitions < 1
+        or isinstance(source_phase, bool)
+        or not isinstance(source_phase, int)
+        or not 0 <= source_phase < reference_transitions
+    ):
+        raise ValueError("source phase must index a reference transition")
+    return reference_transitions - source_phase
 
 
 def _finite_array(
@@ -232,9 +248,8 @@ def _collect_source(
     action_fn: Callable,
     *,
     source_phase: int,
-    expected_survival: int,
     seed: int,
-) -> dict[str, np.ndarray]:
+) -> tuple[dict[str, np.ndarray], int]:
     import jax
     import jax.numpy as jnp
 
@@ -260,7 +275,10 @@ def _collect_source(
             "termination_errors",
         )
     }
-    for step in range(expected_survival):
+    step_limit = source_rollout_step_limit(
+        int(env.reference_transitions), source_phase
+    )
+    for step in range(step_limit):
         action = action_fn(state)
         records["qpos"].append(np.asarray(state.data.qpos))
         records["qvel"].append(np.asarray(state.data.qvel))
@@ -275,28 +293,25 @@ def _collect_source(
         records["action"].append(np.asarray(action))
         records["source_start_phase"].append(source_phase)
         records["source_step"].append(step)
-        records["transitions_to_terminal"].append(
-            expected_survival - step
-        )
+        records["transitions_to_terminal"].append(0)
         records["terminal"].append(0.0)
         records["termination_errors"].append(_termination_errors(env, state))
         state = env.step(state, action)
         if float(state.done) > 0.5:
             break
-    if len(records["phase"]) != expected_survival:
-        raise ValueError(
-            f"source phase {source_phase} survived "
-            f"{len(records['phase'])}, expected {expected_survival}"
-        )
+    observed_survival = len(records["phase"])
     if float(state.info["terminal"]) <= 0.5:
         raise ValueError(
             f"source phase {source_phase} did not end in a terminal transition"
         )
-    selected = select_preterminal_indices(expected_survival)
-    return {
+    records["transitions_to_terminal"] = list(
+        range(observed_survival, 0, -1)
+    )
+    selected = select_preterminal_indices(observed_survival)
+    return ({
         name: np.asarray(values)[selected]
         for name, values in records.items()
-    }
+    }, observed_survival)
 
 
 def collect_bank(
@@ -304,6 +319,7 @@ def collect_bank(
     reference_path: Path,
     *,
     seed: int,
+    expected_survival: tuple[int, ...] = SOURCE_SURVIVAL,
 ) -> dict[str, np.ndarray]:
     """Collect the fixed E008 preterminal bank with the evaluation actor."""
     import jax.numpy as jnp
@@ -373,19 +389,23 @@ def collect_bank(
         ).astype(jnp.float64)
 
     sources = []
+    observed_survival = []
     with solver_context(profile):
-        for phase, survival in zip(
-            SOURCE_PHASES, SOURCE_SURVIVAL, strict=True
-        ):
-            sources.append(
-                _collect_source(
-                    env,
-                    action_fn,
-                    source_phase=phase,
-                    expected_survival=survival,
-                    seed=seed,
-                )
+        for phase in SOURCE_PHASES:
+            source, survival = _collect_source(
+                env,
+                action_fn,
+                source_phase=phase,
+                seed=seed,
             )
+            sources.append(source)
+            observed_survival.append(survival)
+    if tuple(observed_survival) != expected_survival:
+        raise ValueError(
+            "same-GPU source survival does not match expected contract: "
+            f"observed {tuple(observed_survival)}, "
+            f"expected {expected_survival}"
+        )
     names = tuple(sources[0])
     arrays = {
         name: np.concatenate([source[name] for source in sources], axis=0)
@@ -404,6 +424,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-npz", type=Path, required=True)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--expected-survival",
+        type=int,
+        nargs=5,
+        default=SOURCE_SURVIVAL,
+    )
     return parser
 
 
@@ -424,11 +450,12 @@ def main() -> None:
         checkpoint_path,
         reference_path,
         seed=args.seed,
+        expected_survival=tuple(args.expected_survival),
     )
     summary = validate_history_bank(
         arrays,
         expected_source_phases=SOURCE_PHASES,
-        expected_survival=SOURCE_SURVIVAL,
+        expected_survival=tuple(args.expected_survival),
         history_len=HISTORY_LEN,
         frame_dim=int(arrays["actor_obs_history"].shape[-1]),
     )

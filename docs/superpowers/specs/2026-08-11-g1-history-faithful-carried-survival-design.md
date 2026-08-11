@@ -60,11 +60,16 @@ Each row stores:
 - the action subsequently selected by E008;
 - termination errors and thresholds for admission checks.
 
-The collector rejects a source rollout that does not terminate at the registered
-survival count, any row that is non-finite or already outside a hard termination
-threshold, any phase discontinuity, any unnormalized root quaternion, or any
-last history frame that differs from a fresh observation of the stored physical
-state and previous action. It writes the NPZ atomically and records its SHA-256.
+The collector observes every complete suffix before admitting a bank. A GPU-7
+preflight of the exact E008 checkpoint measures same-realization survival
+`75/63/94/74/45`; the archived grid was `70/63/95/70/44` because its phases
+were evaluated across GPU realizations. E010 pins the same-GPU vector as its
+causal control and retains the archived vector as secondary historical evidence.
+The collector rejects any different source count, any row that is non-finite or
+already outside a hard termination threshold, any phase discontinuity, any
+unnormalized root quaternion, or any last history frame that differs from a
+fresh observation of the stored physical state and previous action. It writes
+the NPZ atomically and records its SHA-256.
 
 ## Reset Semantics
 
@@ -83,11 +88,13 @@ probability.
 
 ## Evaluation And Decision
 
-Every checkpoint is evaluated replay-free on the unchanged registered starts.
-E008's control vector is `70/63/95/70/44`, with minimum/median/mean
-`44/70/68.4`. The treatment advances only if its selected checkpoint:
+Every checkpoint is evaluated replay-free on the unchanged registered starts
+and GPU 7. E008's primary same-GPU control vector is `75/63/94/74/45`, with
+minimum/median/mean `45/74/70.2`; its archived cross-GPU vector is
+`70/63/95/70/44`, with `44/70/68.4`. The treatment advances only if its
+selected checkpoint:
 
-1. preserves or exceeds every E008 phase survival;
+1. preserves or exceeds every same-GPU E008 phase survival;
 2. lexicographically improves minimum, then median, then mean survival;
 3. has finite training state and nonzero authorized adapter updates;
 4. preserves the frozen parent actor and actor normalizer exactly; and
