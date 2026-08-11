@@ -54,6 +54,12 @@ FROZEN_E008_CHECKPOINT_SHA256 = (
 FROZEN_REFERENCE_SHA256 = (
     "bf8c8b407062d1b309440f4c1787c345b04d79501ea75f615e5b41c0c5ebb6db"
 )
+FROZEN_MODEL_SHA256 = (
+    "5d76cf92f00dd49d6eb9fae38d7d38e46886848b602ac691051e886c3bcccfb1"
+)
+FROZEN_CONTROLLER_SHA256 = (
+    "f832285356d8fc10b226b6bbf557520d5323c7c9022ae6dbd00c683b06e5b7ee"
+)
 FROZEN_SOLVER_PROFILE = "g1-4x5"
 FROZEN_SEED = 0
 FROZEN_ASSISTANCE_SCALE = 1.0
@@ -149,6 +155,12 @@ def summarize_wrench_trace(
         "mean_absolute_wrench_power": float(np.mean(absolute_power)),
         "absolute_wrench_work": float(dt * np.sum(absolute_power)),
         "finite": finite,
+        "exact_zero_wrench": bool(
+            finite
+            and np.array_equal(
+                values[:, :6], np.zeros_like(values[:, :6])
+            )
+        ),
         "force_cap_compliant": bool(
             finite and np.all(force_norm <= parameters.force_cap + tolerance)
         ),
@@ -163,17 +175,23 @@ def summarize_wrench_trace(
 def passes_oracle_gate(
     unassisted: dict[int, dict[str, Any]],
     assisted: dict[int, dict[str, Any]],
+    unassisted_telemetry: dict[int, dict[str, Any]],
     telemetry: dict[int, dict[str, Any]],
 ) -> bool:
     """Require the preregistered all-suffix completion and safe trace gate."""
     if (
         set(unassisted) != set(PHASES)
         or set(assisted) != set(PHASES)
+        or set(unassisted_telemetry) != set(PHASES)
         or set(telemetry) != set(PHASES)
     ):
         return False
     return baseline_is_valid(unassisted) and all(
-        int(assisted[phase].get("steps", -1)) == expected_steps
+        bool(unassisted_telemetry[phase].get("finite", False))
+        and bool(unassisted_telemetry[phase].get("exact_zero_wrench", False))
+        and bool(unassisted_telemetry[phase].get("force_cap_compliant", False))
+        and bool(unassisted_telemetry[phase].get("torque_cap_compliant", False))
+        and int(assisted[phase].get("steps", -1)) == expected_steps
         and not bool(assisted[phase].get("terminal", True))
         and bool(assisted[phase].get("completed_reference_suffix", False))
         and bool(telemetry[phase].get("finite", False))
@@ -200,6 +218,7 @@ def frozen_provenance(
     checkpoint: Path,
     reference: Path,
     torso_body_id: int,
+    environment: Any | None = None,
 ) -> dict[str, Any]:
     """Hash and validate every immutable causal input before evaluation."""
     checkpoint = checkpoint.resolve()
@@ -215,11 +234,13 @@ def frozen_provenance(
     if torso_body_id != EXPECTED_TORSO_BODY_ID:
         raise ValueError("resolved torso body ID does not match frozen model")
     profile = get_solver_profile(FROZEN_SOLVER_PROFILE)
-    return {
+    provenance = {
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": checkpoint_sha256,
+        "expected_checkpoint_sha256": FROZEN_E008_CHECKPOINT_SHA256,
         "reference": str(reference),
         "reference_sha256": reference_sha256,
+        "expected_reference_sha256": FROZEN_REFERENCE_SHA256,
         "solver_profile": FROZEN_SOLVER_PROFILE,
         "solver_iterations": profile.iterations,
         "solver_ls_iterations": profile.ls_iterations,
@@ -228,6 +249,94 @@ def frozen_provenance(
         "expected_suffix_transitions": list(EXPECTED_SUFFIX_TRANSITIONS),
         "expected_unassisted_survival": list(EXPECTED_UNASSISTED_SURVIVAL),
     }
+    if environment is not None:
+        provenance["runtime_assets"] = runtime_asset_provenance(environment)
+    return provenance
+
+
+def runtime_asset_provenance(environment: Any) -> dict[str, str]:
+    """Resolve and cryptographically bind G1's actual model/controller files."""
+    try:
+        model_path = Path(environment.xml_path).resolve()
+        controller_path = Path(environment.controller_path).resolve()
+    except AttributeError as error:
+        raise ValueError(
+            "environment must expose runtime XML and controller paths"
+        ) from error
+    if not model_path.is_file() or not controller_path.is_file():
+        raise ValueError("runtime model and controller files must be readable")
+    model_sha256 = sha256_file(model_path)
+    controller_sha256 = sha256_file(controller_path)
+    if model_sha256 != FROZEN_MODEL_SHA256:
+        raise ValueError("runtime model SHA-256 does not match frozen E008")
+    if controller_sha256 != FROZEN_CONTROLLER_SHA256:
+        raise ValueError(
+            "runtime controller SHA-256 does not match frozen E008"
+        )
+    return {
+        "model_path": str(model_path),
+        "model_sha256": model_sha256,
+        "expected_model_sha256": FROZEN_MODEL_SHA256,
+        "controller_path": str(controller_path),
+        "controller_sha256": controller_sha256,
+        "expected_controller_sha256": FROZEN_CONTROLLER_SHA256,
+    }
+
+
+def inertial_com_linear_velocity(
+    *,
+    origin_linear_velocity: jax.Array,
+    angular_velocity: jax.Array,
+    body_position: jax.Array,
+    inertial_com_position: jax.Array,
+) -> jax.Array:
+    """Return the velocity at MuJoCo's inertial-COM xfrc application point."""
+    return origin_linear_velocity + jnp.cross(
+        angular_velocity, inertial_com_position - body_position
+    )
+
+
+def write_phase_trace_artifact(
+    path: Path,
+    *,
+    unassisted_trace: np.ndarray,
+    assisted_trace: np.ndarray,
+) -> dict[str, Any]:
+    """Atomically publish one paired raw trace and return its bound identity."""
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    with temporary.open("wb") as stream:
+        np.savez_compressed(
+            stream,
+            columns=np.asarray(TRACE_COLUMNS),
+            unassisted=np.asarray(unassisted_trace, dtype=np.float64),
+            assisted=np.asarray(assisted_trace, dtype=np.float64),
+        )
+    os.replace(temporary, path)
+    return {
+        "path": str(path),
+        "sha256": sha256_file(path),
+        "columns": list(TRACE_COLUMNS),
+    }
+
+
+def validate_trace_artifacts(artifacts: dict[int, dict[str, Any]]) -> None:
+    """Reject incomplete, modified, or schema-mismatched raw phase evidence."""
+    if set(artifacts) != set(PHASES):
+        raise ValueError("raw trace artifacts must contain every phase")
+    for phase in PHASES:
+        artifact = artifacts[phase]
+        try:
+            path = Path(artifact["path"])
+            expected_hash = artifact["sha256"]
+            columns = artifact["columns"]
+        except (KeyError, TypeError) as error:
+            raise ValueError("raw trace artifact is incomplete") from error
+        if columns != list(TRACE_COLUMNS) or not path.is_file():
+            raise ValueError("raw trace artifact schema or path is invalid")
+        if sha256_file(path) != expected_hash:
+            raise ValueError("raw trace artifact SHA-256 does not match")
 
 
 def frozen_e008_environment_kwargs(
@@ -334,6 +443,7 @@ def _wrench_for_state(
     env: Any,
     state: Any,
     *,
+    torso_body_id: int,
     torso_slot: int,
     parameters: TorsoWrenchParameters,
     scale: float,
@@ -360,7 +470,16 @@ def _wrench_for_state(
         reference_angular_velocity=reference_angular_velocity,
         scale=scale,
     )
-    return wrench, actual_linear_velocity, actual_angular_velocity
+    return (
+        wrench,
+        inertial_com_linear_velocity(
+            origin_linear_velocity=actual_linear_velocity,
+            angular_velocity=actual_angular_velocity,
+            body_position=state.data.xpos[torso_body_id],
+            inertial_com_position=state.data.xipos[torso_body_id],
+        ),
+        actual_angular_velocity,
+    )
 
 
 def _summary_record(state: Any) -> tuple[float, ...]:
@@ -399,6 +518,7 @@ def rollout_condition(
         wrench, linear_velocity, angular_velocity = _wrench_for_state(
             env,
             state,
+            torso_body_id=torso_body_id,
             torso_slot=torso_slot,
             parameters=parameters,
             scale=scale,
@@ -473,6 +593,7 @@ def main() -> None:
         checkpoint=args.checkpoint,
         reference=args.reference_path,
         torso_body_id=torso_body_id,
+        environment=env,
     )
     if int(env.mj_model.opt.iterations) != profile.iterations or int(
         env.mj_model.opt.ls_iterations
@@ -505,6 +626,7 @@ def main() -> None:
         ).astype(jnp.float64)
 
     phase_results: dict[int, dict[str, Any]] = {}
+    trace_artifacts: dict[int, dict[str, Any]] = {}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     output_prefix = args.output.with_suffix("")
     for phase in PHASES:
@@ -539,11 +661,12 @@ def main() -> None:
         assisted_telemetry = summarize_wrench_trace(
             assisted_trace, parameters=parameters, dt=env.dt
         )
-        np.savez_compressed(
-            output_prefix.with_name(f"{output_prefix.name}.phase_{phase:03d}.npz"),
-            columns=np.asarray(TRACE_COLUMNS),
-            unassisted=unassisted_trace,
-            assisted=assisted_trace,
+        trace_artifacts[phase] = write_phase_trace_artifact(
+            output_prefix.with_name(
+                f"{output_prefix.name}.phase_{phase:03d}.npz"
+            ),
+            unassisted_trace=unassisted_trace,
+            assisted_trace=assisted_trace,
         )
         phase_results[phase] = {
             "unassisted": unassisted,
@@ -565,6 +688,10 @@ def main() -> None:
     unassisted_summaries = {
         phase: phase_results[phase]["unassisted"] for phase in PHASES
     }
+    unassisted_telemetry = {
+        phase: phase_results[phase]["unassisted_wrench"] for phase in PHASES
+    }
+    validate_trace_artifacts(trace_artifacts)
     document = {
         "protocol": "frozen-e008-paired-torso-wrench-oracle-v1",
         "provenance": provenance,
@@ -575,6 +702,9 @@ def main() -> None:
             "assistance_scale": FROZEN_ASSISTANCE_SCALE,
         },
         "results": {str(phase): phase_results[phase] for phase in PHASES},
+        "raw_trace_artifacts": {
+            str(phase): trace_artifacts[phase] for phase in PHASES
+        },
         "unassisted_phase_grid": build_phase_grid_payload(
             unassisted_summaries,
             checkpoint_sha256=provenance["checkpoint_sha256"],
@@ -589,7 +719,10 @@ def main() -> None:
         ),
         "baseline_valid": baseline_is_valid(unassisted_summaries),
         "passes_all_suffix_gate": passes_oracle_gate(
-            unassisted_summaries, assisted_summaries, assisted_telemetry
+            unassisted_summaries,
+            assisted_summaries,
+            unassisted_telemetry,
+            assisted_telemetry,
         ),
     }
     _write_json_atomically(args.output, document)

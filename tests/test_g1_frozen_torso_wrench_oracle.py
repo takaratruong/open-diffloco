@@ -197,17 +197,57 @@ class G1FrozenTorsoWrenchOracleTest(unittest.TestCase):
             }
             for phase in PHASES
         }
+        unassisted_telemetry = {
+            phase: {
+                "finite": True,
+                "force_cap_compliant": True,
+                "torque_cap_compliant": True,
+                "exact_zero_wrench": True,
+            }
+            for phase in PHASES
+        }
 
-        self.assertTrue(passes_oracle_gate(unassisted, assisted, telemetry))
+        self.assertTrue(
+            passes_oracle_gate(
+                unassisted,
+                assisted,
+                unassisted_telemetry,
+                telemetry,
+            )
+        )
         assisted[200] = {**assisted[200], "steps": 298}
-        self.assertFalse(passes_oracle_gate(unassisted, assisted, telemetry))
+        self.assertFalse(
+            passes_oracle_gate(
+                unassisted,
+                assisted,
+                unassisted_telemetry,
+                telemetry,
+            )
+        )
         assisted[200] = {
             "steps": 299,
             "terminal": False,
             "completed_reference_suffix": True,
         }
         unassisted[300] = {"steps": 69}
-        self.assertFalse(passes_oracle_gate(unassisted, assisted, telemetry))
+        self.assertFalse(
+            passes_oracle_gate(
+                unassisted,
+                assisted,
+                unassisted_telemetry,
+                telemetry,
+            )
+        )
+        unassisted[300] = {"steps": 70}
+        unassisted_telemetry[400]["exact_zero_wrench"] = False
+        self.assertFalse(
+            passes_oracle_gate(
+                unassisted,
+                assisted,
+                unassisted_telemetry,
+                telemetry,
+            )
+        )
 
     def test_cap_telemetry_accepts_float32_cap_rounding(self) -> None:
         from src.evaluation.g1_torso_wrench_oracle import TorsoWrenchParameters
@@ -227,6 +267,99 @@ class G1FrozenTorsoWrenchOracleTest(unittest.TestCase):
         summary = summarize_wrench_trace(trace, parameters=parameters, dt=0.02)
 
         self.assertTrue(summary["force_cap_compliant"])
+
+    def test_wrench_work_uses_inertial_com_velocity_not_body_origin(self) -> None:
+        from src.evaluation.g1_torso_wrench_oracle import TorsoWrenchParameters
+        from tools.evaluate_g1_frozen_torso_wrench_oracle import (
+            inertial_com_linear_velocity,
+            summarize_wrench_trace,
+        )
+
+        com_velocity = inertial_com_linear_velocity(
+            origin_linear_velocity=jp.zeros(3),
+            angular_velocity=jp.array([0.0, 0.0, 2.0]),
+            body_position=jp.zeros(3),
+            inertial_com_position=jp.array([0.0, 1.0, 0.0]),
+        )
+        parameters = TorsoWrenchParameters(
+            nominal_total_mass=1.0,
+            gravity_magnitude=100.0,
+        )
+        trace = np.concatenate(
+            (
+                np.array([[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]]),
+                np.asarray(com_velocity)[None, :],
+                np.array([[0.0, 0.0, 2.0]]),
+            ),
+            axis=1,
+        )
+
+        summary = summarize_wrench_trace(trace, parameters=parameters, dt=0.5)
+
+        np.testing.assert_array_equal(com_velocity, np.array([-2.0, 0.0, 0.0]))
+        self.assertEqual(summary["absolute_wrench_power"], 2.0)
+        self.assertEqual(summary["absolute_wrench_work"], 1.0)
+
+    def test_runtime_model_and_controller_provenance_is_hashed_and_pinned(self) -> None:
+        from tools.evaluate_g1_frozen_torso_wrench_oracle import (
+            FROZEN_CONTROLLER_SHA256,
+            FROZEN_MODEL_SHA256,
+            runtime_asset_provenance,
+        )
+
+        env = SimpleNamespace(
+            xml_path=(
+                "/home/ubuntu/projects/rmr_tracking/source/whole_body_tracking/"
+                "whole_body_tracking/assets/unitree_description/mjcf/g1.xml"
+            ),
+            controller_path=(
+                "/home/ubuntu/projects/diffsim2real/outputs/"
+                "rmr_torques_iter4999.npz"
+            ),
+        )
+
+        provenance = runtime_asset_provenance(env)
+
+        self.assertEqual(provenance["model_sha256"], FROZEN_MODEL_SHA256)
+        self.assertEqual(provenance["controller_sha256"], FROZEN_CONTROLLER_SHA256)
+        self.assertEqual(Path(provenance["model_path"]), Path(env.xml_path))
+        self.assertEqual(
+            Path(provenance["controller_path"]), Path(env.controller_path)
+        )
+
+    def test_phase_trace_artifacts_are_atomic_and_hash_bound(self) -> None:
+        from tools.evaluate_g1_frozen_torso_wrench_oracle import (
+            PHASES,
+            TRACE_COLUMNS,
+            validate_trace_artifacts,
+            write_phase_trace_artifact,
+        )
+
+        trace = np.zeros((1, 12), dtype=np.float64)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifacts = {
+                phase: write_phase_trace_artifact(
+                    root / f"phase_{phase:03d}.npz",
+                    unassisted_trace=trace,
+                    assisted_trace=trace,
+                )
+                for phase in PHASES
+            }
+
+            validate_trace_artifacts(artifacts)
+            first = artifacts[PHASES[0]]
+            self.assertEqual(first["columns"], list(TRACE_COLUMNS))
+            self.assertEqual(len(first["sha256"]), 64)
+            self.assertTrue(Path(first["path"]).is_file())
+            self.assertFalse(
+                Path(first["path"]).with_name(
+                    f".{Path(first['path']).name}.tmp"
+                ).exists()
+            )
+            artifacts.pop(PHASES[-1])
+            with self.assertRaisesRegex(ValueError, "every phase"):
+                validate_trace_artifacts(artifacts)
 
     def test_frozen_e008_environment_contract_restores_delta_preview_layout(
         self,
