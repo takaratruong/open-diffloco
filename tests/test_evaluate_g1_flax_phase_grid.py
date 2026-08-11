@@ -28,6 +28,9 @@ def test_flax_phase_grid_payload_records_exact_suffix_completion():
         reference_sha256="b" * 64,
         solver_profile="g1-4x5",
         actor_reference_preview_mode="delta",
+        actor_residual_preview_adapter=True,
+        actor_residual_preview_hidden=256,
+        actor_residual_preview_trainable_parameter_count=91_677,
     )
 
     assert payload["summary"]["survival"] == [499, 399, 299, 199, 99]
@@ -36,6 +39,9 @@ def test_flax_phase_grid_payload_records_exact_suffix_completion():
     assert payload["actor_history_len"] == 10
     assert payload["actor_reference_lookahead_steps"] == [4, 8, 12]
     assert payload["actor_reference_preview_mode"] == "delta"
+    assert payload["actor_residual_preview_adapter"] is True
+    assert payload["actor_residual_preview_hidden"] == 256
+    assert payload["actor_residual_preview_trainable_parameter_count"] == 91_677
 
 
 def test_flax_phase_grid_parser_defaults_absolute_and_accepts_delta():
@@ -61,3 +67,57 @@ def test_flax_phase_grid_parser_defaults_absolute_and_accepts_delta():
         ).actor_reference_preview_mode
         == "delta"
     )
+    residual = parser.parse_args(
+        [*required, "--actor-residual-preview-adapter"]
+    )
+    assert residual.actor_residual_preview_adapter is True
+    assert residual.actor_residual_preview_hidden == 256
+
+
+def test_evaluator_residual_action_matches_training_composition():
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+
+    from src.algorithms.shac.residual_preview_adapter import (
+        FrozenPreviewResidualParams,
+        PreviewResidualAdapter,
+        apply_frozen_preview_residual,
+    )
+    from src.core.networks import Actor
+    from tools.evaluate_g1_flax_phase_grid import evaluate_actor_action
+
+    parent_actor = Actor(
+        action_dim=2,
+        hidden=(4,),
+        squash=True,
+        layer_norm=False,
+        zero_output=False,
+    )
+    residual_actor = PreviewResidualAdapter(action_dim=2, hidden_dim=4)
+    observations = jnp.arange(15, dtype=jnp.float32).reshape(1, 15) / 10.0
+    params = FrozenPreviewResidualParams(
+        parent=parent_actor.init(jax.random.PRNGKey(1), observations),
+        adapter=residual_actor.init(
+            jax.random.PRNGKey(2), jnp.zeros((1, 5), dtype=jnp.float32)
+        ),
+    )
+    training_action, _, _ = apply_frozen_preview_residual(
+        parent_actor,
+        residual_actor,
+        params,
+        observations,
+        history_len=3,
+        treatment_frame_dim=5,
+    )
+
+    evaluation_action = evaluate_actor_action(
+        parent_actor,
+        params,
+        observations,
+        residual_actor=residual_actor,
+        history_len=3,
+        treatment_frame_dim=5,
+    )
+
+    np.testing.assert_array_equal(evaluation_action, training_action)
