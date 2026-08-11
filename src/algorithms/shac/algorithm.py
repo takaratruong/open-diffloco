@@ -65,6 +65,14 @@ from src.algorithms.shac.preview_adapter import (
     rmr_preview_migration_report,
     zero_current_preview,
 )
+from src.algorithms.shac.residual_preview_adapter import (
+    FrozenPreviewResidualParams,
+    PreviewResidualAdapter,
+    apply_frozen_preview_residual,
+    build_residual_adapter_mask,
+    initialize_residual_adapter_optimizer,
+    residual_adapter_migration_report,
+)
 from src.envs.g1_tracking.training_distribution import (
     PhaseSamplerState,
     init_phase_sampler,
@@ -149,6 +157,21 @@ def persist_future_reference_migration_report(
     """Validate and atomically publish append-only migration evidence."""
     validate_future_reference_migration_report(report)
     path = Path(save_dir) / "migration_equivalence.json"
+    temp_path = path.with_name(f".{path.name}.tmp")
+    with temp_path.open("w", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    os.replace(temp_path, path)
+    return path
+
+
+def persist_residual_adapter_migration_report(
+    save_dir: str | Path, report: dict[str, object]
+) -> Path:
+    """Validate and atomically publish zero-effect adapter migration evidence."""
+    if report.get("valid") is not True:
+        raise ValueError("residual adapter migration equivalence failed")
+    path = Path(save_dir) / "residual_adapter_migration.json"
     temp_path = path.with_name(f".{path.name}.tmp")
     with temp_path.open("w", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2, sort_keys=True)
@@ -393,6 +416,46 @@ def resolve_preview_adapter_resume_setting(
     if saved != requested:
         raise ValueError("actor_preview_adapter must match the checkpoint")
     return saved
+
+
+def resolve_residual_preview_adapter_resume_setting(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested: bool,
+    requested_hidden: int,
+    future_reference_upgrade: bool,
+) -> tuple[bool, int]:
+    """Allow one explicit legacy start and exact nonlinear treated resumes."""
+    if not isinstance(requested, bool):
+        raise ValueError("actor_residual_preview_adapter must be boolean")
+    if (
+        isinstance(requested_hidden, bool)
+        or not isinstance(requested_hidden, int)
+        or requested_hidden < 1
+    ):
+        raise ValueError("actor_residual_preview_hidden must be a positive integer")
+    if (
+        not resumed_hparams
+        or "actor_residual_preview_adapter" not in resumed_hparams
+    ):
+        if requested and not future_reference_upgrade:
+            raise ValueError(
+                "residual preview treatment requires a future-reference upgrade"
+            )
+        return requested, requested_hidden
+    saved = resumed_hparams["actor_residual_preview_adapter"]
+    if not isinstance(saved, bool):
+        raise ValueError(
+            "actor_residual_preview_adapter resume metadata must be boolean"
+        )
+    saved_hidden = resumed_hparams.get(
+        "actor_residual_preview_hidden", requested_hidden
+    )
+    if saved != requested or (saved and saved_hidden != requested_hidden):
+        raise ValueError(
+            "actor residual preview settings must match the checkpoint"
+        )
+    return saved, int(saved_hidden)
 
 
 def select_initial_training_state(*, initialized_state, resumed_state):
@@ -808,6 +871,48 @@ def validate_preview_adapter_configuration(
         raise ValueError("actor preview adapter requires G1 tracking")
 
 
+def validate_residual_preview_adapter_configuration(
+    *,
+    enabled: bool,
+    hidden_dim: int,
+    linear_preview_enabled: bool,
+    actor_reference_lookahead_steps: tuple[int, ...],
+    actor_reference_preview_mode: str,
+    actor_cagrad: bool,
+    history_len: int,
+    source_actor_policy,
+    initial_full_actor_policy,
+    env_variant: str,
+) -> None:
+    """Validate the isolated nonlinear frozen-parent treatment."""
+    if not isinstance(enabled, bool):
+        raise ValueError("actor_residual_preview_adapter must be boolean")
+    if (
+        isinstance(hidden_dim, bool)
+        or not isinstance(hidden_dim, int)
+        or hidden_dim < 1
+    ):
+        raise ValueError("actor_residual_preview_hidden must be a positive integer")
+    if not enabled:
+        return
+    if linear_preview_enabled:
+        raise ValueError(
+            "linear and residual preview adapters are mutually exclusive"
+        )
+    if not actor_reference_lookahead_steps or not actor_cagrad:
+        raise ValueError(
+            "residual preview adapter requires future-reference CAGrad"
+        )
+    if actor_reference_preview_mode != "delta":
+        raise ValueError("residual preview adapter requires delta preview")
+    if history_len != 10:
+        raise ValueError("residual preview adapter requires ten-frame history")
+    if source_actor_policy is not None or initial_full_actor_policy is not None:
+        raise ValueError("residual preview adapter requires a plain Flax actor")
+    if not env_variant.startswith("g1_tracking"):
+        raise ValueError("residual preview adapter requires G1 tracking")
+
+
 def train(
     # General
     total_steps: int = 100_000,
@@ -864,6 +969,8 @@ def train(
     actor_reference_preview_mode: str = "absolute",
     allow_resume_actor_reference_lookahead_upgrade: bool = False,
     actor_preview_adapter: bool = False,
+    actor_residual_preview_adapter: bool = False,
+    actor_residual_preview_hidden: int = 256,
     env_variant: str = "blind_nolinvel_nokinref",
     actor_per_env_grad_clip: float = None,
     critic_per_env_grad_clip: float = None,
@@ -1021,6 +1128,18 @@ def train(
         initial_full_actor_policy=initial_full_actor_policy,
         env_variant=env_variant,
     )
+    validate_residual_preview_adapter_configuration(
+        enabled=actor_residual_preview_adapter,
+        hidden_dim=actor_residual_preview_hidden,
+        linear_preview_enabled=actor_preview_adapter,
+        actor_reference_lookahead_steps=actor_reference_lookahead_steps,
+        actor_reference_preview_mode=actor_reference_preview_mode,
+        actor_cagrad=actor_cagrad,
+        history_len=actor_history_len,
+        source_actor_policy=source_actor_policy,
+        initial_full_actor_policy=initial_full_actor_policy,
+        env_variant=env_variant,
+    )
     if not isinstance(adaptive_phase_sampling, bool):
         raise ValueError("adaptive_phase_sampling must be boolean")
     if (
@@ -1165,6 +1284,15 @@ def train(
         actor_preview_adapter = resolve_preview_adapter_resume_setting(
             resumed_hparams,
             requested=actor_preview_adapter,
+        )
+        (
+            actor_residual_preview_adapter,
+            actor_residual_preview_hidden,
+        ) = resolve_residual_preview_adapter_resume_setting(
+            resumed_hparams,
+            requested=actor_residual_preview_adapter,
+            requested_hidden=actor_residual_preview_hidden,
+            future_reference_upgrade=future_reference_upgrade,
         )
         (
             adaptive_phase_sampling,
@@ -1319,6 +1447,20 @@ def train(
             initial_full_actor_policy=initial_full_actor_policy,
             env_variant=env_variant,
         )
+        validate_residual_preview_adapter_configuration(
+            enabled=actor_residual_preview_adapter,
+            hidden_dim=actor_residual_preview_hidden,
+            linear_preview_enabled=actor_preview_adapter,
+            actor_reference_lookahead_steps=(
+                actor_reference_lookahead_steps
+            ),
+            actor_reference_preview_mode=actor_reference_preview_mode,
+            actor_cagrad=actor_cagrad,
+            history_len=actor_history_len,
+            source_actor_policy=source_actor_policy,
+            initial_full_actor_policy=initial_full_actor_policy,
+            env_variant=env_variant,
+        )
 
     if actor_reference_lookahead_steps and not env_variant.startswith(
         "g1_tracking"
@@ -1437,6 +1579,10 @@ def train(
         layer_norm=actor_layer_norm,
         zero_output=actor_zero_output,
     )
+    residual_preview_actor = PreviewResidualAdapter(
+        action_dim=env.action_dim,
+        hidden_dim=actor_residual_preview_hidden,
+    )
     critic = Critic()
 
     actor_dummy = jp.zeros((1, env.actor_obs_dim), dtype=jp.float32)
@@ -1447,9 +1593,13 @@ def train(
         else actor.init(k1, actor_dummy)
     )
     migration_report = None
+    residual_adapter_report = None
     preview_adapter_mask = None
     preview_legacy_frame_dim = 0
     preview_trainable_parameter_count = 0
+    frozen_preview_treatment = bool(
+        actor_preview_adapter or actor_residual_preview_adapter
+    )
     if actor_preview_adapter:
         preview_legacy_frame_dim = (
             env.actor_frame_obs_dim - env.actor_future_reference_dim
@@ -1617,11 +1767,26 @@ def train(
             obs_norm = env.normalize_actor_obs(
                 actor_norm, actor_norm_state, actor_obs
             ).astype(jp.float32)
-            residual_logits = (
-                actor.apply(actor_params, obs_norm)
-                if initial_full_actor_policy is None
-                else None
-            )
+            residual_logits = None
+            if actor_residual_preview_adapter:
+                action, parent_action, _residual_action = (
+                    apply_frozen_preview_residual(
+                        actor,
+                        residual_preview_actor,
+                        actor_params,
+                        obs_norm,
+                        history_len=actor_history_len,
+                        treatment_frame_dim=env.actor_frame_obs_dim,
+                    )
+                )
+                action = action.astype(jp.float64)
+                parent_action = parent_action.astype(jp.float64)
+            else:
+                residual_logits = (
+                    actor.apply(actor_params, obs_norm)
+                    if initial_full_actor_policy is None
+                    else None
+                )
             if actor_preview_adapter:
                 if initial_full_actor_policy is not None:
                     parent_action = apply_trainable_rmr_policy(
@@ -1638,7 +1803,9 @@ def train(
                     parent_action = actor.apply(
                         actor_params, parent_obs
                     ).astype(jp.float64)
-            if initial_full_actor_policy is not None:
+            if actor_residual_preview_adapter:
+                pass
+            elif initial_full_actor_policy is not None:
                 action = apply_trainable_rmr_policy(
                     actor_params, actor_obs
                 ).astype(jp.float64)
@@ -1660,7 +1827,7 @@ def train(
             if squash_actor_actions:
                 noisy_action = jp.clip(noisy_action, -1.0, 1.0)
 
-            if adaptive_phase_sampling or actor_preview_adapter:
+            if adaptive_phase_sampling or frozen_preview_treatment:
                 transition_phase = transition_phase_before_reset(
                     state.info["phase"],
                     reference_stride=env.reference_stride,
@@ -1691,7 +1858,7 @@ def train(
             }
             if adaptive_phase_sampling:
                 transition["transition_phase"] = transition_phase
-            if actor_preview_adapter:
+            if frozen_preview_treatment:
                 transition.update(
                     {
                         "candidate_action": action,
@@ -2053,7 +2220,7 @@ def train(
                 phase_count=int(env.reference_transitions),
                 bin_count=actor_phase_bin_count,
             )
-        if actor_preview_adapter:
+        if frozen_preview_treatment:
             preview_action_diagnostics = phase_binned_action_deviation(
                 trajs["candidate_action"],
                 trajs["parent_action"],
@@ -2085,7 +2252,7 @@ def train(
 
         actor_grad_norm = compute_grad_norm(grads)
 
-        if actor_preview_adapter:
+        if frozen_preview_treatment:
             updates, new_actor_opt, preview_update_diagnostics = (
                 apply_preview_adapter_update(
                     actor_opt,
@@ -2254,7 +2421,7 @@ def train(
         )
 
         # Update actor and critic normalizers from their own observation streams.
-        if actor_preview_adapter:
+        if frozen_preview_treatment:
             new_actor_norm = state.normalizer
             preview_normalizer_drift = jp.asarray(
                 0.0, dtype=state.normalizer.mean.dtype
@@ -2381,7 +2548,7 @@ def train(
                     ),
                 }
             )
-        if actor_preview_adapter:
+        if frozen_preview_treatment:
             preview_valid = (
                 preview_action_diagnostics["valid"]
                 & jp.isfinite(
@@ -2503,6 +2670,82 @@ def train(
             persist_future_reference_migration_report(
                 save_dir, migration_report
             )
+        if actor_residual_preview_adapter:
+            if future_reference_upgrade:
+                parent_params = resumed_state.actor_params
+                parent_optimizer_state = resumed_state.actor_opt
+                adapter_params = residual_preview_actor.init(
+                    jax.random.fold_in(k1, 0x5250),
+                    jp.zeros(
+                        (1, env.actor_frame_obs_dim), dtype=jp.float32
+                    ),
+                )
+                composite_params = FrozenPreviewResidualParams(
+                    parent=parent_params,
+                    adapter=adapter_params,
+                )
+                composite_optimizer_state = (
+                    initialize_residual_adapter_optimizer(
+                        actor_opt,
+                        parent_optimizer_state=parent_optimizer_state,
+                        composite_params=composite_params,
+                    )
+                )
+                normalized_observations = env.normalize_actor_obs(
+                    actor_norm,
+                    resumed_state.normalizer,
+                    resumed_state.env_state.obs,
+                ).astype(jp.float32)
+                residual_adapter_report = (
+                    residual_adapter_migration_report(
+                        parent_actor=actor,
+                        residual_actor=residual_preview_actor,
+                        parent_params=parent_params,
+                        parent_optimizer_state=parent_optimizer_state,
+                        candidate_params=composite_params,
+                        candidate_optimizer_state=(
+                            composite_optimizer_state
+                        ),
+                        normalized_observations=normalized_observations,
+                        history_len=actor_history_len,
+                        treatment_frame_dim=env.actor_frame_obs_dim,
+                    )
+                )
+                resumed_state = resumed_state.replace(
+                    actor_params=composite_params,
+                    actor_opt=composite_optimizer_state,
+                )
+                persist_residual_adapter_migration_report(
+                    save_dir, residual_adapter_report
+                )
+            elif not isinstance(
+                resumed_state.actor_params, FrozenPreviewResidualParams
+            ):
+                raise ValueError(
+                    "resumed residual preview actor has invalid parameters"
+                )
+            preview_adapter_mask = build_residual_adapter_mask(
+                resumed_state.actor_params
+            )
+            preview_trainable_parameter_count = sum(
+                int(np.count_nonzero(np.asarray(leaf)))
+                for leaf in jax.tree_util.tree_leaves(
+                    preview_adapter_mask
+                )
+            )
+            expected_residual_parameters = (
+                env.actor_frame_obs_dim * actor_residual_preview_hidden
+                + actor_residual_preview_hidden
+                + actor_residual_preview_hidden * env.action_dim
+                + env.action_dim
+            )
+            if (
+                preview_trainable_parameter_count
+                != expected_residual_parameters
+            ):
+                raise ValueError(
+                    "residual preview trainable parameter count is invalid"
+                )
         if adaptive_phase_sampling:
             resumed_state = resumed_state.replace(
                 env_state=migrate_adaptive_phase_env_state(
@@ -2510,6 +2753,10 @@ def train(
                     reference_length=env.reference_length,
                 )
             )
+    if actor_residual_preview_adapter and resumed_state is None:
+        raise ValueError(
+            "residual preview adapter requires an explicit resumed checkpoint"
+        )
     state = select_initial_training_state(
         initialized_state=initialized_state,
         resumed_state=resumed_state,
@@ -2624,19 +2871,35 @@ def train(
         ),
         "actor_reference_preview_mode": actor_reference_preview_mode,
         "actor_preview_adapter": actor_preview_adapter,
+        "actor_residual_preview_adapter": (
+            actor_residual_preview_adapter
+        ),
+        "actor_residual_preview_hidden": (
+            actor_residual_preview_hidden
+        ),
+        "actor_residual_preview_trainable_parameter_count": (
+            preview_trainable_parameter_count
+            if actor_residual_preview_adapter
+            else 0
+        ),
         "actor_preview_trainable_parameter_count": (
             preview_trainable_parameter_count
         ),
-        "actor_normalizer_frozen": actor_preview_adapter,
+        "actor_normalizer_frozen": frozen_preview_treatment,
         "checkpoint_phase_metrics_artifact": (
             "checkpoint_phase_metrics.json"
-            if actor_preview_adapter
+            if frozen_preview_treatment
             else None
         ),
         "resume_future_reference_upgrade": future_reference_upgrade,
         "migration_equivalence_artifact": (
             "migration_equivalence.json"
             if migration_report is not None
+            else None
+        ),
+        "residual_adapter_migration_artifact": (
+            "residual_adapter_migration.json"
+            if residual_adapter_report is not None
             else None
         ),
         "actor_per_env_grad_clip": actor_per_env_grad_clip,
@@ -2683,7 +2946,7 @@ def train(
 
         if actor_cagrad and not bool(metrics["actor_cagrad_valid"]):
             raise RuntimeError("actor CAGrad aggregation is invalid")
-        if actor_preview_adapter and not bool(metrics["actor_preview_valid"]):
+        if frozen_preview_treatment and not bool(metrics["actor_preview_valid"]):
             raise RuntimeError("actor preview adapter telemetry is invalid")
 
         if should_log_training_iteration(i, start_iteration=start_iter):
@@ -2851,7 +3114,7 @@ def train(
                             ),
                         }
                     )
-                if actor_preview_adapter:
+                if frozen_preview_treatment:
                     diag_entry.update(
                         {
                             "actor_preview_gradient_norm": float(
@@ -2978,7 +3241,7 @@ def train(
             )
         )
         if checkpoint_path is not None:
-            if actor_preview_adapter:
+            if frozen_preview_treatment:
                 persist_checkpoint_phase_metric(
                     save_dir,
                     {

@@ -123,6 +123,57 @@ def test_train_wires_preview_adapter_without_changing_disabled_path():
     assert "persist_checkpoint_phase_metric(" in source
 
 
+def test_residual_preview_configuration_requires_isolated_delta_cagrad():
+    from src.algorithms.shac.algorithm import (
+        validate_residual_preview_adapter_configuration,
+    )
+
+    valid = {
+        "enabled": True,
+        "hidden_dim": 256,
+        "linear_preview_enabled": False,
+        "actor_reference_lookahead_steps": (4, 8, 12),
+        "actor_reference_preview_mode": "delta",
+        "actor_cagrad": True,
+        "history_len": 10,
+        "source_actor_policy": None,
+        "initial_full_actor_policy": None,
+        "env_variant": "g1_tracking_rmr",
+    }
+    validate_residual_preview_adapter_configuration(**valid)
+    invalid_cases = (
+        ({"enabled": "yes"}, "must be boolean"),
+        ({"hidden_dim": 0}, "positive integer"),
+        ({"linear_preview_enabled": True}, "mutually exclusive"),
+        ({"actor_reference_lookahead_steps": ()}, "future-reference CAGrad"),
+        ({"actor_reference_preview_mode": "absolute"}, "delta preview"),
+        ({"actor_cagrad": False}, "future-reference CAGrad"),
+        ({"history_len": 1}, "ten-frame history"),
+        ({"source_actor_policy": object()}, "plain Flax actor"),
+        ({"initial_full_actor_policy": object()}, "plain Flax actor"),
+        ({"env_variant": "go2"}, "G1 tracking"),
+    )
+    for changes, message in invalid_cases:
+        candidate = {**valid, **changes}
+        with pytest.raises(ValueError, match=message):
+            validate_residual_preview_adapter_configuration(**candidate)
+
+
+def test_train_wires_residual_preview_through_existing_frozen_boundary():
+    from src.algorithms.shac.algorithm import train
+
+    source = inspect.getsource(train)
+
+    assert "PreviewResidualAdapter(" in source
+    assert "apply_frozen_preview_residual(" in source
+    assert "initialize_residual_adapter_optimizer(" in source
+    assert "build_residual_adapter_mask(" in source
+    assert "residual_adapter_migration_report(" in source
+    assert '"actor_residual_preview_adapter": (' in source
+    assert '"actor_residual_preview_hidden": (' in source
+    assert '"residual_adapter_migration.json"' in source
+
+
 def test_train_wires_native_rmr_preview_migration_and_parent_action():
     from src.algorithms.shac.algorithm import train
 

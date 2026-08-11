@@ -24,6 +24,75 @@ class ShacExactResumeTest(unittest.TestCase):
             False,
         )
         self.assertIs(parameters["actor_preview_adapter"].default, False)
+        self.assertIs(
+            parameters["actor_residual_preview_adapter"].default, False
+        )
+        self.assertEqual(
+            parameters["actor_residual_preview_hidden"].default, 256
+        )
+
+    def test_residual_preview_can_only_start_during_explicit_legacy_upgrade(self):
+        from src.algorithms.shac.algorithm import (
+            resolve_residual_preview_adapter_resume_setting,
+        )
+
+        self.assertEqual(
+            resolve_residual_preview_adapter_resume_setting(
+                {},
+                requested=True,
+                requested_hidden=256,
+                future_reference_upgrade=True,
+            ),
+            (True, 256),
+        )
+        with self.assertRaisesRegex(ValueError, "future-reference upgrade"):
+            resolve_residual_preview_adapter_resume_setting(
+                {},
+                requested=True,
+                requested_hidden=256,
+                future_reference_upgrade=False,
+            )
+
+    def test_residual_preview_resume_requires_exact_saved_flag_and_width(self):
+        from src.algorithms.shac.algorithm import (
+            resolve_residual_preview_adapter_resume_setting,
+        )
+
+        metadata = {
+            "actor_residual_preview_adapter": True,
+            "actor_residual_preview_hidden": 256,
+        }
+        self.assertEqual(
+            resolve_residual_preview_adapter_resume_setting(
+                metadata,
+                requested=True,
+                requested_hidden=256,
+                future_reference_upgrade=False,
+            ),
+            (True, 256),
+        )
+        for requested, hidden in ((False, 256), (True, 128)):
+            with self.subTest(requested=requested, hidden=hidden):
+                with self.assertRaisesRegex(ValueError, "must match"):
+                    resolve_residual_preview_adapter_resume_setting(
+                        metadata,
+                        requested=requested,
+                        requested_hidden=hidden,
+                        future_reference_upgrade=False,
+                    )
+
+    def test_residual_preview_resume_rejects_invalid_metadata(self):
+        from src.algorithms.shac.algorithm import (
+            resolve_residual_preview_adapter_resume_setting,
+        )
+
+        with self.assertRaisesRegex(ValueError, "boolean"):
+            resolve_residual_preview_adapter_resume_setting(
+                {"actor_residual_preview_adapter": "yes"},
+                requested=True,
+                requested_hidden=256,
+                future_reference_upgrade=False,
+            )
 
     def test_delta_preview_mode_requires_upgrade_or_exact_resume(self):
         from src.algorithms.shac.algorithm import (
