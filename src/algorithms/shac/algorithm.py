@@ -44,6 +44,12 @@ from src.algorithms.shac.initialization import (
     canonicalize_tree_like,
     commit_tree_to_local_device,
 )
+from src.envs.g1_tracking.training_distribution import (
+    PhaseSamplerState,
+    init_phase_sampler,
+    phase_sampling_probabilities,
+    update_phase_sampler,
+)
 
 
 # Set to True to enable per-foot normal force logging.
@@ -147,6 +153,114 @@ def resolve_action_noise_schedule_steps(
 def select_initial_training_state(*, initialized_state, resumed_state):
     """Select the full saved state for an exact continuation."""
     return resumed_state if resumed_state is not None else initialized_state
+
+
+def update_adaptive_phase_state(
+    *,
+    failed_count: jax.Array,
+    transition_phases: jax.Array,
+    terminals: jax.Array,
+    reference_length: int,
+    alpha: float,
+) -> jax.Array:
+    """Update one failure EMA from an arbitrarily sharded transition batch."""
+    return update_phase_sampler(
+        PhaseSamplerState(failed_count=jp.asarray(failed_count)),
+        phases=transition_phases,
+        terminals=terminals,
+        reference_length=reference_length,
+        alpha=alpha,
+    ).failed_count
+
+
+def migrate_adaptive_phase_env_state(env_state, *, reference_length: int):
+    """Add the adaptive EMA leaf to a legacy batched environment state."""
+    if "phase_sampler_failed_count" in env_state.info:
+        return env_state
+    initial = init_phase_sampler(reference_length).failed_count
+    leading_shape = jp.asarray(env_state.info["phase"]).shape
+    failed_count = jp.broadcast_to(initial, leading_shape + initial.shape)
+    return env_state.replace(
+        info={
+            **env_state.info,
+            "phase_sampler_failed_count": failed_count,
+        }
+    )
+
+
+def broadcast_adaptive_phase_state(env_state, failed_count: jax.Array):
+    """Broadcast one completed EMA into every batched environment state."""
+    current = env_state.info["phase_sampler_failed_count"]
+    broadcast = jp.broadcast_to(jp.asarray(failed_count), current.shape)
+    return env_state.replace(
+        info={
+            **env_state.info,
+            "phase_sampler_failed_count": broadcast,
+        }
+    )
+
+
+def transition_phase_before_reset(
+    phases: jax.Array,
+    *,
+    reference_stride: int,
+    reference_length: int,
+) -> jax.Array:
+    """Return the transition phase that env.step evaluates before reset."""
+    return jp.minimum(
+        jp.asarray(phases, dtype=jp.int32) + reference_stride,
+        reference_length - 1,
+    )
+
+
+def adaptive_phase_diagnostics(
+    *,
+    failed_count: jax.Array,
+    transition_phases: jax.Array,
+    terminals: jax.Array,
+    reference_length: int,
+    uniform_ratio: float,
+) -> dict[str, jax.Array]:
+    """Build fixed-shape adaptive reset telemetry and its validity bit."""
+    failed_count = jp.asarray(failed_count)
+    transition_phases = jp.asarray(transition_phases, dtype=jp.int32)
+    terminals = jp.asarray(terminals, dtype=jp.float32)
+    if transition_phases.shape != terminals.shape:
+        raise ValueError(
+            "transition_phases and terminals must have identical shapes"
+        )
+    bin_count = failed_count.shape[0]
+    bins = jp.clip(
+        transition_phases * bin_count // reference_length,
+        min=0,
+        max=bin_count - 1,
+    )
+    terminal_bin_counts = jp.bincount(
+        bins.reshape(-1),
+        weights=terminals.reshape(-1),
+        length=bin_count,
+    )
+    probabilities = phase_sampling_probabilities(
+        PhaseSamplerState(failed_count=failed_count),
+        uniform_ratio=uniform_ratio,
+    )
+    minimum_probability = jp.min(probabilities)
+    probability_floor = 0.5 / float(bin_count) - 1e-7
+    valid = (
+        jp.all(jp.isfinite(failed_count))
+        & jp.all(jp.isfinite(probabilities))
+        & jp.all(jp.isfinite(terminal_bin_counts))
+        & jp.all(probabilities >= 0.0)
+        & jp.isclose(jp.sum(probabilities), 1.0, atol=1e-6, rtol=0.0)
+        & (minimum_probability >= probability_floor)
+    )
+    return {
+        "failure_ema": failed_count,
+        "probabilities": probabilities,
+        "terminal_bin_counts": terminal_bin_counts,
+        "minimum_probability": minimum_probability,
+        "valid": valid,
+    }
 
 
 def squeeze_value_head(values):
@@ -279,6 +393,9 @@ def train(
     actor_phase_robust_weighting: bool = False,
     actor_phase_bin_count: int = 5,
     actor_phase_robust_fraction: float = 0.5,
+    adaptive_phase_sampling: bool = False,
+    adaptive_phase_uniform_ratio: float = 0.5,
+    adaptive_phase_alpha: float = 0.001,
     actor_bootstrap_scale: float = 1.0,
     actor_bootstrap_delay_steps: int = 0,
     actor_hidden: tuple[int, ...] = (512, 256, 128),
@@ -403,6 +520,26 @@ def train(
     ):
         raise ValueError(
             "phase-robust weighting requires G1 reference phases"
+        )
+    if not isinstance(adaptive_phase_sampling, bool):
+        raise ValueError("adaptive_phase_sampling must be boolean")
+    if (
+        isinstance(adaptive_phase_uniform_ratio, bool)
+        or not math.isfinite(adaptive_phase_uniform_ratio)
+        or not 0.0 <= adaptive_phase_uniform_ratio <= 1.0
+    ):
+        raise ValueError(
+            "adaptive_phase_uniform_ratio must be finite and in [0, 1]"
+        )
+    if (
+        isinstance(adaptive_phase_alpha, bool)
+        or not math.isfinite(adaptive_phase_alpha)
+        or not 0.0 < adaptive_phase_alpha <= 1.0
+    ):
+        raise ValueError("adaptive_phase_alpha must be finite and in (0, 1]")
+    if adaptive_phase_sampling and not env_variant.startswith("g1_tracking"):
+        raise ValueError(
+            "adaptive phase sampling requires G1 reference phases"
         )
     if (
         isinstance(actor_bootstrap_delay_steps, bool)
@@ -551,6 +688,16 @@ def train(
             carried_reset_bank_start = resumed_hparams.get(
                 "carried_reset_bank_start", carried_reset_bank_start
             )
+            adaptive_phase_sampling = resumed_hparams.get(
+                "adaptive_phase_sampling", adaptive_phase_sampling
+            )
+            adaptive_phase_uniform_ratio = resumed_hparams.get(
+                "adaptive_phase_uniform_ratio",
+                adaptive_phase_uniform_ratio,
+            )
+            adaptive_phase_alpha = resumed_hparams.get(
+                "adaptive_phase_alpha", adaptive_phase_alpha
+            )
             if "kp_range" in resumed_hparams:
                 kp_range = tuple(resumed_hparams["kp_range"])
             if "friction_range" in resumed_hparams:
@@ -631,6 +778,10 @@ def train(
                 "carried_reset_bank_path": carried_reset_bank_path,
                 "carried_reset_probability": carried_reset_probability,
                 "carried_reset_bank_start": carried_reset_bank_start,
+                "adaptive_phase_sampling": adaptive_phase_sampling,
+                "adaptive_phase_uniform_ratio": (
+                    adaptive_phase_uniform_ratio
+                ),
             }
         )
         if reference_path is not None:
@@ -842,10 +993,16 @@ def train(
             if squash_actor_actions:
                 noisy_action = jp.clip(noisy_action, -1.0, 1.0)
 
+            if adaptive_phase_sampling:
+                transition_phase = transition_phase_before_reset(
+                    state.info["phase"],
+                    reference_stride=env.reference_stride,
+                    reference_length=env.reference_length,
+                )
             next_state = env.step(state, noisy_action)
             foot_bump_ou = jp.where(next_state.done, jp.zeros((4, 3)), foot_bump_ou)
 
-            return (next_state, foot_bump_ou), {
+            transition = {
                 "reward": next_state.reward,
                 "done": next_state.done,
                 "terminal": next_state.info["terminal"],
@@ -865,6 +1022,9 @@ def train(
                 "foot_normal_RL": next_state.metrics["foot_normal_RL"],
                 "foot_normal_RR": next_state.metrics["foot_normal_RR"],
             }
+            if adaptive_phase_sampling:
+                transition["transition_phase"] = transition_phase
+            return (next_state, foot_bump_ou), transition
 
         env_state = jax.lax.stop_gradient(env_state)
 
@@ -1174,6 +1334,27 @@ def train(
             grads = mean_shard_trees(shard_grads)
             actor_grad_stats = summarize_shard_stats(shard_grad_stats)
 
+        if adaptive_phase_sampling:
+            completed_failed_count = update_adaptive_phase_state(
+                failed_count=updated_env_state.info[
+                    "phase_sampler_failed_count"
+                ][0],
+                transition_phases=trajs["transition_phase"],
+                terminals=trajs["terminal"],
+                reference_length=env.reference_length,
+                alpha=adaptive_phase_alpha,
+            )
+            adaptive_diagnostics = adaptive_phase_diagnostics(
+                failed_count=completed_failed_count,
+                transition_phases=trajs["transition_phase"],
+                terminals=trajs["terminal"],
+                reference_length=env.reference_length,
+                uniform_ratio=adaptive_phase_uniform_ratio,
+            )
+            final_states = broadcast_adaptive_phase_state(
+                final_states, completed_failed_count
+            )
+
         actor_grad_norm = compute_grad_norm(grads)
 
         updates, new_actor_opt = actor_opt.update(grads, state.actor_opt)
@@ -1414,6 +1595,26 @@ def train(
                     "actor_loss_weighted": phase_weighting.weighted_loss,
                 }
             )
+        if adaptive_phase_sampling:
+            metrics.update(
+                {
+                    "adaptive_phase_failure_ema": adaptive_diagnostics[
+                        "failure_ema"
+                    ],
+                    "adaptive_phase_probabilities": adaptive_diagnostics[
+                        "probabilities"
+                    ],
+                    "adaptive_phase_terminal_bin_counts": (
+                        adaptive_diagnostics["terminal_bin_counts"]
+                    ),
+                    "adaptive_phase_min_probability": adaptive_diagnostics[
+                        "minimum_probability"
+                    ],
+                    "adaptive_phase_sampling_valid": adaptive_diagnostics[
+                        "valid"
+                    ],
+                }
+            )
 
         return new_state, metrics
 
@@ -1435,6 +1636,13 @@ def train(
             f"{resumed_step} (PRNG, environments, parameters, optimizers, "
             "and normalizers)"
         )
+        if adaptive_phase_sampling:
+            resumed_state = resumed_state.replace(
+                env_state=migrate_adaptive_phase_env_state(
+                    resumed_state.env_state,
+                    reference_length=env.reference_length,
+                )
+            )
     state = select_initial_training_state(
         initialized_state=initialized_state,
         resumed_state=resumed_state,
@@ -1621,6 +1829,32 @@ def train(
                             ),
                         }
                     )
+                if adaptive_phase_sampling:
+                    if not bool(metrics["adaptive_phase_sampling_valid"]):
+                        raise RuntimeError(
+                            "adaptive phase sampling telemetry is invalid"
+                        )
+                    diag_entry.update(
+                        {
+                            "adaptive_phase_failure_ema": np.asarray(
+                                metrics["adaptive_phase_failure_ema"]
+                            ).tolist(),
+                            "adaptive_phase_probabilities": np.asarray(
+                                metrics["adaptive_phase_probabilities"]
+                            ).tolist(),
+                            "adaptive_phase_terminal_bin_counts": np.asarray(
+                                metrics[
+                                    "adaptive_phase_terminal_bin_counts"
+                                ]
+                            ).tolist(),
+                            "adaptive_phase_min_probability": float(
+                                metrics["adaptive_phase_min_probability"]
+                            ),
+                            "adaptive_phase_sampling_valid": bool(
+                                metrics["adaptive_phase_sampling_valid"]
+                            ),
+                        }
+                    )
                 diag_log.append(diag_entry)
             else:
                 print(
@@ -1775,6 +2009,9 @@ def train(
         "actor_phase_robust_weighting": actor_phase_robust_weighting,
         "actor_phase_bin_count": actor_phase_bin_count,
         "actor_phase_robust_fraction": actor_phase_robust_fraction,
+        "adaptive_phase_sampling": adaptive_phase_sampling,
+        "adaptive_phase_uniform_ratio": adaptive_phase_uniform_ratio,
+        "adaptive_phase_alpha": adaptive_phase_alpha,
         "actor_bootstrap_scale": actor_bootstrap_scale,
         "actor_bootstrap_delay_steps": actor_bootstrap_delay_steps,
         "actor_hidden": list(actor_hidden),

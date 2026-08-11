@@ -346,6 +346,125 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
             )
         )
 
+    def test_adaptive_resets_bias_phases_without_invalidating_reset_state(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+        from src.envs.g1_tracking.training_distribution import (
+            init_phase_sampler,
+        )
+
+        env = G1TrackingEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=2,
+            adaptive_phase_sampling=True,
+            adaptive_phase_uniform_ratio=0.5,
+            reference_reset_noise_scale=1.0,
+            domain_randomization=True,
+            friction_range=(0.8, 1.2),
+            mass_range=(0.9, 1.1),
+            kp_range=(30.0, 40.0),
+            kd_range=(0.4, 0.6),
+            com_offset_range=(0.01, 0.01, 0.01),
+        )
+        failed_count = init_phase_sampler(env.reference_length).failed_count
+        target_bin = failed_count.shape[0] - 1
+        failed_count = failed_count.at[target_bin].set(100.0)
+
+        adaptive_target_count = 0
+        uniform_target_count = 0
+        state = None
+        for seed in range(6):
+            key = jax.random.PRNGKey(seed)
+            adaptive_state = env.reset(
+                key,
+                jnp.array(1.0),
+                phase_sampler_failed_count=failed_count,
+            )
+            uniform_state = self.env.reset(key, jnp.array(0.0))
+            if state is None:
+                state = adaptive_state
+            adaptive_target_count += (
+                int(adaptive_state.info["phase"])
+                * failed_count.shape[0]
+                // env.reference_length
+                == target_bin
+            )
+            uniform_target_count += (
+                int(uniform_state.info["phase"])
+                * failed_count.shape[0]
+                // env.reference_length
+                == target_bin
+            )
+
+        self.assertGreater(adaptive_target_count, uniform_target_count)
+        phase = int(state.info["phase"])
+        qpos_delta = np.asarray(state.data.qpos - env.qpos_reference[phase])
+        qvel_delta = np.asarray(state.data.qvel - env.qvel_reference[phase])
+        self.assertGreater(np.max(np.abs(qpos_delta)), 0.0)
+        self.assertGreater(np.max(np.abs(qvel_delta)), 0.0)
+        self.assertTrue(np.isfinite(np.asarray(state.data.qpos)).all())
+        self.assertTrue(np.isfinite(np.asarray(state.data.qvel)).all())
+        np.testing.assert_array_less(
+            np.abs(qpos_delta[:3]), [0.020001, 0.020001, 0.005001]
+        )
+        np.testing.assert_array_less(np.abs(qpos_delta[7:]), 0.050001)
+        np.testing.assert_array_less(
+            np.abs(qvel_delta[:3]), [0.250001, 0.250001, 0.100001]
+        )
+        np.testing.assert_array_less(
+            np.abs(qvel_delta[3:6]), [0.260001, 0.260001, 0.390001]
+        )
+        self.assertEqual(state.info["actor_obs_history"].shape, (2, 154))
+        for name in (
+            "friction_scale",
+            "mass_scale",
+            "kp_scale",
+            "kd_scale",
+            "com_offset",
+        ):
+            self.assertTrue(np.isfinite(np.asarray(state.info[name])).all())
+        self.assertGreaterEqual(float(state.info["friction_scale"]), 0.8)
+        self.assertLessEqual(float(state.info["friction_scale"]), 1.2)
+        self.assertGreaterEqual(float(state.info["mass_scale"]), 0.9)
+        self.assertLessEqual(float(state.info["mass_scale"]), 1.1)
+        np.testing.assert_array_equal(
+            state.info["phase_sampler_failed_count"], failed_count
+        )
+        expected_rng = jax.random.split(jax.random.PRNGKey(0), 6)[0]
+        np.testing.assert_array_equal(state.info["rng"], expected_rng)
+
+    def test_adaptive_sampler_does_not_change_exact_reset_at_phase(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        env = G1TrackingEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+            adaptive_phase_sampling=True,
+        )
+
+        phase = env.reference_length // 2
+        state = env.reset_at_phase(
+            jax.random.PRNGKey(37), jnp.array(0.0), jnp.array(phase)
+        )
+
+        self.assertEqual(int(state.info["phase"]), phase)
+        np.testing.assert_allclose(
+            state.data.qpos,
+            env.qpos_reference[phase],
+            rtol=0.0,
+            atol=1e-12,
+        )
+        np.testing.assert_array_equal(
+            state.data.qvel, env.qvel_reference[phase]
+        )
+        np.testing.assert_array_equal(
+            state.info["phase_sampler_failed_count"],
+            np.zeros_like(state.info["phase_sampler_failed_count"]),
+        )
+
     def test_exact_reset_path_preserves_rng_and_state_when_noise_is_zero(self):
         from src.envs.g1_tracking.environment import G1TrackingEnv
 
@@ -364,6 +483,7 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
 
         np.testing.assert_array_equal(state.info["rng"], expected_rng)
         self.assertEqual(int(state.info["phase"]), int(expected_phase))
+        self.assertNotIn("phase_sampler_failed_count", state.info)
         np.testing.assert_allclose(
             state.data.qpos,
             env.qpos_reference[expected_phase],

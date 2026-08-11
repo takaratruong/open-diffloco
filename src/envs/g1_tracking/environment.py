@@ -149,6 +149,8 @@ class G1TrackingEnv:
         carried_reset_bank_path: str | None = None,
         carried_reset_probability: float = 0.0,
         carried_reset_bank_start: int = 0,
+        adaptive_phase_sampling: bool = False,
+        adaptive_phase_uniform_ratio: float = 0.5,
         **_unused_go2_options,
     ):
         if actor_history_len < 1:
@@ -206,6 +208,20 @@ class G1TrackingEnv:
             )
         self.reference_residual_control = reference_residual_control
         self.reference_residual_scale = float(reference_residual_scale)
+        if not isinstance(adaptive_phase_sampling, bool):
+            raise ValueError("adaptive_phase_sampling must be boolean")
+        if (
+            isinstance(adaptive_phase_uniform_ratio, bool)
+            or not np.isfinite(adaptive_phase_uniform_ratio)
+            or not 0.0 <= adaptive_phase_uniform_ratio <= 1.0
+        ):
+            raise ValueError(
+                "adaptive_phase_uniform_ratio must be finite and in [0, 1]"
+            )
+        self.adaptive_phase_sampling = adaptive_phase_sampling
+        self.adaptive_phase_uniform_ratio = float(
+            adaptive_phase_uniform_ratio
+        )
         if (
             isinstance(carried_reset_probability, bool)
             or not np.isfinite(carried_reset_probability)
@@ -331,6 +347,13 @@ class G1TrackingEnv:
             controller=self.controller,
         )
         self.reference_length = self.reference.qpos.shape[0]
+        from src.envs.g1_tracking.training_distribution import (
+            init_phase_sampler,
+        )
+
+        self.phase_sampler_initial_failed_count = init_phase_sampler(
+            self.reference_length
+        ).failed_count
         self.body_ids = tuple(self.reference.body_ids)
         self.anchor_body_id = self.body_ids[0]
         self.pelvis_body_id = self.anchor_body_id
@@ -658,10 +681,11 @@ class G1TrackingEnv:
         phase: jax.Array,
         difficulty: jax.Array,
         randomization: dict[str, jax.Array] | None = None,
+        phase_sampler_failed_count: jax.Array | None = None,
     ) -> dict:
         if randomization is None:
             randomization = self._nominal_randomization()
-        return {
+        info = {
             "step": jp.array(0, dtype=jp.int32),
             "phase": phase.astype(jp.int32),
             "last_act": jp.zeros(self.action_dim),
@@ -672,6 +696,18 @@ class G1TrackingEnv:
             "terminal": jp.array(0.0),
             **randomization,
         }
+        if self.adaptive_phase_sampling:
+            failed_count = (
+                self.phase_sampler_initial_failed_count
+                if phase_sampler_failed_count is None
+                else jp.asarray(phase_sampler_failed_count, dtype=jp.float32)
+            )
+            if failed_count.shape != self.phase_sampler_initial_failed_count.shape:
+                raise ValueError(
+                    "phase_sampler_failed_count has the wrong shape"
+                )
+            info["phase_sampler_failed_count"] = failed_count
+        return info
 
     @staticmethod
     def _nominal_randomization() -> dict[str, jax.Array]:
@@ -771,12 +807,14 @@ class G1TrackingEnv:
         difficulty: jax.Array,
         phase: jax.Array,
         randomization: dict[str, jax.Array] | None = None,
+        phase_sampler_failed_count: jax.Array | None = None,
     ) -> EnvState:
         info = self._base_info(
             rng=rng,
             phase=phase,
             difficulty=difficulty,
             randomization=randomization,
+            phase_sampler_failed_count=phase_sampler_failed_count,
         )
         actor_frame = self._get_actor_obs(data, info)
         actor_history = jp.repeat(
@@ -819,7 +857,44 @@ class G1TrackingEnv:
             phase=phase,
         )
 
-    def reset(self, rng: jax.Array, difficulty: jax.Array) -> EnvState:
+    def _sample_reset_phase(
+        self,
+        key: jax.Array,
+        phase_sampler_failed_count: jax.Array | None,
+    ) -> jax.Array:
+        if not self.adaptive_phase_sampling:
+            return jax.random.randint(
+                key,
+                (),
+                minval=0,
+                maxval=self.reference_length - 2,
+                dtype=jp.int32,
+            )
+        from src.envs.g1_tracking.training_distribution import (
+            PhaseSamplerState,
+            sample_training_phase,
+        )
+
+        failed_count = (
+            self.phase_sampler_initial_failed_count
+            if phase_sampler_failed_count is None
+            else jp.asarray(phase_sampler_failed_count, dtype=jp.float32)
+        )
+        if failed_count.shape != self.phase_sampler_initial_failed_count.shape:
+            raise ValueError("phase_sampler_failed_count has the wrong shape")
+        return sample_training_phase(
+            key,
+            PhaseSamplerState(failed_count=failed_count),
+            self.reference_length,
+            uniform_ratio=self.adaptive_phase_uniform_ratio,
+        )
+
+    def reset(
+        self,
+        rng: jax.Array,
+        difficulty: jax.Array,
+        phase_sampler_failed_count: jax.Array | None = None,
+    ) -> EnvState:
         if self.carried_reset_bank_path is not None:
             if self.domain_randomization:
                 rng, phase_key, bank_key, choice_key, randomization_key = (
@@ -833,12 +908,8 @@ class G1TrackingEnv:
                     rng, 4
                 )
                 randomization = self._nominal_randomization()
-            reference_phase = jax.random.randint(
-                phase_key,
-                (),
-                minval=0,
-                maxval=self.reference_length - 2,
-                dtype=jp.int32,
+            reference_phase = self._sample_reset_phase(
+                phase_key, phase_sampler_failed_count
             )
             bank_index = jax.random.randint(
                 bank_key,
@@ -876,6 +947,7 @@ class G1TrackingEnv:
                 difficulty=difficulty,
                 phase=phase,
                 randomization=randomization,
+                phase_sampler_failed_count=phase_sampler_failed_count,
             )
         if self.reference_reset_noise_scale == 0.0:
             if self.domain_randomization:
@@ -886,15 +958,25 @@ class G1TrackingEnv:
             else:
                 rng, phase_key = jax.random.split(rng)
                 randomization = self._nominal_randomization()
-            phase = jax.random.randint(
-                phase_key,
-                (),
-                minval=0,
-                maxval=self.reference_length - 2,
-                dtype=jp.int32,
+            phase = self._sample_reset_phase(
+                phase_key, phase_sampler_failed_count
             )
             if not self.domain_randomization:
-                return self.reset_at_phase(rng, difficulty, phase)
+                if not self.adaptive_phase_sampling:
+                    return self.reset_at_phase(rng, difficulty, phase)
+                data = self._data_from_state(
+                    qpos=self.qpos_reference[phase],
+                    qvel=self.qvel_reference[phase],
+                    randomization=randomization,
+                )
+                return self._initial_state_from_data(
+                    data=data,
+                    rng=rng,
+                    difficulty=difficulty,
+                    phase=phase,
+                    randomization=randomization,
+                    phase_sampler_failed_count=phase_sampler_failed_count,
+                )
             data = self._data_from_state(
                 qpos=self.qpos_reference[phase],
                 qvel=self.qvel_reference[phase],
@@ -906,6 +988,7 @@ class G1TrackingEnv:
                 difficulty=difficulty,
                 phase=phase,
                 randomization=randomization,
+                phase_sampler_failed_count=phase_sampler_failed_count,
             )
 
         if self.domain_randomization:
@@ -925,12 +1008,8 @@ class G1TrackingEnv:
                 jax.random.split(rng, 5)
             )
             randomization = self._nominal_randomization()
-        phase = jax.random.randint(
-            phase_key,
-            (),
-            minval=0,
-            maxval=self.reference_length - 2,
-            dtype=jp.int32,
+        phase = self._sample_reset_phase(
+            phase_key, phase_sampler_failed_count
         )
         scale = self.reference_reset_noise_scale
         pose_limit = scale * jp.array(
@@ -978,6 +1057,7 @@ class G1TrackingEnv:
             difficulty=difficulty,
             phase=phase,
             randomization=randomization,
+            phase_sampler_failed_count=phase_sampler_failed_count,
         )
 
     def termination_errors(
@@ -1128,7 +1208,16 @@ class G1TrackingEnv:
         bootstrap_critic_obs = self._get_critic_obs(data, pre_reset_info)
 
         rng, reset_key = jax.random.split(state.info["rng"])
-        reset_state = self.reset(reset_key, state.info["difficulty"])
+        if self.adaptive_phase_sampling:
+            reset_state = self.reset(
+                reset_key,
+                state.info["difficulty"],
+                phase_sampler_failed_count=state.info[
+                    "phase_sampler_failed_count"
+                ],
+            )
+        else:
+            reset_state = self.reset(reset_key, state.info["difficulty"])
         next_data = jax.tree_util.tree_map(
             lambda current, reset: jp.where(done, reset, current),
             data,
