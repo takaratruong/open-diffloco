@@ -1,4 +1,5 @@
 import inspect
+import json
 
 import jax
 import jax.numpy as jnp
@@ -16,6 +17,94 @@ def test_cagrad_settings_are_default_off_with_fixed_treatment_values():
     assert parameters["actor_cagrad"].default is False
     assert parameters["actor_cagrad_alpha"].default == 0.5
     assert parameters["actor_cagrad_iterations"].default == 32
+
+
+def test_preview_adapter_configuration_requires_future_reference_cagrad():
+    from src.algorithms.shac.algorithm import (
+        validate_preview_adapter_configuration,
+    )
+
+    with pytest.raises(ValueError, match="requires future-reference CAGrad"):
+        validate_preview_adapter_configuration(
+            enabled=True,
+            actor_reference_lookahead_steps=(),
+            actor_cagrad=True,
+            history_len=10,
+            source_actor_policy=None,
+            initial_full_actor_policy=None,
+            env_variant="g1_tracking_rmr",
+        )
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"enabled": "yes"}, "must be boolean"),
+        ({"actor_cagrad": False}, "requires future-reference CAGrad"),
+        ({"history_len": 9}, "ten-frame history"),
+        ({"source_actor_policy": object()}, "plain Flax actor"),
+        ({"initial_full_actor_policy": object()}, "plain Flax actor"),
+        ({"env_variant": "go2"}, "G1 tracking"),
+    ],
+)
+def test_preview_adapter_configuration_rejects_changed_contract(
+    changes, message
+):
+    from src.algorithms.shac.algorithm import (
+        validate_preview_adapter_configuration,
+    )
+
+    kwargs = {
+        "enabled": True,
+        "actor_reference_lookahead_steps": (4, 8, 12),
+        "actor_cagrad": True,
+        "history_len": 10,
+        "source_actor_policy": None,
+        "initial_full_actor_policy": None,
+        "env_variant": "g1_tracking_rmr",
+    }
+    kwargs.update(changes)
+    with pytest.raises(ValueError, match=message):
+        validate_preview_adapter_configuration(**kwargs)
+
+
+def test_checkpoint_phase_metrics_are_atomic_and_step_addressed(tmp_path):
+    from src.algorithms.shac.algorithm import (
+        persist_checkpoint_phase_metric,
+    )
+
+    persist_checkpoint_phase_metric(
+        tmp_path,
+        {"step": 1_376_256, "actor_cagrad_bin_losses": [1, 2, 3, 4, 5]},
+    )
+    persist_checkpoint_phase_metric(
+        tmp_path,
+        {"step": 1_572_864, "actor_cagrad_bin_losses": [5, 4, 3, 2, 1]},
+    )
+    persist_checkpoint_phase_metric(
+        tmp_path,
+        {"step": 1_376_256, "actor_cagrad_bin_losses": [0, 0, 0, 0, 0]},
+    )
+
+    rows = json.loads(
+        (tmp_path / "checkpoint_phase_metrics.json").read_text()
+    )
+    assert [row["step"] for row in rows] == [1_376_256, 1_572_864]
+    assert rows[0]["actor_cagrad_bin_losses"] == [0, 0, 0, 0, 0]
+
+
+def test_train_wires_preview_adapter_without_changing_disabled_path():
+    from src.algorithms.shac.algorithm import train
+
+    source = inspect.getsource(train)
+
+    assert "apply_preview_adapter_update(" in source
+    assert "zero_current_preview(" in source
+    assert "phase_binned_action_deviation(" in source
+    assert "new_actor_norm = state.normalizer" in source
+    assert '"actor_preview_adapter": actor_preview_adapter' in source
+    assert "if checkpoint_path is not None" in source
+    assert "persist_checkpoint_phase_metric(" in source
 
 
 @pytest.mark.parametrize(

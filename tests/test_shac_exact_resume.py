@@ -20,6 +20,35 @@ class ShacExactResumeTest(unittest.TestCase):
             ].default,
             False,
         )
+        self.assertIs(parameters["actor_preview_adapter"].default, False)
+
+    def test_preview_adapter_resume_is_explicit_and_exact(self):
+        from src.algorithms.shac.algorithm import (
+            resolve_preview_adapter_resume_setting,
+        )
+
+        self.assertTrue(
+            resolve_preview_adapter_resume_setting({}, requested=True)
+        )
+        self.assertTrue(
+            resolve_preview_adapter_resume_setting(
+                {"actor_preview_adapter": True}, requested=True
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "must match"):
+            resolve_preview_adapter_resume_setting(
+                {"actor_preview_adapter": True}, requested=False
+            )
+
+    def test_preview_adapter_resume_rejects_invalid_metadata(self):
+        from src.algorithms.shac.algorithm import (
+            resolve_preview_adapter_resume_setting,
+        )
+
+        with self.assertRaisesRegex(ValueError, "boolean"):
+            resolve_preview_adapter_resume_setting(
+                {"actor_preview_adapter": "yes"}, requested=True
+            )
 
     def test_migration_report_is_persisted_as_sorted_json(self):
         from src.algorithms.shac.algorithm import (

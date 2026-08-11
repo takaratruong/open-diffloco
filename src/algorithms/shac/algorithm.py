@@ -55,6 +55,12 @@ from src.algorithms.shac.future_reference_migration import (
     migrate_future_reference_train_state,
     validate_future_reference_migration_report,
 )
+from src.algorithms.shac.preview_adapter import (
+    apply_preview_adapter_update,
+    build_current_preview_mask,
+    phase_binned_action_deviation,
+    zero_current_preview,
+)
 from src.envs.g1_tracking.training_distribution import (
     PhaseSamplerState,
     init_phase_sampler,
@@ -142,6 +148,32 @@ def persist_future_reference_migration_report(
     temp_path = path.with_name(f".{path.name}.tmp")
     with temp_path.open("w", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    os.replace(temp_path, path)
+    return path
+
+
+def persist_checkpoint_phase_metric(
+    save_dir: str | Path, row: dict[str, object]
+) -> Path:
+    """Atomically upsert one checkpoint-aligned phase diagnostic row."""
+    step = row.get("step")
+    if isinstance(step, bool) or not isinstance(step, int) or step < 0:
+        raise ValueError("checkpoint phase metric requires a nonnegative step")
+    path = Path(save_dir) / "checkpoint_phase_metrics.json"
+    rows: list[dict[str, object]] = []
+    if path.exists():
+        with path.open(encoding="utf-8") as stream:
+            loaded = json.load(stream)
+        if not isinstance(loaded, list):
+            raise ValueError("checkpoint phase metrics must contain a JSON list")
+        rows = loaded
+    by_step = {int(existing["step"]): existing for existing in rows}
+    by_step[step] = row
+    ordered = [by_step[key] for key in sorted(by_step)]
+    temp_path = path.with_name(f".{path.name}.tmp")
+    with temp_path.open("w", encoding="utf-8") as stream:
+        json.dump(ordered, stream, indent=2, sort_keys=True)
         stream.write("\n")
     os.replace(temp_path, path)
     return path
@@ -308,6 +340,22 @@ def resolve_future_reference_resume_settings(
     raise ValueError(
         "future reference lookahead steps must match the checkpoint"
     )
+
+
+def resolve_preview_adapter_resume_setting(
+    resumed_hparams: dict[str, object] | None, *, requested: bool
+) -> bool:
+    """Allow an explicit legacy treatment start and exact treated resumes."""
+    if not isinstance(requested, bool):
+        raise ValueError("actor_preview_adapter must be boolean")
+    if not resumed_hparams or "actor_preview_adapter" not in resumed_hparams:
+        return requested
+    saved = resumed_hparams["actor_preview_adapter"]
+    if not isinstance(saved, bool):
+        raise ValueError("actor_preview_adapter resume metadata must be boolean")
+    if saved != requested:
+        raise ValueError("actor_preview_adapter must match the checkpoint")
+    return saved
 
 
 def select_initial_training_state(*, initialized_state, resumed_state):
@@ -692,6 +740,33 @@ def validate_actor_cagrad_configuration(
         raise ValueError("actor CAGrad requires exactly five phase bins")
 
 
+def validate_preview_adapter_configuration(
+    *,
+    enabled: bool,
+    actor_reference_lookahead_steps: tuple[int, ...],
+    actor_cagrad: bool,
+    history_len: int,
+    source_actor_policy,
+    initial_full_actor_policy,
+    env_variant: str,
+) -> None:
+    """Validate the bounded frozen-parent preview treatment contract."""
+    if not isinstance(enabled, bool):
+        raise ValueError("actor_preview_adapter must be boolean")
+    if not enabled:
+        return
+    if not actor_reference_lookahead_steps or not actor_cagrad:
+        raise ValueError(
+            "actor preview adapter requires future-reference CAGrad"
+        )
+    if history_len != 10:
+        raise ValueError("actor preview adapter requires ten-frame history")
+    if source_actor_policy is not None or initial_full_actor_policy is not None:
+        raise ValueError("actor preview adapter requires a plain Flax actor")
+    if not env_variant.startswith("g1_tracking"):
+        raise ValueError("actor preview adapter requires G1 tracking")
+
+
 def train(
     # General
     total_steps: int = 100_000,
@@ -746,6 +821,7 @@ def train(
     actor_observation_noise: bool = False,
     actor_reference_lookahead_steps: tuple[int, ...] = (),
     allow_resume_actor_reference_lookahead_upgrade: bool = False,
+    actor_preview_adapter: bool = False,
     env_variant: str = "blind_nolinvel_nokinref",
     actor_per_env_grad_clip: float = None,
     critic_per_env_grad_clip: float = None,
@@ -894,6 +970,15 @@ def train(
         gradient_accumulation_steps=gradient_accumulation_steps,
         actor_phase_bin_count=actor_phase_bin_count,
     )
+    validate_preview_adapter_configuration(
+        enabled=actor_preview_adapter,
+        actor_reference_lookahead_steps=actor_reference_lookahead_steps,
+        actor_cagrad=actor_cagrad,
+        history_len=actor_history_len,
+        source_actor_policy=source_actor_policy,
+        initial_full_actor_policy=initial_full_actor_policy,
+        env_variant=env_variant,
+    )
     if not isinstance(adaptive_phase_sampling, bool):
         raise ValueError("adaptive_phase_sampling must be boolean")
     if (
@@ -1018,6 +1103,10 @@ def train(
             allow_upgrade=(
                 allow_resume_actor_reference_lookahead_upgrade
             ),
+        )
+        actor_preview_adapter = resolve_preview_adapter_resume_setting(
+            resumed_hparams,
+            requested=actor_preview_adapter,
         )
         (
             adaptive_phase_sampling,
@@ -1163,6 +1252,15 @@ def train(
             gradient_accumulation_steps=gradient_accumulation_steps,
             actor_phase_bin_count=actor_phase_bin_count,
         )
+        validate_preview_adapter_configuration(
+            enabled=actor_preview_adapter,
+            actor_reference_lookahead_steps=actor_reference_lookahead_steps,
+            actor_cagrad=actor_cagrad,
+            history_len=actor_history_len,
+            source_actor_policy=source_actor_policy,
+            initial_full_actor_policy=initial_full_actor_policy,
+            env_variant=env_variant,
+        )
 
     if actor_reference_lookahead_steps and not env_variant.startswith(
         "g1_tracking"
@@ -1287,6 +1385,28 @@ def train(
         if initial_full_actor_policy is not None
         else actor.init(k1, actor_dummy)
     )
+    preview_adapter_mask = None
+    preview_legacy_frame_dim = 0
+    preview_trainable_parameter_count = 0
+    if actor_preview_adapter:
+        preview_legacy_frame_dim = (
+            env.actor_frame_obs_dim - env.actor_future_reference_dim
+        )
+        preview_adapter_mask = build_current_preview_mask(
+            actor_params,
+            history_len=actor_history_len,
+            legacy_frame_dim=preview_legacy_frame_dim,
+            treatment_frame_dim=env.actor_frame_obs_dim,
+        )
+        preview_trainable_parameter_count = sum(
+            int(np.count_nonzero(np.asarray(leaf)))
+            for leaf in jax.tree_util.tree_leaves(preview_adapter_mask)
+        )
+        if preview_trainable_parameter_count != 89_088:
+            raise ValueError(
+                "actor preview adapter requires exactly 89,088 trainable "
+                "parameters"
+            )
     critic_params = critic.init(k2, critic_dummy)
     target_critic_params = critic_params
 
@@ -1400,6 +1520,16 @@ def train(
                 if initial_full_actor_policy is None
                 else None
             )
+            if actor_preview_adapter:
+                parent_obs_norm = zero_current_preview(
+                    obs_norm,
+                    history_len=actor_history_len,
+                    legacy_frame_dim=preview_legacy_frame_dim,
+                    treatment_frame_dim=env.actor_frame_obs_dim,
+                )
+                parent_action = actor.apply(
+                    actor_params, parent_obs_norm
+                ).astype(jp.float64)
             if initial_full_actor_policy is not None:
                 action = apply_trainable_rmr_policy(
                     actor_params, actor_obs
@@ -1422,7 +1552,7 @@ def train(
             if squash_actor_actions:
                 noisy_action = jp.clip(noisy_action, -1.0, 1.0)
 
-            if adaptive_phase_sampling:
+            if adaptive_phase_sampling or actor_preview_adapter:
                 transition_phase = transition_phase_before_reset(
                     state.info["phase"],
                     reference_stride=env.reference_stride,
@@ -1453,6 +1583,14 @@ def train(
             }
             if adaptive_phase_sampling:
                 transition["transition_phase"] = transition_phase
+            if actor_preview_adapter:
+                transition.update(
+                    {
+                        "candidate_action": action,
+                        "parent_action": parent_action,
+                        "transition_phase": transition_phase,
+                    }
+                )
             return (next_state, foot_bump_ou), transition
 
         env_state = jax.lax.stop_gradient(env_state)
@@ -1807,6 +1945,14 @@ def train(
                 phase_count=int(env.reference_transitions),
                 bin_count=actor_phase_bin_count,
             )
+        if actor_preview_adapter:
+            preview_action_diagnostics = phase_binned_action_deviation(
+                trajs["candidate_action"],
+                trajs["parent_action"],
+                trajs["transition_phase"],
+                phase_count=int(env.reference_transitions),
+                bin_count=actor_phase_bin_count,
+            )
 
         if adaptive_phase_sampling:
             completed_failed_count = update_adaptive_phase_state(
@@ -1831,7 +1977,20 @@ def train(
 
         actor_grad_norm = compute_grad_norm(grads)
 
-        updates, new_actor_opt = actor_opt.update(grads, state.actor_opt)
+        if actor_preview_adapter:
+            updates, new_actor_opt, preview_update_diagnostics = (
+                apply_preview_adapter_update(
+                    actor_opt,
+                    grads,
+                    state.actor_opt,
+                    state.actor_params,
+                    preview_adapter_mask,
+                )
+            )
+        else:
+            updates, new_actor_opt = actor_opt.update(
+                grads, state.actor_opt
+            )
         actor_update_norm = compute_grad_norm(updates)
         new_actor_params = optax.apply_updates(state.actor_params, updates)
 
@@ -1987,11 +2146,23 @@ def train(
         )
 
         # Update actor and critic normalizers from their own observation streams.
-        flat_actor_obs = trajs["actor_obs"].reshape(-1, env.actor_frame_obs_dim)
-        safe_actor_obs = jp.where(
-            jp.isfinite(flat_actor_obs), flat_actor_obs, state.normalizer.mean
-        )
-        new_actor_norm = actor_norm.update(state.normalizer, safe_actor_obs)
+        if actor_preview_adapter:
+            new_actor_norm = state.normalizer
+            preview_normalizer_drift = jp.asarray(
+                0.0, dtype=state.normalizer.mean.dtype
+            )
+        else:
+            flat_actor_obs = trajs["actor_obs"].reshape(
+                -1, env.actor_frame_obs_dim
+            )
+            safe_actor_obs = jp.where(
+                jp.isfinite(flat_actor_obs),
+                flat_actor_obs,
+                state.normalizer.mean,
+            )
+            new_actor_norm = actor_norm.update(
+                state.normalizer, safe_actor_obs
+            )
 
         flat_critic_obs = trajs["critic_obs"].reshape(-1, env.critic_obs_dim)
         safe_critic_obs = jp.where(
@@ -2100,6 +2271,62 @@ def train(
                         & cagrad_loss_diagnostics["valid"]
                         & cagrad_counts_match
                     ),
+                }
+            )
+        if actor_preview_adapter:
+            preview_valid = (
+                preview_action_diagnostics["valid"]
+                & jp.isfinite(
+                    preview_update_diagnostics["preview_gradient_norm"]
+                )
+                & jp.isfinite(
+                    preview_update_diagnostics["preview_update_norm"]
+                )
+                & (
+                    preview_update_diagnostics["frozen_update_max_abs"]
+                    == 0.0
+                )
+                & (
+                    preview_update_diagnostics[
+                        "frozen_moment_drift_max_abs"
+                    ]
+                    == 0.0
+                )
+                & (preview_normalizer_drift == 0.0)
+            )
+            metrics.update(
+                {
+                    "actor_preview_gradient_norm": (
+                        preview_update_diagnostics[
+                            "preview_gradient_norm"
+                        ]
+                    ),
+                    "actor_preview_update_norm": (
+                        preview_update_diagnostics["preview_update_norm"]
+                    ),
+                    "actor_preview_frozen_parameter_drift_max_abs": (
+                        preview_update_diagnostics[
+                            "frozen_update_max_abs"
+                        ]
+                    ),
+                    "actor_preview_frozen_moment_drift_max_abs": (
+                        preview_update_diagnostics[
+                            "frozen_moment_drift_max_abs"
+                        ]
+                    ),
+                    "actor_preview_normalizer_drift_max_abs": (
+                        preview_normalizer_drift
+                    ),
+                    "actor_preview_bin_counts": (
+                        preview_action_diagnostics["bin_counts"]
+                    ),
+                    "actor_preview_bin_action_deviation_mean_abs": (
+                        preview_action_diagnostics["mean_abs"]
+                    ),
+                    "actor_preview_bin_action_deviation_max_abs": (
+                        preview_action_diagnostics["max_abs"]
+                    ),
+                    "actor_preview_valid": preview_valid,
                 }
             )
         if adaptive_phase_sampling:
@@ -2284,6 +2511,16 @@ def train(
         "actor_reference_lookahead_steps": list(
             actor_reference_lookahead_steps
         ),
+        "actor_preview_adapter": actor_preview_adapter,
+        "actor_preview_trainable_parameter_count": (
+            preview_trainable_parameter_count
+        ),
+        "actor_normalizer_frozen": actor_preview_adapter,
+        "checkpoint_phase_metrics_artifact": (
+            "checkpoint_phase_metrics.json"
+            if actor_preview_adapter
+            else None
+        ),
         "resume_future_reference_upgrade": future_reference_upgrade,
         "migration_equivalence_artifact": (
             "migration_equivalence.json"
@@ -2334,6 +2571,8 @@ def train(
 
         if actor_cagrad and not bool(metrics["actor_cagrad_valid"]):
             raise RuntimeError("actor CAGrad aggregation is invalid")
+        if actor_preview_adapter and not bool(metrics["actor_preview_valid"]):
+            raise RuntimeError("actor preview adapter telemetry is invalid")
 
         if should_log_training_iteration(i, start_iteration=start_iter):
             jax.block_until_ready(state.step)
@@ -2500,6 +2739,48 @@ def train(
                             ),
                         }
                     )
+                if actor_preview_adapter:
+                    diag_entry.update(
+                        {
+                            "actor_preview_gradient_norm": float(
+                                metrics["actor_preview_gradient_norm"]
+                            ),
+                            "actor_preview_update_norm": float(
+                                metrics["actor_preview_update_norm"]
+                            ),
+                            "actor_preview_frozen_parameter_drift_max_abs": float(
+                                metrics[
+                                    "actor_preview_frozen_parameter_drift_max_abs"
+                                ]
+                            ),
+                            "actor_preview_frozen_moment_drift_max_abs": float(
+                                metrics[
+                                    "actor_preview_frozen_moment_drift_max_abs"
+                                ]
+                            ),
+                            "actor_preview_normalizer_drift_max_abs": float(
+                                metrics[
+                                    "actor_preview_normalizer_drift_max_abs"
+                                ]
+                            ),
+                            "actor_preview_bin_counts": np.asarray(
+                                metrics["actor_preview_bin_counts"]
+                            ).tolist(),
+                            "actor_preview_bin_action_deviation_mean_abs": np.asarray(
+                                metrics[
+                                    "actor_preview_bin_action_deviation_mean_abs"
+                                ]
+                            ).tolist(),
+                            "actor_preview_bin_action_deviation_max_abs": np.asarray(
+                                metrics[
+                                    "actor_preview_bin_action_deviation_max_abs"
+                                ]
+                            ).tolist(),
+                            "actor_preview_valid": bool(
+                                metrics["actor_preview_valid"]
+                            ),
+                        }
+                    )
                 if adaptive_phase_sampling:
                     if not bool(metrics["adaptive_phase_sampling_valid"]):
                         raise RuntimeError(
@@ -2585,6 +2866,56 @@ def train(
             )
         )
         if checkpoint_path is not None:
+            if actor_preview_adapter:
+                persist_checkpoint_phase_metric(
+                    save_dir,
+                    {
+                        "step": int(current_step),
+                        "actor_cagrad_bin_counts": np.asarray(
+                            metrics["actor_cagrad_bin_counts"]
+                        ).tolist(),
+                        "actor_cagrad_bin_losses": np.asarray(
+                            metrics["actor_cagrad_bin_losses"]
+                        ).tolist(),
+                        "actor_preview_gradient_norm": float(
+                            metrics["actor_preview_gradient_norm"]
+                        ),
+                        "actor_preview_update_norm": float(
+                            metrics["actor_preview_update_norm"]
+                        ),
+                        "actor_preview_frozen_parameter_drift_max_abs": float(
+                            metrics[
+                                "actor_preview_frozen_parameter_drift_max_abs"
+                            ]
+                        ),
+                        "actor_preview_frozen_moment_drift_max_abs": float(
+                            metrics[
+                                "actor_preview_frozen_moment_drift_max_abs"
+                            ]
+                        ),
+                        "actor_preview_normalizer_drift_max_abs": float(
+                            metrics[
+                                "actor_preview_normalizer_drift_max_abs"
+                            ]
+                        ),
+                        "actor_preview_bin_counts": np.asarray(
+                            metrics["actor_preview_bin_counts"]
+                        ).tolist(),
+                        "actor_preview_bin_action_deviation_mean_abs": np.asarray(
+                            metrics[
+                                "actor_preview_bin_action_deviation_mean_abs"
+                            ]
+                        ).tolist(),
+                        "actor_preview_bin_action_deviation_max_abs": np.asarray(
+                            metrics[
+                                "actor_preview_bin_action_deviation_max_abs"
+                            ]
+                        ).tolist(),
+                        "actor_preview_valid": bool(
+                            metrics["actor_preview_valid"]
+                        ),
+                    },
+                )
             print(f"  >> Checkpoint saved at step {current_step}")
 
     # Save final state and logs
