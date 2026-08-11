@@ -41,6 +41,7 @@ def build_payload(
     reference_path: str,
     reference_sha256: str,
     solver_profile: str,
+    actor_reference_preview_mode: str,
 ) -> dict[str, object]:
     """Build the immutable no-render phase-grid artifact."""
     return {
@@ -53,6 +54,7 @@ def build_payload(
         "solver_profile": solver_profile,
         "actor_history_len": ACTOR_HISTORY_LEN,
         "actor_reference_lookahead_steps": list(LOOKAHEAD_STEPS),
+        "actor_reference_preview_mode": actor_reference_preview_mode,
         "results": results,
         "summary": build_phase_grid_summary(
             results,
@@ -85,6 +87,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phases", type=int, nargs=5, default=DEFAULT_PHASES)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
+        "--actor-reference-preview-mode",
+        choices=("absolute", "delta"),
+        default="absolute",
+    )
+    parser.add_argument(
         "--solver-profile",
         choices=tuple(sorted(SOLVER_PROFILES)),
         default="g1-4x5",
@@ -109,6 +116,7 @@ def main() -> None:
         reference_stride=1,
         actor_history_len=ACTOR_HISTORY_LEN,
         actor_reference_lookahead_steps=LOOKAHEAD_STEPS,
+        actor_reference_preview_mode=args.actor_reference_preview_mode,
         reference_residual_control=True,
         reference_residual_scale=0.5,
     )
@@ -151,6 +159,7 @@ def main() -> None:
         reference_path=str(reference_path),
         reference_sha256=_sha256(reference_path),
         solver_profile=args.solver_profile,
+        actor_reference_preview_mode=args.actor_reference_preview_mode,
     )
     _write_json(args.output.resolve(), payload)
     print(json.dumps(payload["summary"], indent=2, sort_keys=True))

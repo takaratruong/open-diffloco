@@ -27,6 +27,7 @@ def test_flax_phase_grid_payload_records_exact_suffix_completion():
         reference_path="/tmp/reference.npz",
         reference_sha256="b" * 64,
         solver_profile="g1-4x5",
+        actor_reference_preview_mode="delta",
     )
 
     assert payload["summary"]["survival"] == [499, 399, 299, 199, 99]
@@ -34,3 +35,29 @@ def test_flax_phase_grid_payload_records_exact_suffix_completion():
     assert payload["results"] == results
     assert payload["actor_history_len"] == 10
     assert payload["actor_reference_lookahead_steps"] == [4, 8, 12]
+    assert payload["actor_reference_preview_mode"] == "delta"
+
+
+def test_flax_phase_grid_parser_defaults_absolute_and_accepts_delta():
+    from tools.evaluate_g1_flax_phase_grid import build_parser
+
+    required = [
+        "--checkpoint",
+        "/tmp/checkpoint.pkl",
+        "--reference-path",
+        "/tmp/reference.npz",
+        "--output",
+        "/tmp/summary.json",
+    ]
+    parser = build_parser()
+
+    assert (
+        parser.parse_args(required).actor_reference_preview_mode
+        == "absolute"
+    )
+    assert (
+        parser.parse_args(
+            [*required, "--actor-reference-preview-mode", "delta"]
+        ).actor_reference_preview_mode
+        == "delta"
+    )
