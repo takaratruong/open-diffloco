@@ -30,6 +30,9 @@ class ShacExactResumeTest(unittest.TestCase):
         self.assertEqual(
             parameters["actor_residual_preview_hidden"].default, 256
         )
+        self.assertEqual(
+            parameters["actor_residual_preview_optimizer"].default, "adam"
+        )
 
     def test_residual_preview_can_only_start_during_explicit_legacy_upgrade(self):
         from src.algorithms.shac.algorithm import (
@@ -41,15 +44,17 @@ class ShacExactResumeTest(unittest.TestCase):
                 {},
                 requested=True,
                 requested_hidden=256,
+                requested_optimizer="muon",
                 future_reference_upgrade=True,
             ),
-            (True, 256),
+            (True, 256, "muon"),
         )
         with self.assertRaisesRegex(ValueError, "future-reference upgrade"):
             resolve_residual_preview_adapter_resume_setting(
                 {},
                 requested=True,
                 requested_hidden=256,
+                requested_optimizer="muon",
                 future_reference_upgrade=False,
             )
 
@@ -61,25 +66,50 @@ class ShacExactResumeTest(unittest.TestCase):
         metadata = {
             "actor_residual_preview_adapter": True,
             "actor_residual_preview_hidden": 256,
+            "actor_residual_preview_optimizer": "muon",
         }
         self.assertEqual(
             resolve_residual_preview_adapter_resume_setting(
                 metadata,
                 requested=True,
                 requested_hidden=256,
+                requested_optimizer="muon",
                 future_reference_upgrade=False,
             ),
-            (True, 256),
+            (True, 256, "muon"),
         )
-        for requested, hidden in ((False, 256), (True, 128)):
-            with self.subTest(requested=requested, hidden=hidden):
+        for requested, hidden, optimizer in (
+            (False, 256, "muon"),
+            (True, 128, "muon"),
+            (True, 256, "adam"),
+        ):
+            with self.subTest(
+                requested=requested,
+                hidden=hidden,
+                optimizer=optimizer,
+            ):
                 with self.assertRaisesRegex(ValueError, "must match"):
                     resolve_residual_preview_adapter_resume_setting(
                         metadata,
                         requested=requested,
                         requested_hidden=hidden,
+                        requested_optimizer=optimizer,
                         future_reference_upgrade=False,
                     )
+
+        self.assertEqual(
+            resolve_residual_preview_adapter_resume_setting(
+                {
+                    "actor_residual_preview_adapter": True,
+                    "actor_residual_preview_hidden": 256,
+                },
+                requested=True,
+                requested_hidden=256,
+                requested_optimizer="adam",
+                future_reference_upgrade=False,
+            ),
+            (True, 256, "adam"),
+        )
 
     def test_residual_preview_resume_rejects_invalid_metadata(self):
         from src.algorithms.shac.algorithm import (
@@ -91,7 +121,16 @@ class ShacExactResumeTest(unittest.TestCase):
                 {"actor_residual_preview_adapter": "yes"},
                 requested=True,
                 requested_hidden=256,
+                requested_optimizer="adam",
                 future_reference_upgrade=False,
+            )
+        with self.assertRaisesRegex(ValueError, "optimizer"):
+            resolve_residual_preview_adapter_resume_setting(
+                {},
+                requested=True,
+                requested_hidden=256,
+                requested_optimizer="sgd",
+                future_reference_upgrade=True,
             )
 
     def test_delta_preview_mode_requires_upgrade_or_exact_resume(self):

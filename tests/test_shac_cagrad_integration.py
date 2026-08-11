@@ -131,6 +131,7 @@ def test_residual_preview_configuration_requires_isolated_delta_cagrad():
     valid = {
         "enabled": True,
         "hidden_dim": 256,
+        "optimizer_name": "adam",
         "linear_preview_enabled": False,
         "actor_reference_lookahead_steps": (4, 8, 12),
         "actor_reference_preview_mode": "delta",
@@ -144,6 +145,7 @@ def test_residual_preview_configuration_requires_isolated_delta_cagrad():
     invalid_cases = (
         ({"enabled": "yes"}, "must be boolean"),
         ({"hidden_dim": 0}, "positive integer"),
+        ({"optimizer_name": "sgd"}, "optimizer"),
         ({"linear_preview_enabled": True}, "mutually exclusive"),
         ({"actor_reference_lookahead_steps": ()}, "future-reference CAGrad"),
         ({"actor_reference_preview_mode": "absolute"}, "delta preview"),
@@ -158,6 +160,11 @@ def test_residual_preview_configuration_requires_isolated_delta_cagrad():
         with pytest.raises(ValueError, match=message):
             validate_residual_preview_adapter_configuration(**candidate)
 
+    with pytest.raises(ValueError, match="requires the residual"):
+        validate_residual_preview_adapter_configuration(
+            **{**valid, "enabled": False, "optimizer_name": "muon"}
+        )
+
 
 def test_train_wires_residual_preview_through_existing_frozen_boundary():
     from src.algorithms.shac.algorithm import train
@@ -167,11 +174,21 @@ def test_train_wires_residual_preview_through_existing_frozen_boundary():
     assert "PreviewResidualAdapter(" in source
     assert "apply_frozen_preview_residual(" in source
     assert "initialize_residual_adapter_optimizer(" in source
+    assert "build_residual_muon_optimizers(" in source
+    assert "initialize_residual_muon_optimizer(" in source
+    assert "apply_residual_muon_update(" in source
     assert "build_residual_adapter_mask(" in source
     assert "residual_adapter_migration_report(" in source
     assert '"actor_residual_preview_adapter": (' in source
     assert '"actor_residual_preview_hidden": (' in source
+    assert '"actor_residual_preview_optimizer": (' in source
+    assert '"actor_residual_preview_muon_beta": 0.95' in source
+    assert '"actor_residual_preview_muon_ns_steps": 5' in source
+    assert '"actor_residual_preview_muon_nesterov": True' in source
+    assert '"actor_residual_preview_muon_preconditioning": "frobenius"' in source
+    assert '"actor_residual_preview_muon_consistent_rms": 0.2' in source
     assert '"residual_adapter_migration.json"' in source
+    assert '"residual_muon_migration.json"' in source
     assert '"flax_residual_preview"' in source
 
 

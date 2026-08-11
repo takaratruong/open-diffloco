@@ -66,12 +66,17 @@ from src.algorithms.shac.preview_adapter import (
     zero_current_preview,
 )
 from src.algorithms.shac.residual_preview_adapter import (
+    FrozenPreviewResidualMuonState,
     FrozenPreviewResidualParams,
     PreviewResidualAdapter,
+    apply_residual_muon_update,
     apply_frozen_preview_residual,
     build_residual_adapter_mask,
+    build_residual_muon_optimizers,
     initialize_residual_adapter_optimizer,
+    initialize_residual_muon_optimizer,
     residual_adapter_migration_report,
+    residual_muon_migration_report,
 )
 from src.envs.g1_tracking.training_distribution import (
     PhaseSamplerState,
@@ -172,6 +177,21 @@ def persist_residual_adapter_migration_report(
     if report.get("valid") is not True:
         raise ValueError("residual adapter migration equivalence failed")
     path = Path(save_dir) / "residual_adapter_migration.json"
+    temp_path = path.with_name(f".{path.name}.tmp")
+    with temp_path.open("w", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    os.replace(temp_path, path)
+    return path
+
+
+def persist_residual_muon_migration_report(
+    save_dir: str | Path, report: dict[str, object]
+) -> Path:
+    """Validate and atomically publish Muon optimizer migration evidence."""
+    if report.get("valid") is not True:
+        raise ValueError("residual Muon optimizer migration failed")
+    path = Path(save_dir) / "residual_muon_migration.json"
     temp_path = path.with_name(f".{path.name}.tmp")
     with temp_path.open("w", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2, sort_keys=True)
@@ -423,8 +443,9 @@ def resolve_residual_preview_adapter_resume_setting(
     *,
     requested: bool,
     requested_hidden: int,
+    requested_optimizer: str,
     future_reference_upgrade: bool,
-) -> tuple[bool, int]:
+) -> tuple[bool, int, str]:
     """Allow one explicit legacy start and exact nonlinear treated resumes."""
     if not isinstance(requested, bool):
         raise ValueError("actor_residual_preview_adapter must be boolean")
@@ -434,6 +455,8 @@ def resolve_residual_preview_adapter_resume_setting(
         or requested_hidden < 1
     ):
         raise ValueError("actor_residual_preview_hidden must be a positive integer")
+    if requested_optimizer not in {"adam", "muon"}:
+        raise ValueError("actor residual preview optimizer is invalid")
     if (
         not resumed_hparams
         or "actor_residual_preview_adapter" not in resumed_hparams
@@ -442,7 +465,7 @@ def resolve_residual_preview_adapter_resume_setting(
             raise ValueError(
                 "residual preview treatment requires a future-reference upgrade"
             )
-        return requested, requested_hidden
+        return requested, requested_hidden, requested_optimizer
     saved = resumed_hparams["actor_residual_preview_adapter"]
     if not isinstance(saved, bool):
         raise ValueError(
@@ -451,11 +474,20 @@ def resolve_residual_preview_adapter_resume_setting(
     saved_hidden = resumed_hparams.get(
         "actor_residual_preview_hidden", requested_hidden
     )
-    if saved != requested or (saved and saved_hidden != requested_hidden):
+    saved_optimizer = resumed_hparams.get(
+        "actor_residual_preview_optimizer", "adam"
+    )
+    if saved_optimizer not in {"adam", "muon"}:
+        raise ValueError("saved actor residual preview optimizer is invalid")
+    if (
+        saved != requested
+        or (saved and saved_hidden != requested_hidden)
+        or saved_optimizer != requested_optimizer
+    ):
         raise ValueError(
             "actor residual preview settings must match the checkpoint"
         )
-    return saved, int(saved_hidden)
+    return saved, int(saved_hidden), saved_optimizer
 
 
 def select_initial_training_state(*, initialized_state, resumed_state):
@@ -875,6 +907,7 @@ def validate_residual_preview_adapter_configuration(
     *,
     enabled: bool,
     hidden_dim: int,
+    optimizer_name: str,
     linear_preview_enabled: bool,
     actor_reference_lookahead_steps: tuple[int, ...],
     actor_reference_preview_mode: str,
@@ -893,6 +926,10 @@ def validate_residual_preview_adapter_configuration(
         or hidden_dim < 1
     ):
         raise ValueError("actor_residual_preview_hidden must be a positive integer")
+    if optimizer_name not in {"adam", "muon"}:
+        raise ValueError("actor residual preview optimizer is invalid")
+    if optimizer_name == "muon" and not enabled:
+        raise ValueError("Muon requires the residual preview adapter")
     if not enabled:
         return
     if linear_preview_enabled:
@@ -971,6 +1008,7 @@ def train(
     actor_preview_adapter: bool = False,
     actor_residual_preview_adapter: bool = False,
     actor_residual_preview_hidden: int = 256,
+    actor_residual_preview_optimizer: str = "adam",
     env_variant: str = "blind_nolinvel_nokinref",
     actor_per_env_grad_clip: float = None,
     critic_per_env_grad_clip: float = None,
@@ -1131,6 +1169,7 @@ def train(
     validate_residual_preview_adapter_configuration(
         enabled=actor_residual_preview_adapter,
         hidden_dim=actor_residual_preview_hidden,
+        optimizer_name=actor_residual_preview_optimizer,
         linear_preview_enabled=actor_preview_adapter,
         actor_reference_lookahead_steps=actor_reference_lookahead_steps,
         actor_reference_preview_mode=actor_reference_preview_mode,
@@ -1288,10 +1327,12 @@ def train(
         (
             actor_residual_preview_adapter,
             actor_residual_preview_hidden,
+            actor_residual_preview_optimizer,
         ) = resolve_residual_preview_adapter_resume_setting(
             resumed_hparams,
             requested=actor_residual_preview_adapter,
             requested_hidden=actor_residual_preview_hidden,
+            requested_optimizer=actor_residual_preview_optimizer,
             future_reference_upgrade=future_reference_upgrade,
         )
         (
@@ -1450,6 +1491,7 @@ def train(
         validate_residual_preview_adapter_configuration(
             enabled=actor_residual_preview_adapter,
             hidden_dim=actor_residual_preview_hidden,
+            optimizer_name=actor_residual_preview_optimizer,
             linear_preview_enabled=actor_preview_adapter,
             actor_reference_lookahead_steps=(
                 actor_reference_lookahead_steps
@@ -1594,11 +1636,16 @@ def train(
     )
     migration_report = None
     residual_adapter_report = None
+    residual_muon_report = None
     preview_adapter_mask = None
     preview_legacy_frame_dim = 0
     preview_trainable_parameter_count = 0
     frozen_preview_treatment = bool(
         actor_preview_adapter or actor_residual_preview_adapter
+    )
+    residual_muon_treatment = bool(
+        actor_residual_preview_adapter
+        and actor_residual_preview_optimizer == "muon"
     )
     if actor_preview_adapter:
         preview_legacy_frame_dim = (
@@ -1691,6 +1738,12 @@ def train(
 
     # Initialize optimizers
     actor_opt = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(actor_schedule))
+    residual_muon_opt = None
+    residual_adam_opt = None
+    if actor_residual_preview_optimizer == "muon":
+        residual_muon_opt, residual_adam_opt = (
+            build_residual_muon_optimizers(actor_schedule)
+        )
     critic_opt = optax.chain(
         optax.clip_by_global_norm(1.0), optax.adam(critic_schedule)
     )
@@ -2252,7 +2305,22 @@ def train(
 
         actor_grad_norm = compute_grad_norm(grads)
 
-        if frozen_preview_treatment:
+        if (
+            actor_residual_preview_adapter
+            and actor_residual_preview_optimizer == "muon"
+        ):
+            if residual_muon_opt is None or residual_adam_opt is None:
+                raise ValueError("residual Muon optimizers are unavailable")
+            updates, new_actor_opt, preview_update_diagnostics = (
+                apply_residual_muon_update(
+                    muon_optimizer=residual_muon_opt,
+                    adam_optimizer=residual_adam_opt,
+                    gradients=grads,
+                    optimizer_state=state.actor_opt,
+                    params=state.actor_params,
+                )
+            )
+        elif frozen_preview_treatment:
             updates, new_actor_opt, preview_update_diagnostics = (
                 apply_preview_adapter_update(
                     actor_opt,
@@ -2569,6 +2637,20 @@ def train(
                 )
                 & (preview_normalizer_drift == 0.0)
             )
+            if residual_muon_treatment:
+                preview_valid = preview_valid & jp.all(
+                    jp.stack(
+                        [
+                            jp.isfinite(preview_update_diagnostics[key])
+                            for key in (
+                                "muon_kernel_gradient_norm",
+                                "muon_kernel_update_norm",
+                                "aux_adam_gradient_norm",
+                                "aux_adam_update_norm",
+                            )
+                        ]
+                    )
+                )
             metrics.update(
                 {
                     "actor_preview_gradient_norm": (
@@ -2604,6 +2686,31 @@ def train(
                     "actor_preview_valid": preview_valid,
                 }
             )
+            if residual_muon_treatment:
+                metrics.update(
+                    {
+                        "actor_muon_kernel_gradient_norm": (
+                            preview_update_diagnostics[
+                                "muon_kernel_gradient_norm"
+                            ]
+                        ),
+                        "actor_muon_kernel_update_norm": (
+                            preview_update_diagnostics[
+                                "muon_kernel_update_norm"
+                            ]
+                        ),
+                        "actor_muon_aux_adam_gradient_norm": (
+                            preview_update_diagnostics[
+                                "aux_adam_gradient_norm"
+                            ]
+                        ),
+                        "actor_muon_aux_adam_update_norm": (
+                            preview_update_diagnostics[
+                                "aux_adam_update_norm"
+                            ]
+                        ),
+                    }
+                )
         if adaptive_phase_sampling:
             metrics.update(
                 {
@@ -2684,13 +2791,30 @@ def train(
                     parent=parent_params,
                     adapter=adapter_params,
                 )
-                composite_optimizer_state = (
+                adapter_audit_optimizer_state = (
                     initialize_residual_adapter_optimizer(
                         actor_opt,
                         parent_optimizer_state=parent_optimizer_state,
                         composite_params=composite_params,
                     )
                 )
+                if actor_residual_preview_optimizer == "muon":
+                    if residual_muon_opt is None or residual_adam_opt is None:
+                        raise ValueError("residual Muon optimizers are unavailable")
+                    composite_optimizer_state = (
+                        initialize_residual_muon_optimizer(
+                            muon_optimizer=residual_muon_opt,
+                            adam_optimizer=residual_adam_opt,
+                            parent_optimizer_state=parent_optimizer_state,
+                            adapter_params=adapter_params,
+                        )
+                    )
+                    residual_muon_report = residual_muon_migration_report(
+                        parent_optimizer_state=parent_optimizer_state,
+                        candidate_optimizer_state=composite_optimizer_state,
+                    )
+                else:
+                    composite_optimizer_state = adapter_audit_optimizer_state
                 normalized_observations = env.normalize_actor_obs(
                     actor_norm,
                     resumed_state.normalizer,
@@ -2704,7 +2828,7 @@ def train(
                         parent_optimizer_state=parent_optimizer_state,
                         candidate_params=composite_params,
                         candidate_optimizer_state=(
-                            composite_optimizer_state
+                            adapter_audit_optimizer_state
                         ),
                         normalized_observations=normalized_observations,
                         history_len=actor_history_len,
@@ -2718,11 +2842,33 @@ def train(
                 persist_residual_adapter_migration_report(
                     save_dir, residual_adapter_report
                 )
+                if residual_muon_report is not None:
+                    persist_residual_muon_migration_report(
+                        save_dir, residual_muon_report
+                    )
             elif not isinstance(
                 resumed_state.actor_params, FrozenPreviewResidualParams
             ):
                 raise ValueError(
                     "resumed residual preview actor has invalid parameters"
+                )
+            elif (
+                actor_residual_preview_optimizer == "muon"
+                and not isinstance(
+                    resumed_state.actor_opt, FrozenPreviewResidualMuonState
+                )
+            ):
+                raise ValueError(
+                    "resumed residual Muon actor has invalid optimizer state"
+                )
+            elif (
+                actor_residual_preview_optimizer == "adam"
+                and isinstance(
+                    resumed_state.actor_opt, FrozenPreviewResidualMuonState
+                )
+            ):
+                raise ValueError(
+                    "resumed residual Adam actor has invalid optimizer state"
                 )
             preview_adapter_mask = build_residual_adapter_mask(
                 resumed_state.actor_params
@@ -2877,6 +3023,14 @@ def train(
         "actor_residual_preview_hidden": (
             actor_residual_preview_hidden
         ),
+        "actor_residual_preview_optimizer": (
+            actor_residual_preview_optimizer
+        ),
+        "actor_residual_preview_muon_beta": 0.95,
+        "actor_residual_preview_muon_ns_steps": 5,
+        "actor_residual_preview_muon_nesterov": True,
+        "actor_residual_preview_muon_preconditioning": "frobenius",
+        "actor_residual_preview_muon_consistent_rms": 0.2,
         "actor_residual_preview_trainable_parameter_count": (
             preview_trainable_parameter_count
             if actor_residual_preview_adapter
@@ -2900,6 +3054,11 @@ def train(
         "residual_adapter_migration_artifact": (
             "residual_adapter_migration.json"
             if residual_adapter_report is not None
+            else None
+        ),
+        "residual_muon_migration_artifact": (
+            "residual_muon_migration.json"
+            if residual_muon_report is not None
             else None
         ),
         "actor_per_env_grad_clip": actor_per_env_grad_clip,
@@ -3158,6 +3317,25 @@ def train(
                             ),
                         }
                     )
+                if residual_muon_treatment:
+                    diag_entry.update(
+                        {
+                            "actor_muon_kernel_gradient_norm": float(
+                                metrics["actor_muon_kernel_gradient_norm"]
+                            ),
+                            "actor_muon_kernel_update_norm": float(
+                                metrics["actor_muon_kernel_update_norm"]
+                            ),
+                            "actor_muon_aux_adam_gradient_norm": float(
+                                metrics[
+                                    "actor_muon_aux_adam_gradient_norm"
+                                ]
+                            ),
+                            "actor_muon_aux_adam_update_norm": float(
+                                metrics["actor_muon_aux_adam_update_norm"]
+                            ),
+                        }
+                    )
                 if adaptive_phase_sampling:
                     if not bool(metrics["adaptive_phase_sampling_valid"]):
                         raise RuntimeError(
@@ -3290,6 +3468,32 @@ def train(
                         ).tolist(),
                         "actor_preview_valid": bool(
                             metrics["actor_preview_valid"]
+                        ),
+                        **(
+                            {
+                                "actor_muon_kernel_gradient_norm": float(
+                                    metrics[
+                                        "actor_muon_kernel_gradient_norm"
+                                    ]
+                                ),
+                                "actor_muon_kernel_update_norm": float(
+                                    metrics[
+                                        "actor_muon_kernel_update_norm"
+                                    ]
+                                ),
+                                "actor_muon_aux_adam_gradient_norm": float(
+                                    metrics[
+                                        "actor_muon_aux_adam_gradient_norm"
+                                    ]
+                                ),
+                                "actor_muon_aux_adam_update_norm": float(
+                                    metrics[
+                                        "actor_muon_aux_adam_update_norm"
+                                    ]
+                                ),
+                            }
+                            if residual_muon_treatment
+                            else {}
                         ),
                     },
                 )
