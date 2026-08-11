@@ -523,6 +523,51 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         np.testing.assert_allclose(state.data.qvel, qvel[1], atol=1e-7)
         self.assertEqual(env.carried_reset_bank_size, 1)
 
+    def test_carried_bank_preserves_noisy_reference_fallback(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        phase = np.array([37], dtype=np.int32)
+        qpos = np.asarray(self.env.qpos_reference[phase]).copy()
+        qvel = np.asarray(self.env.qvel_reference[phase]).copy()
+        with tempfile.TemporaryDirectory() as directory:
+            bank_path = Path(directory) / "carried_reset_bank.npz"
+            np.savez_compressed(
+                bank_path,
+                phase=phase,
+                qpos=qpos,
+                qvel=qvel,
+            )
+            probability = float(np.nextafter(0.0, 1.0))
+            for domain_randomization in (False, True):
+                with self.subTest(
+                    domain_randomization=domain_randomization
+                ):
+                    env = G1TrackingEnv(
+                        xml_path=str(MODEL),
+                        reference_path=str(REFERENCE),
+                        controller_path=str(CONTROLLER),
+                        actor_history_len=1,
+                        domain_randomization=domain_randomization,
+                        reference_reset_noise_scale=1.0,
+                        carried_reset_bank_path=str(bank_path),
+                        carried_reset_probability=probability,
+                    )
+                    key = jax.random.PRNGKey(31)
+                    state = env.reset(key, jnp.array(0.0))
+                    reset_phase = int(state.info["phase"])
+                    self.assertFalse(
+                        np.array_equal(
+                            np.asarray(state.data.qpos),
+                            np.asarray(env.qpos_reference[reset_phase]),
+                        )
+                    )
+                    self.assertFalse(
+                        np.array_equal(
+                            np.asarray(state.data.qvel),
+                            np.asarray(env.qvel_reference[reset_phase]),
+                        )
+                    )
+
     def test_carried_reset_bank_restores_complete_actor_context(self):
         from src.envs.g1_tracking.environment import G1TrackingEnv
 
@@ -579,6 +624,7 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
                 actor_history_len=10,
                 actor_reference_lookahead_steps=(4, 8, 12),
                 actor_reference_preview_mode="delta",
+                reference_reset_noise_scale=1.0,
                 carried_reset_bank_path=str(bank_path),
                 carried_reset_probability=1.0,
                 carried_reset_bank_start=1,
@@ -663,13 +709,6 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
                     )
         with self.assertRaisesRegex(ValueError, "carried_reset_bank_path"):
             G1TrackingEnv(carried_reset_probability=0.5)
-        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
-            G1TrackingEnv(
-                carried_reset_bank_path="/tmp/missing.npz",
-                carried_reset_probability=0.5,
-                reference_reset_noise_scale=1.0,
-            )
-
     def test_fixed_phase_reset_supports_paired_evaluation(self):
         env = self.env
         state = env.reset_at_phase(

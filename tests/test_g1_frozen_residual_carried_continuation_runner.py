@@ -41,6 +41,11 @@ def test_carried_continuation_changes_only_reset_distribution_and_endpoint(
     assert candidate["carried_reset_bank_path"] == str(bank.resolve())
     assert candidate["carried_reset_probability"] == 0.5
     assert candidate["carried_reset_bank_start"] == 0
+    assert candidate["reference_reset_noise_scale"] == 1.0
+    assert (
+        candidate["reference_reset_noise_scale"]
+        == parent["reference_reset_noise_scale"]
+    )
     assert candidate["allow_resume_carried_reset_change"] is True
     assert {
         key: value for key, value in candidate.items() if key not in changed

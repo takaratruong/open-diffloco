@@ -282,13 +282,6 @@ class G1TrackingEnv:
                 "carried_reset_probability must be positive when "
                 "carried_reset_bank_path is set"
             )
-        if (
-            carried_reset_bank_path is not None
-            and self.reference_reset_noise_scale > 0.0
-        ):
-            raise ValueError(
-                "carried reset banks and reference reset noise are mutually exclusive"
-            )
         self.carried_reset_bank_path = (
             None
             if carried_reset_bank_path is None
@@ -1011,6 +1004,50 @@ class G1TrackingEnv:
             uniform_ratio=self.adaptive_phase_uniform_ratio,
         )
 
+    def _noisy_reference_state(
+        self,
+        phase: jax.Array,
+        pose_key: jax.Array,
+        velocity_key: jax.Array,
+        joint_key: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
+        """Perturb one reference state using the registered reset contract."""
+        scale = self.reference_reset_noise_scale
+        pose_limit = scale * jp.array(
+            [0.02, 0.02, 0.005, 0.1, 0.1, 0.1]
+        )
+        velocity_limit = scale * jp.array(
+            [0.25, 0.25, 0.1, 0.26, 0.26, 0.39]
+        )
+        pose_delta = jax.random.uniform(
+            pose_key, (6,), minval=-pose_limit, maxval=pose_limit
+        )
+        velocity_delta = jax.random.uniform(
+            velocity_key,
+            (6,),
+            minval=-velocity_limit,
+            maxval=velocity_limit,
+        )
+        joint_delta = jax.random.uniform(
+            joint_key, (29,), minval=-0.05 * scale, maxval=0.05 * scale
+        )
+        qpos = self.qpos_reference[phase]
+        root_quat = _quat_mul(
+            _quat_from_euler_xyz(pose_delta[3:]), qpos[3:7]
+        )
+        root_quat = root_quat / jp.linalg.norm(root_quat)
+        qpos = qpos.at[:3].add(pose_delta[:3])
+        qpos = qpos.at[3:7].set(root_quat)
+        qpos = qpos.at[7:].set(
+            jp.clip(
+                qpos[7:] + joint_delta,
+                self.soft_joint_lower,
+                self.soft_joint_upper,
+            )
+        )
+        qvel = self.qvel_reference[phase].at[:6].add(velocity_delta)
+        return qpos, qvel
+
     def reset(
         self,
         rng: jax.Array,
@@ -1018,13 +1055,39 @@ class G1TrackingEnv:
         phase_sampler_failed_count: jax.Array | None = None,
     ) -> EnvState:
         if self.carried_reset_bank_path is not None:
-            if self.domain_randomization:
+            noisy_fallback = self.reference_reset_noise_scale > 0.0
+            if self.domain_randomization and noisy_fallback:
+                (
+                    rng,
+                    phase_key,
+                    bank_key,
+                    choice_key,
+                    pose_key,
+                    velocity_key,
+                    joint_key,
+                    randomization_key,
+                ) = jax.random.split(rng, 8)
+                randomization = self._sample_randomization(
+                    randomization_key, difficulty
+                )
+            elif self.domain_randomization:
                 rng, phase_key, bank_key, choice_key, randomization_key = (
                     jax.random.split(rng, 5)
                 )
                 randomization = self._sample_randomization(
                     randomization_key, difficulty
                 )
+            elif noisy_fallback:
+                (
+                    rng,
+                    phase_key,
+                    bank_key,
+                    choice_key,
+                    pose_key,
+                    velocity_key,
+                    joint_key,
+                ) = jax.random.split(rng, 7)
+                randomization = self._nominal_randomization()
             else:
                 rng, phase_key, bank_key, choice_key = jax.random.split(
                     rng, 4
@@ -1043,6 +1106,16 @@ class G1TrackingEnv:
             use_carried = jax.random.bernoulli(
                 choice_key, self.carried_reset_probability
             )
+            if noisy_fallback:
+                reference_qpos, reference_qvel = self._noisy_reference_state(
+                    reference_phase,
+                    pose_key,
+                    velocity_key,
+                    joint_key,
+                )
+            else:
+                reference_qpos = self.qpos_reference[reference_phase]
+                reference_qvel = self.qvel_reference[reference_phase]
             phase = jp.where(
                 use_carried,
                 self.carried_reset_phase[bank_index],
@@ -1051,12 +1124,12 @@ class G1TrackingEnv:
             qpos = jp.where(
                 use_carried,
                 self.carried_reset_qpos[bank_index],
-                self.qpos_reference[reference_phase],
+                reference_qpos,
             )
             qvel = jp.where(
                 use_carried,
                 self.carried_reset_qvel[bank_index],
-                self.qvel_reference[reference_phase],
+                reference_qvel,
             )
             data = self._data_from_state(
                 qpos=qpos,
@@ -1156,40 +1229,9 @@ class G1TrackingEnv:
         phase = self._sample_reset_phase(
             phase_key, phase_sampler_failed_count
         )
-        scale = self.reference_reset_noise_scale
-        pose_limit = scale * jp.array(
-            [0.02, 0.02, 0.005, 0.1, 0.1, 0.1]
+        qpos, qvel = self._noisy_reference_state(
+            phase, pose_key, velocity_key, joint_key
         )
-        velocity_limit = scale * jp.array(
-            [0.25, 0.25, 0.1, 0.26, 0.26, 0.39]
-        )
-        pose_delta = jax.random.uniform(
-            pose_key, (6,), minval=-pose_limit, maxval=pose_limit
-        )
-        velocity_delta = jax.random.uniform(
-            velocity_key,
-            (6,),
-            minval=-velocity_limit,
-            maxval=velocity_limit,
-        )
-        joint_delta = jax.random.uniform(
-            joint_key, (29,), minval=-0.05 * scale, maxval=0.05 * scale
-        )
-        qpos = self.qpos_reference[phase]
-        root_quat = _quat_mul(
-            _quat_from_euler_xyz(pose_delta[3:]), qpos[3:7]
-        )
-        root_quat = root_quat / jp.linalg.norm(root_quat)
-        qpos = qpos.at[:3].add(pose_delta[:3])
-        qpos = qpos.at[3:7].set(root_quat)
-        qpos = qpos.at[7:].set(
-            jp.clip(
-                qpos[7:] + joint_delta,
-                self.soft_joint_lower,
-                self.soft_joint_upper,
-            )
-        )
-        qvel = self.qvel_reference[phase].at[:6].add(velocity_delta)
 
         data = self._data_from_state(
             qpos=qpos,

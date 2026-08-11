@@ -159,10 +159,6 @@ def build_train_kwargs(
             "carried_reset_probability must be positive when "
             "carried_reset_bank_path is set"
         )
-    if carried_reset_bank_path is not None and reference_reset_noise_scale > 0.0:
-        raise ValueError(
-            "carried reset banks and reference reset noise are mutually exclusive"
-        )
     kwargs = build_100hz_train_kwargs(
         steps=steps,
         num_envs=num_envs,

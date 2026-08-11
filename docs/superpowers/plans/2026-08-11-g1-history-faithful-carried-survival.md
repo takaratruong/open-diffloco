@@ -15,6 +15,8 @@
 - Source starts are exactly `0/100/200/300/400`; every source must terminate after at least 29 transitions. Record observed survival as provenance because two GPU-7 preflights yield `75/63/94/74/45` and `63/63/95/69/44`.
 - Retain states 6 through 29 transitions before each terminal transition: exactly 24 rows per source and 120 rows total.
 - Carried reset probability is exactly 0.5; bank start is 0.
+- Carried rows are exact; the non-carried half preserves E008's registered
+  `reference_reset_noise_scale=1.0` noisy-reference initialization.
 - Training is exactly 64 effective-512 H12 updates: 393,216 transitions from step 1,327,104 to 1,720,320.
 - Checkpoint interval is 49,152 transitions, producing eight treatment checkpoints.
 - Preserve Adam, five-bin CAGrad, frozen parent actor, trained nonlinear delta-preview residual, actor normalizer, critic, fixed `g1-4x5` solver, reward, action-noise schedule, seed 0, and nominal physics.

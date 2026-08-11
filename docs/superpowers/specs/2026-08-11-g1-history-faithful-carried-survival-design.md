@@ -73,6 +73,12 @@ the NPZ atomically; its SHA-256 freezes the exact sampled trajectory states.
 
 ## Reset Semantics
 
+On each reset, the registered 0.5 Bernoulli selects either an exact carried-bank
+row or E008's unchanged noisy-reference fallback. Carried rows are never
+perturbed; non-carried rows retain `reference_reset_noise_scale=1.0`. This
+preserves E008's original reset distribution in the control half instead of
+silently replacing it with exact reference states.
+
 At each environment reset, sample the existing uniform reference phase and one
 bank row. Select the carried row with fixed probability 0.5. A reference reset
 keeps the existing zero previous action and repeated-frame history. A carried
