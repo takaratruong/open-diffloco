@@ -8,6 +8,8 @@ import jax.numpy as jp
 import numpy as np
 import optax
 
+from src.algorithms.shac.phase_weighting import phase_bin_indices
+
 
 PyTree = Any
 
@@ -245,5 +247,84 @@ def frozen_preview_state_drift(
         "frozen_mu_max_abs": mu_drift,
         "frozen_nu_max_abs": nu_drift,
         "actor_normalizer_max_abs": normalizer_drift,
+        "valid": valid,
+    }
+
+
+def zero_current_preview(
+    observations: jax.Array,
+    *,
+    history_len: int,
+    legacy_frame_dim: int,
+    treatment_frame_dim: int,
+) -> jax.Array:
+    """Zero only the current history frame's appended preview suffix."""
+    observations = jp.asarray(observations)
+    expected_width = history_len * treatment_frame_dim
+    if (
+        history_len < 1
+        or legacy_frame_dim < 1
+        or treatment_frame_dim <= legacy_frame_dim
+        or observations.ndim < 1
+        or observations.shape[-1] != expected_width
+    ):
+        raise ValueError("observations do not match the preview history layout")
+    frames = observations.reshape(
+        observations.shape[:-1] + (history_len, treatment_frame_dim)
+    )
+    frames = frames.at[..., -1, legacy_frame_dim:].set(0.0)
+    return frames.reshape(observations.shape)
+
+
+def phase_binned_action_deviation(
+    candidate_actions: jax.Array,
+    parent_actions: jax.Array,
+    phases: jax.Array,
+    *,
+    phase_count: int,
+    bin_count: int,
+) -> dict[str, jax.Array]:
+    """Reduce pre-noise candidate-to-parent action deviation by phase bin."""
+    candidate_actions = jp.asarray(candidate_actions)
+    parent_actions = jp.asarray(parent_actions)
+    phases = jp.asarray(phases, dtype=jp.int32)
+    if (
+        candidate_actions.shape != parent_actions.shape
+        or candidate_actions.ndim < 1
+        or candidate_actions.shape[:-1] != phases.shape
+    ):
+        raise ValueError(
+            "candidate, parent, and phase population shapes must agree"
+        )
+    deviations = jp.mean(
+        jp.abs(candidate_actions - parent_actions), axis=-1
+    ).reshape(-1)
+    flat_phases = phases.reshape(-1)
+    bins = phase_bin_indices(
+        flat_phases,
+        phase_count=phase_count,
+        bin_count=bin_count,
+    )
+    bin_counts = jp.zeros((bin_count,), dtype=jp.int32).at[bins].add(1)
+    finite = jp.isfinite(deviations)
+    sums = jp.zeros((bin_count,), dtype=deviations.dtype).at[bins].add(
+        jp.where(finite, deviations, 0.0)
+    )
+    mean_abs = jp.where(
+        bin_counts > 0, sums / jp.maximum(bin_counts, 1), jp.nan
+    )
+    max_abs = jp.full((bin_count,), -jp.inf, dtype=deviations.dtype).at[
+        bins
+    ].max(jp.where(finite, deviations, -jp.inf))
+    valid = (
+        jp.all(bin_counts > 0)
+        & jp.all(finite)
+        & jp.all(jp.isfinite(mean_abs))
+        & jp.all(jp.isfinite(max_abs))
+    )
+    return {
+        "bin_counts": bin_counts,
+        "mean_abs": mean_abs,
+        "max_abs": max_abs,
         "valid": valid,
     }

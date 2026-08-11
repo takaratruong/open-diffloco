@@ -229,3 +229,60 @@ def test_frozen_state_audit_detects_a_legacy_parameter_change():
 
     assert report["frozen_parameter_max_abs"] == 0.5
     assert not report["valid"]
+
+
+def test_zero_current_preview_removes_only_newest_suffix():
+    from src.algorithms.shac.preview_adapter import zero_current_preview
+
+    observations = jnp.arange(2 * 2 * 3, dtype=jnp.float32).reshape(2, -1)
+
+    result = zero_current_preview(
+        observations,
+        history_len=2,
+        legacy_frame_dim=2,
+        treatment_frame_dim=3,
+    )
+
+    frames = result.reshape(2, 2, 3)
+    original = observations.reshape(2, 2, 3)
+    np.testing.assert_array_equal(frames[:, 0], original[:, 0])
+    np.testing.assert_array_equal(frames[:, 1, :2], original[:, 1, :2])
+    np.testing.assert_array_equal(frames[:, 1, 2:], 0.0)
+
+
+def test_phase_binned_action_deviation_reports_mean_max_counts_and_validity():
+    from src.algorithms.shac.preview_adapter import (
+        phase_binned_action_deviation,
+    )
+
+    candidate = jnp.array([[[1.0]], [[4.0]], [[8.0]], [[16.0]]])
+    parent = jnp.zeros_like(candidate)
+
+    result = phase_binned_action_deviation(
+        candidate,
+        parent,
+        jnp.array([[0], [2], [4], [7]]),
+        phase_count=8,
+        bin_count=2,
+    )
+
+    np.testing.assert_array_equal(result["bin_counts"], [2, 2])
+    np.testing.assert_allclose(result["mean_abs"], [2.5, 12.0])
+    np.testing.assert_allclose(result["max_abs"], [4.0, 16.0])
+    assert bool(result["valid"])
+
+
+def test_phase_binned_action_deviation_rejects_nonfinite_or_empty_bins():
+    from src.algorithms.shac.preview_adapter import (
+        phase_binned_action_deviation,
+    )
+
+    result = phase_binned_action_deviation(
+        jnp.array([[1.0], [jnp.nan]]),
+        jnp.zeros((2, 1)),
+        jnp.array([0, 1]),
+        phase_count=8,
+        bin_count=2,
+    )
+
+    assert not bool(result["valid"])
