@@ -9,9 +9,190 @@ import numpy as np
 import optax
 
 from src.algorithms.shac.phase_weighting import phase_bin_indices
+from src.core.rmr_policy import RmrPolicy, apply_trainable_rmr_policy
 
 
 PyTree = Any
+
+
+def migrate_rmr_preview_policy(
+    policy: RmrPolicy,
+    *,
+    preview_mean: jax.Array,
+    preview_std: jax.Array,
+) -> RmrPolicy:
+    """Append zero-weight preview inputs to a native RMR actor exactly."""
+    if not isinstance(policy, RmrPolicy):
+        raise ValueError("preview migration requires an RmrPolicy")
+    mean = jp.asarray(policy.mean)
+    std = jp.asarray(policy.std)
+    suffix_mean = jp.asarray(preview_mean, dtype=mean.dtype)
+    suffix_std = jp.asarray(preview_std, dtype=std.dtype)
+    if mean.ndim != 1 or std.shape != mean.shape:
+        raise ValueError("RMR normalization statistics must be one-dimensional")
+    if (
+        suffix_mean.ndim != 1
+        or suffix_std.shape != suffix_mean.shape
+        or suffix_mean.size < 1
+    ):
+        raise ValueError("preview statistics must be matching nonempty vectors")
+    if not bool(
+        jp.all(jp.isfinite(suffix_mean))
+        & jp.all(jp.isfinite(suffix_std))
+        & jp.all(suffix_std > 0.0)
+    ):
+        raise ValueError("preview statistics must be finite with positive std")
+    if not policy.weights or policy.weights[0].shape[1] != mean.size:
+        raise ValueError("RMR first layer does not match its normalizer")
+    first_weight = jp.asarray(policy.weights[0])
+    expanded_first_weight = jp.concatenate(
+        (
+            first_weight,
+            jp.zeros(
+                (first_weight.shape[0], suffix_mean.size),
+                dtype=first_weight.dtype,
+            ),
+        ),
+        axis=1,
+    )
+    return RmrPolicy(
+        mean=jp.concatenate((mean, suffix_mean)),
+        std=jp.concatenate((std, suffix_std)),
+        weights=(expanded_first_weight, *policy.weights[1:]),
+        biases=policy.biases,
+    )
+
+
+def build_rmr_preview_mask(
+    policy: RmrPolicy,
+    *,
+    legacy_obs_dim: int,
+    treatment_obs_dim: int,
+) -> RmrPolicy:
+    """Select only appended input columns in an expanded RMR first layer."""
+    if (
+        not isinstance(policy, RmrPolicy)
+        or legacy_obs_dim < 1
+        or treatment_obs_dim <= legacy_obs_dim
+        or policy.mean.shape != (treatment_obs_dim,)
+        or policy.std.shape != (treatment_obs_dim,)
+        or not policy.weights
+        or policy.weights[0].shape[1] != treatment_obs_dim
+    ):
+        raise ValueError("RMR policy does not match the preview input layout")
+    first_mask = jp.zeros(policy.weights[0].shape, dtype=bool)
+    first_mask = first_mask.at[:, legacy_obs_dim:].set(True)
+    return RmrPolicy(
+        mean=jp.zeros(policy.mean.shape, dtype=bool),
+        std=jp.zeros(policy.std.shape, dtype=bool),
+        weights=(
+            first_mask,
+            *(
+                jp.zeros(weight.shape, dtype=bool)
+                for weight in policy.weights[1:]
+            ),
+        ),
+        biases=tuple(
+            jp.zeros(bias.shape, dtype=bool) for bias in policy.biases
+        ),
+    )
+
+
+def rmr_preview_migration_report(
+    parent: RmrPolicy, candidate: RmrPolicy
+) -> dict[str, object]:
+    """Prove an expanded RMR actor is a zero-effect append-only migration."""
+    if not isinstance(parent, RmrPolicy) or not isinstance(candidate, RmrPolicy):
+        raise ValueError("migration report requires RmrPolicy inputs")
+    legacy_dim = int(parent.mean.size)
+    treatment_dim = int(candidate.mean.size)
+    structurally_compatible = bool(
+        treatment_dim > legacy_dim
+        and bool(parent.weights)
+        and bool(candidate.weights)
+        and len(parent.weights) == len(candidate.weights)
+        and len(parent.biases) == len(candidate.biases)
+        and parent.weights[0].shape[0] == candidate.weights[0].shape[0]
+        and candidate.weights[0].shape[1] == treatment_dim
+    )
+    if not structurally_compatible:
+        raise ValueError("candidate is not an append-only RMR actor")
+    legacy_columns_exact = bool(
+        np.array_equal(
+            np.asarray(parent.weights[0]),
+            np.asarray(candidate.weights[0][:, :legacy_dim]),
+        )
+    )
+    new_columns_zero = bool(
+        np.all(np.asarray(candidate.weights[0][:, legacy_dim:]) == 0.0)
+    )
+    remaining_parameters_exact = bool(
+        all(
+            np.array_equal(np.asarray(left), np.asarray(right))
+            for left, right in zip(
+                parent.weights[1:], candidate.weights[1:], strict=True
+            )
+        )
+        and all(
+            np.array_equal(np.asarray(left), np.asarray(right))
+            for left, right in zip(
+                parent.biases, candidate.biases, strict=True
+            )
+        )
+    )
+    source_normalizer_exact = bool(
+        np.array_equal(
+            np.asarray(parent.mean), np.asarray(candidate.mean[:legacy_dim])
+        )
+        and np.array_equal(
+            np.asarray(parent.std), np.asarray(candidate.std[:legacy_dim])
+        )
+    )
+    preview_mean = np.asarray(candidate.mean[legacy_dim:])
+    preview_std = np.asarray(candidate.std[legacy_dim:])
+    preview_normalizer_finite = bool(
+        np.isfinite(preview_mean).all()
+        and np.isfinite(preview_std).all()
+        and np.all(preview_std > 0.0)
+    )
+    legacy_probe = parent.mean[None, :]
+    treatment_probe = jp.concatenate(
+        (legacy_probe, candidate.mean[None, legacy_dim:]), axis=-1
+    )
+    parent_action = apply_trainable_rmr_policy(parent, legacy_probe)
+    candidate_action = apply_trainable_rmr_policy(candidate, treatment_probe)
+    difference = np.abs(
+        np.asarray(candidate_action) - np.asarray(parent_action)
+    )
+    absolute_error = float(np.max(difference))
+    relative_error = float(
+        np.max(
+            difference
+            / np.maximum(np.abs(np.asarray(parent_action)), 1e-12)
+        )
+    )
+    valid = bool(
+        legacy_columns_exact
+        and new_columns_zero
+        and remaining_parameters_exact
+        and source_normalizer_exact
+        and preview_normalizer_finite
+        and absolute_error <= 1e-7
+        and relative_error <= 1e-7
+    )
+    return {
+        "migration_kind": "rmr-current-preview-v1",
+        "legacy_input_dim": legacy_dim,
+        "treatment_input_dim": treatment_dim,
+        "legacy_parameter_columns_exact": legacy_columns_exact,
+        "new_parameter_columns_zero": new_columns_zero,
+        "remaining_parameters_exact": remaining_parameters_exact,
+        "source_normalizer_exact": source_normalizer_exact,
+        "preview_normalizer_finite": preview_normalizer_finite,
+        "max_action_absolute_error": absolute_error,
+        "max_action_relative_error": relative_error,
+        "valid": valid,
+    }
 
 
 def _replace_dense_zero_kernel(tree: PyTree, kernel: jax.Array) -> PyTree:

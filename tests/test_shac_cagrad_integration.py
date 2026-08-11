@@ -36,6 +36,22 @@ def test_preview_adapter_configuration_requires_future_reference_cagrad():
         )
 
 
+def test_preview_adapter_configuration_accepts_one_frame_full_rmr_parent():
+    from src.algorithms.shac.algorithm import (
+        validate_preview_adapter_configuration,
+    )
+
+    validate_preview_adapter_configuration(
+        enabled=True,
+        actor_reference_lookahead_steps=(4, 8, 12),
+        actor_cagrad=True,
+        history_len=1,
+        source_actor_policy=None,
+        initial_full_actor_policy=object(),
+        env_variant="g1_tracking_rmr_50hz_source_step",
+    )
+
+
 @pytest.mark.parametrize(
     ("changes", "message"),
     [
@@ -43,7 +59,7 @@ def test_preview_adapter_configuration_requires_future_reference_cagrad():
         ({"actor_cagrad": False}, "requires future-reference CAGrad"),
         ({"history_len": 9}, "ten-frame history"),
         ({"source_actor_policy": object()}, "plain Flax actor"),
-        ({"initial_full_actor_policy": object()}, "plain Flax actor"),
+        ({"initial_full_actor_policy": object()}, "one-frame history"),
         ({"env_variant": "go2"}, "G1 tracking"),
     ],
 )
@@ -105,6 +121,17 @@ def test_train_wires_preview_adapter_without_changing_disabled_path():
     assert '"actor_preview_adapter": actor_preview_adapter' in source
     assert "if checkpoint_path is not None" in source
     assert "persist_checkpoint_phase_metric(" in source
+
+
+def test_train_wires_native_rmr_preview_migration_and_parent_action():
+    from src.algorithms.shac.algorithm import train
+
+    source = inspect.getsource(train)
+
+    assert "migrate_rmr_preview_policy(" in source
+    assert "build_rmr_preview_mask(" in source
+    assert "rmr_preview_migration_report(" in source
+    assert "apply_trainable_rmr_policy(\n                        initial_full_actor_policy" in source
 
 
 @pytest.mark.parametrize(

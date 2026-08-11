@@ -4,6 +4,7 @@ import numpy as np
 import optax
 
 from src.core.data_structures import Normalizer
+from src.core.rmr_policy import RmrPolicy, apply_trainable_rmr_policy
 
 
 def _params(rows=6, hidden=4):
@@ -29,6 +30,98 @@ def _assert_trees_equal(first, second):
     assert first_tree == second_tree
     for actual, expected in zip(first_leaves, second_leaves, strict=True):
         np.testing.assert_array_equal(actual, expected)
+
+
+def _rmr_policy():
+    return RmrPolicy(
+        mean=jnp.array([1.0, -2.0], dtype=jnp.float32),
+        std=jnp.array([2.0, 4.0], dtype=jnp.float32),
+        weights=(
+            jnp.array(
+                [[1.0, 2.0], [-3.0, 4.0], [5.0, -6.0]],
+                dtype=jnp.float32,
+            ),
+            jnp.array([[0.5, -0.25, 0.75]], dtype=jnp.float32),
+        ),
+        biases=(
+            jnp.array([0.1, 0.2, 0.3], dtype=jnp.float32),
+            jnp.array([-0.4], dtype=jnp.float32),
+        ),
+    )
+
+
+def test_rmr_preview_migration_preserves_parent_action_exactly():
+    from src.algorithms.shac.preview_adapter import migrate_rmr_preview_policy
+
+    parent = _rmr_policy()
+    candidate = migrate_rmr_preview_policy(
+        parent,
+        preview_mean=jnp.array([10.0, 20.0], dtype=jnp.float32),
+        preview_std=jnp.array([3.0, 5.0], dtype=jnp.float32),
+    )
+
+    assert candidate.mean.shape == (4,)
+    assert candidate.weights[0].shape == (3, 4)
+    np.testing.assert_array_equal(candidate.mean[:2], parent.mean)
+    np.testing.assert_array_equal(candidate.std[:2], parent.std)
+    np.testing.assert_array_equal(candidate.weights[0][:, :2], parent.weights[0])
+    np.testing.assert_array_equal(candidate.weights[0][:, 2:], 0.0)
+    _assert_trees_equal(candidate.weights[1:], parent.weights[1:])
+    _assert_trees_equal(candidate.biases, parent.biases)
+
+    legacy_obs = jnp.array([[3.0, 6.0], [1.5, -1.0]], dtype=jnp.float32)
+    preview = jnp.array([[100.0, -50.0], [-2.0, 7.0]], dtype=jnp.float32)
+    expected = apply_trainable_rmr_policy(parent, legacy_obs)
+    actual = apply_trainable_rmr_policy(
+        candidate, jnp.concatenate((legacy_obs, preview), axis=-1)
+    )
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_rmr_preview_mask_selects_only_appended_first_layer_columns():
+    from src.algorithms.shac.preview_adapter import (
+        build_rmr_preview_mask,
+        migrate_rmr_preview_policy,
+    )
+
+    candidate = migrate_rmr_preview_policy(
+        _rmr_policy(),
+        preview_mean=jnp.array([0.0, 0.0]),
+        preview_std=jnp.array([1.0, 1.0]),
+    )
+    mask = build_rmr_preview_mask(
+        candidate,
+        legacy_obs_dim=2,
+        treatment_obs_dim=4,
+    )
+
+    assert not bool(jnp.any(mask.mean))
+    assert not bool(jnp.any(mask.std))
+    assert not bool(jnp.any(mask.weights[0][:, :2]))
+    assert bool(jnp.all(mask.weights[0][:, 2:]))
+    assert not any(bool(jnp.any(value)) for value in mask.weights[1:])
+    assert not any(bool(jnp.any(value)) for value in mask.biases)
+
+
+def test_rmr_preview_migration_report_proves_global_structural_equivalence():
+    from src.algorithms.shac.preview_adapter import (
+        migrate_rmr_preview_policy,
+        rmr_preview_migration_report,
+    )
+
+    parent = _rmr_policy()
+    candidate = migrate_rmr_preview_policy(
+        parent,
+        preview_mean=jnp.array([10.0, 20.0]),
+        preview_std=jnp.array([3.0, 5.0]),
+    )
+    report = rmr_preview_migration_report(parent, candidate)
+
+    assert report["valid"] is True
+    assert report["legacy_parameter_columns_exact"] is True
+    assert report["new_parameter_columns_zero"] is True
+    assert report["source_normalizer_exact"] is True
+    assert report["max_action_absolute_error"] == 0.0
 
 
 def test_mask_selects_only_newest_preview_rows():

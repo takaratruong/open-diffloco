@@ -18,6 +18,7 @@ import numpy as np
 from src.core.data_structures import Normalizer, TrainState
 from src.core.networks import Actor, Critic
 from src.core.rmr_policy import (
+    RmrPolicy,
     apply_trainable_rmr_policy,
     compose_bounded_rmr_residual,
 )
@@ -58,7 +59,10 @@ from src.algorithms.shac.future_reference_migration import (
 from src.algorithms.shac.preview_adapter import (
     apply_preview_adapter_update,
     build_current_preview_mask,
+    build_rmr_preview_mask,
+    migrate_rmr_preview_policy,
     phase_binned_action_deviation,
+    rmr_preview_migration_report,
     zero_current_preview,
 )
 from src.envs.g1_tracking.training_distribution import (
@@ -759,10 +763,14 @@ def validate_preview_adapter_configuration(
         raise ValueError(
             "actor preview adapter requires future-reference CAGrad"
         )
-    if history_len != 10:
-        raise ValueError("actor preview adapter requires ten-frame history")
-    if source_actor_policy is not None or initial_full_actor_policy is not None:
+    if source_actor_policy is not None:
         raise ValueError("actor preview adapter requires a plain Flax actor")
+    if initial_full_actor_policy is None and history_len != 10:
+        raise ValueError("actor preview adapter requires ten-frame history")
+    if initial_full_actor_policy is not None and history_len != 1:
+        raise ValueError(
+            "full RMR actor preview adapter requires one-frame history"
+        )
     if not env_variant.startswith("g1_tracking"):
         raise ValueError("actor preview adapter requires G1 tracking")
 
@@ -1385,6 +1393,7 @@ def train(
         if initial_full_actor_policy is not None
         else actor.init(k1, actor_dummy)
     )
+    migration_report = None
     preview_adapter_mask = None
     preview_legacy_frame_dim = 0
     preview_trainable_parameter_count = 0
@@ -1392,20 +1401,60 @@ def train(
         preview_legacy_frame_dim = (
             env.actor_frame_obs_dim - env.actor_future_reference_dim
         )
-        preview_adapter_mask = build_current_preview_mask(
-            actor_params,
-            history_len=actor_history_len,
-            legacy_frame_dim=preview_legacy_frame_dim,
-            treatment_frame_dim=env.actor_frame_obs_dim,
-        )
+        if initial_full_actor_policy is not None:
+            if not isinstance(actor_params, RmrPolicy):
+                raise ValueError(
+                    "full actor preview adapter requires an RmrPolicy"
+                )
+            reference_phases = jp.arange(
+                env.reference_length, dtype=jp.int32
+            )
+            preview_table = jax.vmap(env._future_reference_command)(
+                reference_phases
+            )
+            preview_mean = jp.mean(preview_table, axis=0).astype(
+                actor_params.mean.dtype
+            )
+            preview_std = jp.sqrt(
+                jp.maximum(jp.var(preview_table, axis=0), 1e-8)
+            ).astype(actor_params.std.dtype)
+            parent_actor_params = actor_params
+            actor_params = migrate_rmr_preview_policy(
+                parent_actor_params,
+                preview_mean=preview_mean,
+                preview_std=preview_std,
+            )
+            migration_report = rmr_preview_migration_report(
+                parent_actor_params, actor_params
+            )
+            preview_adapter_mask = build_rmr_preview_mask(
+                actor_params,
+                legacy_obs_dim=preview_legacy_frame_dim,
+                treatment_obs_dim=env.actor_frame_obs_dim,
+            )
+            expected_preview_parameters = (
+                env.actor_future_reference_dim
+                * actor_params.weights[0].shape[0]
+            )
+        else:
+            preview_adapter_mask = build_current_preview_mask(
+                actor_params,
+                history_len=actor_history_len,
+                legacy_frame_dim=preview_legacy_frame_dim,
+                treatment_frame_dim=env.actor_frame_obs_dim,
+            )
+            expected_preview_parameters = (
+                env.actor_future_reference_dim
+                * actor_params["params"]["Dense_0"]["kernel"].shape[1]
+            )
         preview_trainable_parameter_count = sum(
             int(np.count_nonzero(np.asarray(leaf)))
             for leaf in jax.tree_util.tree_leaves(preview_adapter_mask)
         )
-        if preview_trainable_parameter_count != 89_088:
+        if preview_trainable_parameter_count != expected_preview_parameters:
             raise ValueError(
-                "actor preview adapter requires exactly 89,088 trainable "
-                "parameters"
+                "actor preview adapter trainable parameter count does not "
+                "match its first-layer preview boundary"
             )
     critic_params = critic.init(k2, critic_dummy)
     target_critic_params = critic_params
@@ -1521,15 +1570,21 @@ def train(
                 else None
             )
             if actor_preview_adapter:
-                parent_obs_norm = zero_current_preview(
-                    obs_norm,
-                    history_len=actor_history_len,
-                    legacy_frame_dim=preview_legacy_frame_dim,
-                    treatment_frame_dim=env.actor_frame_obs_dim,
-                )
-                parent_action = actor.apply(
-                    actor_params, parent_obs_norm
-                ).astype(jp.float64)
+                if initial_full_actor_policy is not None:
+                    parent_action = apply_trainable_rmr_policy(
+                        initial_full_actor_policy,
+                        actor_obs[..., :preview_legacy_frame_dim],
+                    ).astype(jp.float64)
+                else:
+                    parent_obs = zero_current_preview(
+                        obs_norm,
+                        history_len=actor_history_len,
+                        legacy_frame_dim=preview_legacy_frame_dim,
+                        treatment_frame_dim=env.actor_frame_obs_dim,
+                    )
+                    parent_action = actor.apply(
+                        actor_params, parent_obs
+                    ).astype(jp.float64)
             if initial_full_actor_policy is not None:
                 action = apply_trainable_rmr_policy(
                     actor_params, actor_obs
@@ -2364,7 +2419,10 @@ def train(
         critic_opt=critic_opt_state,
         step=canonicalize_step_dtype(0),
     )
-    migration_report = None
+    if migration_report is not None:
+        persist_future_reference_migration_report(
+            save_dir, migration_report
+        )
     if resumed_state is not None:
         print(
             "Restoring complete training state from step "
