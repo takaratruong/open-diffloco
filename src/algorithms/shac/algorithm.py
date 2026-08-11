@@ -35,6 +35,7 @@ from src.algorithms.shac.cagrad import (
 )
 from src.algorithms.shac.phase_weighting import (
     aggregate_phase_weighted_gradients,
+    phase_bin_indices,
     phase_robust_weights,
 )
 from src.algorithms.shac.microbatch import (
@@ -414,6 +415,59 @@ def reduce_cagrad_shard_accumulators(
     }
 
 
+def cagrad_phase_loss_diagnostics(
+    *,
+    losses: jax.Array,
+    phases: jax.Array,
+    phase_count: int,
+    bin_count: int,
+) -> dict[str, jax.Array]:
+    """Reduce detached actor losses over the CAGrad task bins."""
+    losses = jax.lax.stop_gradient(jp.asarray(losses))
+    phases = jp.asarray(phases, dtype=jp.int32)
+    if losses.ndim != 1 or phases.shape != losses.shape:
+        raise ValueError("losses and phases must be matching vectors")
+    bins = phase_bin_indices(
+        phases,
+        phase_count=phase_count,
+        bin_count=bin_count,
+    )
+    bin_counts = jp.zeros((bin_count,), dtype=jp.int32).at[bins].add(1)
+    finite_losses = jp.isfinite(losses)
+    sums = jp.zeros((bin_count,), dtype=losses.dtype).at[bins].add(
+        jp.where(finite_losses, losses, 0.0)
+    )
+    bin_losses = jp.where(
+        bin_counts > 0,
+        sums / jp.maximum(bin_counts, 1),
+        jp.nan,
+    )
+    valid = (
+        jp.all(bin_counts > 0)
+        & jp.all(finite_losses)
+        & jp.all(jp.isfinite(bin_losses))
+    )
+    return {
+        "bin_counts": bin_counts,
+        "bin_losses": bin_losses,
+        "valid": valid,
+    }
+
+
+def should_log_training_iteration(
+    iteration: int,
+    *,
+    start_iteration: int,
+    interval: int = 10,
+) -> bool:
+    """Log the first update of this invocation and each relative interval."""
+    if interval < 1:
+        raise ValueError("logging interval must be positive")
+    return iteration >= start_iteration and (
+        (iteration - start_iteration) % interval == 0
+    )
+
+
 def squeeze_value_head(values):
     """Remove only the critic output axis, preserving batch/time axes."""
     return jp.squeeze(values, axis=-1)
@@ -492,19 +546,37 @@ def resolve_cagrad_resume_settings(
     requested_actor_cagrad: bool,
     requested_alpha: float,
     requested_iterations: int,
-) -> tuple[bool, float, int]:
+    requested_bin_count: int,
+) -> tuple[bool, float, int, int]:
     """Restore CAGrad checkpoints while allowing legacy treatment starts."""
-    if not resumed_hparams or resumed_hparams.get("actor_cagrad") is not True:
-        return requested_actor_cagrad, requested_alpha, requested_iterations
+    if not resumed_hparams or "actor_cagrad" not in resumed_hparams:
+        return (
+            requested_actor_cagrad,
+            requested_alpha,
+            requested_iterations,
+            requested_bin_count,
+        )
+    resumed_actor_cagrad = resumed_hparams["actor_cagrad"]
+    if not isinstance(resumed_actor_cagrad, bool):
+        raise ValueError("CAGrad checkpoint contains invalid resume metadata")
+    if not resumed_actor_cagrad:
+        return (
+            requested_actor_cagrad,
+            requested_alpha,
+            requested_iterations,
+            requested_bin_count,
+        )
     required = {
         "actor_cagrad",
         "actor_cagrad_alpha",
         "actor_cagrad_iterations",
+        "actor_phase_bin_count",
     }
     if not required.issubset(resumed_hparams):
         raise ValueError("CAGrad checkpoint requires complete resume metadata")
     alpha = resumed_hparams["actor_cagrad_alpha"]
     iterations = resumed_hparams["actor_cagrad_iterations"]
+    bin_count = resumed_hparams["actor_phase_bin_count"]
     if (
         isinstance(alpha, bool)
         or not isinstance(alpha, (int, float))
@@ -515,7 +587,9 @@ def resolve_cagrad_resume_settings(
         or iterations < 1
     ):
         raise ValueError("CAGrad checkpoint contains invalid resume metadata")
-    return True, float(alpha), iterations
+    if isinstance(bin_count, bool) or bin_count != 5:
+        raise ValueError("CAGrad checkpoint requires exactly five phase bins")
+    return True, float(alpha), iterations, bin_count
 
 
 def validate_actor_cagrad_configuration(
@@ -889,11 +963,13 @@ def train(
             actor_cagrad,
             actor_cagrad_alpha,
             actor_cagrad_iterations,
+            actor_phase_bin_count,
         ) = resolve_cagrad_resume_settings(
             resumed_hparams,
             requested_actor_cagrad=actor_cagrad,
             requested_alpha=actor_cagrad_alpha,
             requested_iterations=actor_cagrad_iterations,
+            requested_bin_count=actor_phase_bin_count,
         )
         if resumed_hparams:
             print(f"Resuming from step {resumed_step}")
@@ -1643,6 +1719,14 @@ def train(
                 grads = mean_shard_trees(shard_reductions)
             actor_grad_stats = summarize_shard_stats(shard_grad_stats)
 
+        if actor_cagrad:
+            cagrad_loss_diagnostics = cagrad_phase_loss_diagnostics(
+                losses=losses,
+                phases=actor_start_phases,
+                phase_count=int(env.reference_transitions),
+                bin_count=actor_phase_bin_count,
+            )
+
         if adaptive_phase_sampling:
             completed_failed_count = update_adaptive_phase_state(
                 failed_count=updated_env_state.info[
@@ -1906,6 +1990,10 @@ def train(
             )
         if actor_cagrad:
             cagrad_result = cagrad_reduction["result"]
+            cagrad_counts_match = jp.all(
+                cagrad_loss_diagnostics["bin_counts"]
+                == cagrad_reduction["bin_counts"]
+            )
             metrics.update(
                 {
                     "actor_cagrad_bin_counts": cagrad_reduction[
@@ -1913,6 +2001,9 @@ def train(
                     ],
                     "actor_cagrad_bin_gradient_norms": cagrad_reduction[
                         "bin_gradient_norms"
+                    ],
+                    "actor_cagrad_bin_losses": cagrad_loss_diagnostics[
+                        "bin_losses"
                     ],
                     "actor_cagrad_weights": cagrad_result.weights,
                     "actor_cagrad_gram_matrix": cagrad_result.gram_matrix,
@@ -1923,7 +2014,11 @@ def train(
                         cagrad_result.uniform_combined_cosine
                     ),
                     "actor_cagrad_combined_norm": actor_grad_norm,
-                    "actor_cagrad_valid": cagrad_reduction["valid"],
+                    "actor_cagrad_valid": (
+                        cagrad_reduction["valid"]
+                        & cagrad_loss_diagnostics["valid"]
+                        & cagrad_counts_match
+                    ),
                 }
             )
         if adaptive_phase_sampling:
@@ -2128,7 +2223,7 @@ def train(
         if actor_cagrad and not bool(metrics["actor_cagrad_valid"]):
             raise RuntimeError("actor CAGrad aggregation is invalid")
 
-        if i % 10 == 0:
+        if should_log_training_iteration(i, start_iteration=start_iter):
             jax.block_until_ready(state.step)
 
             vel_x = float(metrics["vel_x"])
@@ -2261,6 +2356,9 @@ def train(
                             ).tolist(),
                             "actor_cagrad_bin_gradient_norms": np.asarray(
                                 metrics["actor_cagrad_bin_gradient_norms"]
+                            ).tolist(),
+                            "actor_cagrad_bin_losses": np.asarray(
+                                metrics["actor_cagrad_bin_losses"]
                             ).tolist(),
                             "actor_cagrad_weights": np.asarray(
                                 metrics["actor_cagrad_weights"]

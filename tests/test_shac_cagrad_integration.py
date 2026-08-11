@@ -99,20 +99,23 @@ def test_resume_restores_cagrad_but_legacy_hparams_allow_treatment_start():
             "actor_cagrad": True,
             "actor_cagrad_alpha": 0.5,
             "actor_cagrad_iterations": 32,
+            "actor_phase_bin_count": 5,
         },
         requested_actor_cagrad=False,
         requested_alpha=0.1,
         requested_iterations=4,
+        requested_bin_count=3,
     )
-    assert restored == (True, 0.5, 32)
+    assert restored == (True, 0.5, 32, 5)
 
     treatment_start = resolve_cagrad_resume_settings(
         {"algorithm": "shac"},
         requested_actor_cagrad=True,
         requested_alpha=0.5,
         requested_iterations=32,
+        requested_bin_count=5,
     )
-    assert treatment_start == (True, 0.5, 32)
+    assert treatment_start == (True, 0.5, 32, 5)
 
 
 def test_cagrad_resume_metadata_must_be_complete():
@@ -120,11 +123,73 @@ def test_cagrad_resume_metadata_must_be_complete():
 
     with pytest.raises(ValueError, match="CAGrad checkpoint.*metadata"):
         resolve_cagrad_resume_settings(
-            {"actor_cagrad": True},
+            {
+                "actor_cagrad": True,
+                "actor_cagrad_alpha": 0.5,
+                "actor_cagrad_iterations": 32,
+            },
             requested_actor_cagrad=False,
             requested_alpha=0.5,
             requested_iterations=32,
+            requested_bin_count=5,
         )
+
+
+def test_cagrad_resume_rejects_non_five_bin_metadata():
+    from src.algorithms.shac.algorithm import resolve_cagrad_resume_settings
+
+    with pytest.raises(ValueError, match="CAGrad checkpoint.*phase bins"):
+        resolve_cagrad_resume_settings(
+            {
+                "actor_cagrad": True,
+                "actor_cagrad_alpha": 0.5,
+                "actor_cagrad_iterations": 32,
+                "actor_phase_bin_count": 4,
+            },
+            requested_actor_cagrad=False,
+            requested_alpha=0.5,
+            requested_iterations=32,
+            requested_bin_count=5,
+        )
+
+
+def test_cagrad_phase_loss_diagnostics_use_full_population_bins():
+    from src.algorithms.shac.algorithm import cagrad_phase_loss_diagnostics
+
+    diagnostics = cagrad_phase_loss_diagnostics(
+        losses=jnp.array([1.0, 3.0, 2.0, 4.0, 8.0, 10.0]),
+        phases=jnp.array([0, 40, 100, 200, 300, 498]),
+        phase_count=499,
+        bin_count=5,
+    )
+
+    np.testing.assert_array_equal(
+        diagnostics["bin_counts"], np.array([2, 1, 1, 1, 1])
+    )
+    np.testing.assert_allclose(
+        diagnostics["bin_losses"], np.array([2.0, 2.0, 4.0, 8.0, 10.0])
+    )
+    assert bool(diagnostics["valid"])
+
+    invalid = cagrad_phase_loss_diagnostics(
+        losses=jnp.array([1.0, jnp.nan, 2.0, 4.0, 8.0, 10.0]),
+        phases=jnp.array([0, 40, 100, 200, 300, 498]),
+        phase_count=499,
+        bin_count=5,
+    )
+    assert not bool(invalid["valid"])
+
+
+def test_logging_cadence_starts_at_first_iteration_of_each_invocation():
+    from src.algorithms.shac.algorithm import should_log_training_iteration
+
+    assert should_log_training_iteration(0, start_iteration=0)
+    assert should_log_training_iteration(10, start_iteration=0)
+    assert not should_log_training_iteration(1, start_iteration=0)
+
+    assert should_log_training_iteration(128, start_iteration=128)
+    assert should_log_training_iteration(138, start_iteration=128)
+    assert not should_log_training_iteration(130, start_iteration=128)
 
 
 def test_two_shard_reducer_matches_concatenated_population():
