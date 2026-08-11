@@ -28,6 +28,11 @@ from src.algorithms.shac.gradients import (
     aggregate_per_env_gradients,
     per_env_gradient_statistics,
 )
+from src.algorithms.shac.cagrad import (
+    accumulate_phase_gradients,
+    combine_cagrad,
+    finalize_phase_gradients,
+)
 from src.algorithms.shac.phase_weighting import (
     aggregate_phase_weighted_gradients,
     phase_robust_weights,
@@ -369,6 +374,46 @@ def adaptive_phase_diagnostics(
     }
 
 
+def reduce_cagrad_shard_accumulators(
+    sharded_accumulators,
+    *,
+    alpha: float,
+    iterations: int,
+) -> dict[str, object]:
+    """Merge reduced physical shards and form one CAGrad actor direction."""
+    accumulator = jax.tree_util.tree_map(
+        lambda leaf: jp.sum(leaf, axis=0), sharded_accumulators
+    )
+    task_gradients, bin_counts, bins_valid = finalize_phase_gradients(
+        accumulator
+    )
+    result = combine_cagrad(
+        task_gradients,
+        alpha=alpha,
+        iterations=iterations,
+    )
+
+    bin_squared_norms = None
+    for leaf in jax.tree_util.tree_leaves(task_gradients):
+        axes = tuple(range(1, leaf.ndim))
+        leaf_squared_norms = jp.sum(jp.square(leaf), axis=axes)
+        bin_squared_norms = (
+            leaf_squared_norms
+            if bin_squared_norms is None
+            else bin_squared_norms + leaf_squared_norms
+        )
+    bin_gradient_norms = jp.sqrt(jp.maximum(bin_squared_norms, 0.0))
+    valid = bins_valid & result.valid & jp.all(jp.isfinite(bin_gradient_norms))
+    return {
+        "accumulator": accumulator,
+        "task_gradients": task_gradients,
+        "bin_counts": bin_counts,
+        "bin_gradient_norms": bin_gradient_norms,
+        "result": result,
+        "valid": valid,
+    }
+
+
 def squeeze_value_head(values):
     """Remove only the critic output axis, preserving batch/time axes."""
     return jp.squeeze(values, axis=-1)
@@ -441,6 +486,90 @@ def validate_termination_margin_resume(
         )
 
 
+def resolve_cagrad_resume_settings(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested_actor_cagrad: bool,
+    requested_alpha: float,
+    requested_iterations: int,
+) -> tuple[bool, float, int]:
+    """Restore CAGrad checkpoints while allowing legacy treatment starts."""
+    if not resumed_hparams or resumed_hparams.get("actor_cagrad") is not True:
+        return requested_actor_cagrad, requested_alpha, requested_iterations
+    required = {
+        "actor_cagrad",
+        "actor_cagrad_alpha",
+        "actor_cagrad_iterations",
+    }
+    if not required.issubset(resumed_hparams):
+        raise ValueError("CAGrad checkpoint requires complete resume metadata")
+    alpha = resumed_hparams["actor_cagrad_alpha"]
+    iterations = resumed_hparams["actor_cagrad_iterations"]
+    if (
+        isinstance(alpha, bool)
+        or not isinstance(alpha, (int, float))
+        or not math.isfinite(alpha)
+        or alpha < 0.0
+        or isinstance(iterations, bool)
+        or not isinstance(iterations, int)
+        or iterations < 1
+    ):
+        raise ValueError("CAGrad checkpoint contains invalid resume metadata")
+    return True, float(alpha), iterations
+
+
+def validate_actor_cagrad_configuration(
+    *,
+    actor_cagrad: bool,
+    alpha: float,
+    iterations: int,
+    adaptive_phase_sampling: bool,
+    actor_phase_robust_weighting: bool,
+    env_variant: str,
+    actor_per_env_grad_clip: float | None,
+    gradient_accumulation_steps: int,
+    actor_phase_bin_count: int,
+) -> None:
+    """Validate the fixed effective-512 CAGrad treatment contract."""
+    if not isinstance(actor_cagrad, bool):
+        raise ValueError("actor_cagrad must be boolean")
+    if (
+        isinstance(alpha, bool)
+        or not isinstance(alpha, (int, float))
+        or not math.isfinite(alpha)
+        or alpha < 0.0
+    ):
+        raise ValueError(
+            "actor_cagrad_alpha must be non-negative and finite"
+        )
+    if (
+        isinstance(iterations, bool)
+        or not isinstance(iterations, int)
+        or iterations < 1
+    ):
+        raise ValueError(
+            "actor_cagrad_iterations must be a positive integer"
+        )
+    if actor_cagrad and adaptive_phase_sampling:
+        raise ValueError(
+            "actor CAGrad cannot combine with adaptive phase sampling"
+        )
+    if actor_cagrad and actor_phase_robust_weighting:
+        raise ValueError(
+            "actor CAGrad cannot combine with phase-robust weighting"
+        )
+    if actor_cagrad and not env_variant.startswith("g1_tracking"):
+        raise ValueError("actor CAGrad requires G1 reference phases")
+    if actor_cagrad and actor_per_env_grad_clip is not None:
+        raise ValueError(
+            "actor CAGrad cannot combine with per-env clipping"
+        )
+    if actor_cagrad and gradient_accumulation_steps != 2:
+        raise ValueError("actor CAGrad requires exactly two population shards")
+    if actor_cagrad and actor_phase_bin_count != 5:
+        raise ValueError("actor CAGrad requires exactly five phase bins")
+
+
 def train(
     # General
     total_steps: int = 100_000,
@@ -499,6 +628,9 @@ def train(
     actor_phase_robust_weighting: bool = False,
     actor_phase_bin_count: int = 5,
     actor_phase_robust_fraction: float = 0.5,
+    actor_cagrad: bool = False,
+    actor_cagrad_alpha: float = 0.5,
+    actor_cagrad_iterations: int = 32,
     adaptive_phase_sampling: bool = False,
     adaptive_phase_uniform_ratio: float = 0.5,
     adaptive_phase_alpha: float = 0.001,
@@ -627,6 +759,17 @@ def train(
         raise ValueError(
             "phase-robust weighting requires G1 reference phases"
         )
+    validate_actor_cagrad_configuration(
+        actor_cagrad=actor_cagrad,
+        alpha=actor_cagrad_alpha,
+        iterations=actor_cagrad_iterations,
+        adaptive_phase_sampling=adaptive_phase_sampling,
+        actor_phase_robust_weighting=actor_phase_robust_weighting,
+        env_variant=env_variant,
+        actor_per_env_grad_clip=actor_per_env_grad_clip,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        actor_phase_bin_count=actor_phase_bin_count,
+    )
     if not isinstance(adaptive_phase_sampling, bool):
         raise ValueError("adaptive_phase_sampling must be boolean")
     if (
@@ -742,6 +885,16 @@ def train(
             requested_uniform_ratio=adaptive_phase_uniform_ratio,
             requested_alpha=adaptive_phase_alpha,
         )
+        (
+            actor_cagrad,
+            actor_cagrad_alpha,
+            actor_cagrad_iterations,
+        ) = resolve_cagrad_resume_settings(
+            resumed_hparams,
+            requested_actor_cagrad=actor_cagrad,
+            requested_alpha=actor_cagrad_alpha,
+            requested_iterations=actor_cagrad_iterations,
+        )
         if resumed_hparams:
             print(f"Resuming from step {resumed_step}")
             resumed_accumulation_steps = resumed_hparams.get(
@@ -851,6 +1004,18 @@ def train(
                 ]
             if "actor_bootstrap_scale" in resumed_hparams:
                 actor_bootstrap_scale = resumed_hparams["actor_bootstrap_scale"]
+
+        validate_actor_cagrad_configuration(
+            actor_cagrad=actor_cagrad,
+            alpha=actor_cagrad_alpha,
+            iterations=actor_cagrad_iterations,
+            adaptive_phase_sampling=adaptive_phase_sampling,
+            actor_phase_robust_weighting=actor_phase_robust_weighting,
+            env_variant=env_variant,
+            actor_per_env_grad_clip=actor_per_env_grad_clip,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            actor_phase_bin_count=actor_phase_bin_count,
+        )
 
     action_noise_schedule_steps = resolve_action_noise_schedule_steps(
         total_steps=total_steps,
@@ -1304,7 +1469,7 @@ def train(
         updated_env_state = state.env_state.replace(
             info={**state.env_state.info, "difficulty": per_env_difficulty}
         )
-        if actor_phase_robust_weighting:
+        if actor_phase_robust_weighting or actor_cagrad:
             actor_start_phases = jax.lax.stop_gradient(
                 updated_env_state.info["phase"]
             )
@@ -1386,9 +1551,25 @@ def train(
                 accumulation_steps=gradient_accumulation_steps,
                 microbatch_size=num_envs,
             )
+            if actor_cagrad:
+                sharded_actor_start_phases = reshape_population(
+                    actor_start_phases,
+                    accumulation_steps=gradient_accumulation_steps,
+                    microbatch_size=num_envs,
+                )
+                actor_shard_inputs = (
+                    sharded_env_state,
+                    sharded_randomization,
+                    sharded_actor_start_phases,
+                )
+            else:
+                actor_shard_inputs = (
+                    sharded_env_state,
+                    sharded_randomization,
+                )
 
             def actor_microbatch_step(_, inputs):
-                shard_env_state, shard_randomization = inputs
+                shard_env_state, shard_randomization = inputs[:2]
                 (
                     shard_losses,
                     (shard_trajs, shard_final_states),
@@ -1405,14 +1586,27 @@ def train(
                     current_noise_std,
                     current_actor_bootstrap_scale,
                 )
-                shard_grads, shard_grad_stats = aggregate_env_gradients(
-                    shard_per_env_grads, actor_per_env_grad_clip
-                )
+                if actor_cagrad:
+                    shard_grad_stats = per_env_gradient_statistics(
+                        shard_per_env_grads
+                    )
+                    shard_reduction = accumulate_phase_gradients(
+                        shard_per_env_grads,
+                        inputs[2],
+                        phase_count=int(env.reference_transitions),
+                        bin_count=actor_phase_bin_count,
+                    )
+                else:
+                    shard_reduction, shard_grad_stats = (
+                        aggregate_env_gradients(
+                            shard_per_env_grads, actor_per_env_grad_clip
+                        )
+                    )
                 return None, (
                     shard_losses,
                     shard_trajs,
                     shard_final_states,
-                    shard_grads,
+                    shard_reduction,
                     {
                         "finite_by_env": shard_grad_stats[
                             "finite_by_env"
@@ -1426,19 +1620,27 @@ def train(
             _, actor_shard_outputs = jax.lax.scan(
                 actor_microbatch_step,
                 None,
-                (sharded_env_state, sharded_randomization),
+                actor_shard_inputs,
             )
             (
                 shard_losses,
                 shard_trajs,
                 shard_final_states,
-                shard_grads,
+                shard_reductions,
                 shard_grad_stats,
             ) = actor_shard_outputs
             losses = flatten_population(shard_losses)
             trajs = flatten_population(shard_trajs)
             final_states = flatten_population(shard_final_states)
-            grads = mean_shard_trees(shard_grads)
+            if actor_cagrad:
+                cagrad_reduction = reduce_cagrad_shard_accumulators(
+                    shard_reductions,
+                    alpha=actor_cagrad_alpha,
+                    iterations=actor_cagrad_iterations,
+                )
+                grads = cagrad_reduction["result"].combined_gradient
+            else:
+                grads = mean_shard_trees(shard_reductions)
             actor_grad_stats = summarize_shard_stats(shard_grad_stats)
 
         if adaptive_phase_sampling:
@@ -1702,6 +1904,28 @@ def train(
                     "actor_loss_weighted": phase_weighting.weighted_loss,
                 }
             )
+        if actor_cagrad:
+            cagrad_result = cagrad_reduction["result"]
+            metrics.update(
+                {
+                    "actor_cagrad_bin_counts": cagrad_reduction[
+                        "bin_counts"
+                    ],
+                    "actor_cagrad_bin_gradient_norms": cagrad_reduction[
+                        "bin_gradient_norms"
+                    ],
+                    "actor_cagrad_weights": cagrad_result.weights,
+                    "actor_cagrad_gram_matrix": cagrad_result.gram_matrix,
+                    "actor_cagrad_cosine_matrix": cagrad_result.cosine_matrix,
+                    "actor_cagrad_objective": cagrad_result.objective,
+                    "actor_cagrad_dual_gap": cagrad_result.dual_gap,
+                    "actor_cagrad_uniform_combined_cosine": (
+                        cagrad_result.uniform_combined_cosine
+                    ),
+                    "actor_cagrad_combined_norm": actor_grad_norm,
+                    "actor_cagrad_valid": cagrad_reduction["valid"],
+                }
+            )
         if adaptive_phase_sampling:
             metrics.update(
                 {
@@ -1864,6 +2088,9 @@ def train(
         "actor_phase_robust_weighting": actor_phase_robust_weighting,
         "actor_phase_bin_count": actor_phase_bin_count,
         "actor_phase_robust_fraction": actor_phase_robust_fraction,
+        "actor_cagrad": actor_cagrad,
+        "actor_cagrad_alpha": actor_cagrad_alpha,
+        "actor_cagrad_iterations": actor_cagrad_iterations,
         "adaptive_phase_sampling": adaptive_phase_sampling,
         "adaptive_phase_uniform_ratio": adaptive_phase_uniform_ratio,
         "adaptive_phase_alpha": adaptive_phase_alpha,
@@ -1897,6 +2124,9 @@ def train(
 
     for i in range(start_iter, total_iters):
         state, metrics = train_step(state)
+
+        if actor_cagrad and not bool(metrics["actor_cagrad_valid"]):
+            raise RuntimeError("actor CAGrad aggregation is invalid")
 
         if i % 10 == 0:
             jax.block_until_ready(state.step)
@@ -2020,6 +2250,43 @@ def train(
                             ),
                             "actor_loss_weighted": float(
                                 metrics["actor_loss_weighted"]
+                            ),
+                        }
+                    )
+                if actor_cagrad:
+                    diag_entry.update(
+                        {
+                            "actor_cagrad_bin_counts": np.asarray(
+                                metrics["actor_cagrad_bin_counts"]
+                            ).tolist(),
+                            "actor_cagrad_bin_gradient_norms": np.asarray(
+                                metrics["actor_cagrad_bin_gradient_norms"]
+                            ).tolist(),
+                            "actor_cagrad_weights": np.asarray(
+                                metrics["actor_cagrad_weights"]
+                            ).tolist(),
+                            "actor_cagrad_gram_matrix": np.asarray(
+                                metrics["actor_cagrad_gram_matrix"]
+                            ).tolist(),
+                            "actor_cagrad_cosine_matrix": np.asarray(
+                                metrics["actor_cagrad_cosine_matrix"]
+                            ).tolist(),
+                            "actor_cagrad_objective": float(
+                                metrics["actor_cagrad_objective"]
+                            ),
+                            "actor_cagrad_dual_gap": float(
+                                metrics["actor_cagrad_dual_gap"]
+                            ),
+                            "actor_cagrad_uniform_combined_cosine": float(
+                                metrics[
+                                    "actor_cagrad_uniform_combined_cosine"
+                                ]
+                            ),
+                            "actor_cagrad_combined_norm": float(
+                                metrics["actor_cagrad_combined_norm"]
+                            ),
+                            "actor_cagrad_valid": bool(
+                                metrics["actor_cagrad_valid"]
                             ),
                         }
                     )
