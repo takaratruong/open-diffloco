@@ -50,6 +50,11 @@ from src.algorithms.shac.initialization import (
     canonicalize_tree_like,
     commit_tree_to_local_device,
 )
+from src.algorithms.shac.future_reference_migration import (
+    future_reference_migration_report,
+    migrate_future_reference_train_state,
+    validate_future_reference_migration_report,
+)
 from src.envs.g1_tracking.training_distribution import (
     PhaseSamplerState,
     init_phase_sampler,
@@ -124,6 +129,20 @@ def persist_run_hparams(
     temp_path = path.with_name(f".{path.name}.tmp")
     with temp_path.open("w") as stream:
         json.dump(hparams, stream, indent=2)
+    os.replace(temp_path, path)
+    return path
+
+
+def persist_future_reference_migration_report(
+    save_dir: str | Path, report: dict[str, object]
+) -> Path:
+    """Validate and atomically publish append-only migration evidence."""
+    validate_future_reference_migration_report(report)
+    path = Path(save_dir) / "migration_equivalence.json"
+    temp_path = path.with_name(f".{path.name}.tmp")
+    with temp_path.open("w", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2, sort_keys=True)
+        stream.write("\n")
     os.replace(temp_path, path)
     return path
 
@@ -260,6 +279,35 @@ def resolve_action_noise_schedule_steps(
     if schedule_steps <= 0:
         raise ValueError("action-noise schedule steps must be positive")
     return schedule_steps
+
+
+def resolve_future_reference_resume_settings(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested_steps: tuple[int, ...],
+    allow_upgrade: bool,
+) -> tuple[tuple[int, ...], bool]:
+    """Resolve exact preview resumes or one authorized legacy upgrade."""
+    if not isinstance(requested_steps, tuple):
+        raise ValueError("requested future reference steps must be a tuple")
+    if not isinstance(allow_upgrade, bool):
+        raise ValueError("future reference upgrade authority must be boolean")
+    if resumed_hparams is None:
+        return requested_steps, False
+    saved_steps = tuple(
+        resumed_hparams.get("actor_reference_lookahead_steps", ())
+    )
+    if saved_steps == requested_steps:
+        return requested_steps, False
+    if not saved_steps and requested_steps:
+        if not allow_upgrade:
+            raise ValueError(
+                "future reference resume requires explicit upgrade authority"
+            )
+        return requested_steps, True
+    raise ValueError(
+        "future reference lookahead steps must match the checkpoint"
+    )
 
 
 def select_initial_training_state(*, initialized_state, resumed_state):
@@ -696,6 +744,8 @@ def train(
     max_episode_length: int = 5000,
     actor_history_len: int = 10,
     actor_observation_noise: bool = False,
+    actor_reference_lookahead_steps: tuple[int, ...] = (),
+    allow_resume_actor_reference_lookahead_upgrade: bool = False,
     env_variant: str = "blind_nolinvel_nokinref",
     actor_per_env_grad_clip: float = None,
     critic_per_env_grad_clip: float = None,
@@ -928,6 +978,16 @@ def train(
         or reference_stride < 1
     ):
         raise ValueError("reference_stride must be a positive integer")
+    if not isinstance(actor_reference_lookahead_steps, tuple):
+        raise ValueError(
+            "actor_reference_lookahead_steps must be a tuple"
+        )
+    if not isinstance(
+        allow_resume_actor_reference_lookahead_upgrade, bool
+    ):
+        raise ValueError(
+            "allow_resume_actor_reference_lookahead_upgrade must be boolean"
+        )
     for name, value in (
         ("solver_iterations", solver_iterations),
         ("solver_ls_iterations", solver_ls_iterations),
@@ -945,9 +1005,20 @@ def train(
     resumed_state = None
     resumed_step = 0
     resumed_hparams = None
+    future_reference_upgrade = False
 
     if resume_from:
         resumed_state, resumed_hparams, resumed_step = load_checkpoint(resume_from)
+        (
+            actor_reference_lookahead_steps,
+            future_reference_upgrade,
+        ) = resolve_future_reference_resume_settings(
+            resumed_hparams if resumed_hparams is not None else {},
+            requested_steps=actor_reference_lookahead_steps,
+            allow_upgrade=(
+                allow_resume_actor_reference_lookahead_upgrade
+            ),
+        )
         (
             adaptive_phase_sampling,
             adaptive_phase_uniform_ratio,
@@ -1093,6 +1164,13 @@ def train(
             actor_phase_bin_count=actor_phase_bin_count,
         )
 
+    if actor_reference_lookahead_steps and not env_variant.startswith(
+        "g1_tracking"
+    ):
+        raise ValueError(
+            "future reference observations require a G1 tracking task"
+        )
+
     action_noise_schedule_steps = resolve_action_noise_schedule_steps(
         total_steps=total_steps,
         resumed_step=resumed_step,
@@ -1121,6 +1199,9 @@ def train(
                 "reference_residual_scale": reference_residual_scale,
                 "domain_randomization": domain_randomization,
                 "actor_observation_noise": actor_observation_noise,
+                "actor_reference_lookahead_steps": (
+                    actor_reference_lookahead_steps
+                ),
                 "solver_iterations": solver_iterations,
                 "solver_ls_iterations": solver_ls_iterations,
                 "carried_reset_bank_path": carried_reset_bank_path,
@@ -2056,12 +2137,34 @@ def train(
         critic_opt=critic_opt_state,
         step=canonicalize_step_dtype(0),
     )
+    migration_report = None
     if resumed_state is not None:
         print(
             "Restoring complete training state from step "
             f"{resumed_step} (PRNG, environments, parameters, optimizers, "
             "and normalizers)"
         )
+        if future_reference_upgrade:
+            legacy_resumed_state = resumed_state
+            resumed_state = migrate_future_reference_train_state(
+                resumed_state,
+                initialized_state,
+                env,
+                expected_history_len=actor_history_len,
+            )
+            migration_report = future_reference_migration_report(
+                legacy_resumed_state,
+                resumed_state,
+                actor,
+                legacy_frame_dim=int(
+                    legacy_resumed_state.normalizer.mean.shape[0]
+                ),
+                treatment_frame_dim=env.actor_frame_obs_dim,
+                history_len=actor_history_len,
+            )
+            persist_future_reference_migration_report(
+                save_dir, migration_report
+            )
         if adaptive_phase_sampling:
             resumed_state = resumed_state.replace(
                 env_state=migrate_adaptive_phase_env_state(
@@ -2178,6 +2281,15 @@ def train(
         "max_episode_length": max_episode_length,
         "actor_history_len": actor_history_len,
         "actor_observation_noise": actor_observation_noise,
+        "actor_reference_lookahead_steps": list(
+            actor_reference_lookahead_steps
+        ),
+        "resume_future_reference_upgrade": future_reference_upgrade,
+        "migration_equivalence_artifact": (
+            "migration_equivalence.json"
+            if migration_report is not None
+            else None
+        ),
         "actor_per_env_grad_clip": actor_per_env_grad_clip,
         "critic_per_env_grad_clip": critic_per_env_grad_clip,
         "actor_phase_robust_weighting": actor_phase_robust_weighting,
