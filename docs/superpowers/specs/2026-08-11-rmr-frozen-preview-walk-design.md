@@ -30,10 +30,15 @@ optimizer moment.
 - Permit `actor_preview_adapter` with a one-frame `initial_full_actor_policy`.
   Keep the existing ten-frame Flax path unchanged.
 - In the full-RMR action branch, compute candidate action from the complete
-  observation and parent action from the same observation with only the new
-  preview suffix zeroed.
+  observation and parent action by applying the untouched 154-input policy to
+  the legacy observation slice. Do not emulate the parent with raw-zero preview
+  values because normalization makes raw zero nonzero in normalized space.
 - Add a fixed runner for the walking treatment and a generic, no-render,
   replay-free RMR phase-grid evaluator.
+- If the final PPO checkpoint is not competent, screen only pre-existing
+  checkpoints from that run. Rank first by completed suffix count and then by
+  minimum/median/mean normalized survival, but require all five completed
+  suffixes before training. Parallel workers receive exclusive GPU IDs.
 
 ## Invariants
 
@@ -51,4 +56,3 @@ optimizer moment.
   a parent that is not competent on the registered phase grid.
 - Stop the branch if no archived candidate preserves the parent-relative phase
   floors. Do not compensate by unfreezing the parent.
-

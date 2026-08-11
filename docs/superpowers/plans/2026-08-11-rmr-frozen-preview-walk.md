@@ -10,7 +10,10 @@
    smoke. Commit the code checkpoint.
 5. Preregister and execute the untouched-parent phase grid. Continue only if it
    clears its competence gate.
-6. Preregister one bounded frozen-preview training run, evaluate every archived
+6. If the final PPO checkpoint fails, screen only the existing checkpoints from
+   that same PPO run under the identical five-phase contract. Run independent
+   evaluations concurrently on exclusive GPUs and authorize no parent unless
+   all five suffixes complete.
+7. Preregister one bounded frozen-preview training run, evaluate every archived
    checkpoint, audit frozen state directly, curate the result, and choose the
    next scientific mechanism.
-
