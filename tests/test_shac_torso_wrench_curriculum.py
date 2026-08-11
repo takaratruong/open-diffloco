@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jp
+import inspect
 import numpy as np
 import pytest
 
@@ -154,3 +155,59 @@ def test_assistance_resume_rejects_incomplete_active_metadata() -> None:
             requested_zero_fraction=0.0,
             allow_change=False,
         )
+
+
+def test_assistance_diagnostics_require_finite_bounded_exact_zero_traces() -> None:
+    from src.algorithms.shac.torso_wrench_curriculum import (
+        torso_wrench_assistance_diagnostics,
+    )
+
+    wrenches = jp.array(
+        [
+            [
+                [3.0, 4.0, 0.0, 0.0, 0.0, 2.0],
+                [0.0, 0.0, 6.0, 0.0, 3.0, 4.0],
+            ],
+            [jp.zeros(6), jp.zeros(6)],
+        ]
+    )
+    scales = jp.array([0.75, 0.0])
+    diagnostics = torso_wrench_assistance_diagnostics(
+        wrenches,
+        assistance_scales=scales,
+        force_cap=10.0,
+        torque_cap=6.0,
+    )
+
+    assert bool(diagnostics["valid"])
+    assert float(diagnostics["active_fraction"]) == 0.5
+    assert float(diagnostics["max_force"]) == 6.0
+    assert float(diagnostics["max_torque"]) == 5.0
+
+    stale_zero_path = wrenches.at[1, 0, 0].set(1.0)
+    invalid = torso_wrench_assistance_diagnostics(
+        stale_zero_path,
+        assistance_scales=scales,
+        force_cap=10.0,
+        torque_cap=6.0,
+    )
+    assert not bool(invalid["valid"])
+
+
+def test_train_exposes_default_off_assistance_and_wires_rollout_telemetry() -> None:
+    from src.algorithms.shac.algorithm import train
+
+    parameters = inspect.signature(train).parameters
+    assert parameters["torso_wrench_assistance"].default is False
+    assert parameters["torso_wrench_assistance_start_step"].default == 0
+    assert parameters["torso_wrench_assistance_end_step"].default == 1
+    assert parameters["torso_wrench_assistance_zero_fraction"].default == 0.0
+    assert parameters["allow_resume_torso_wrench_assistance_change"].default is False
+
+    source = inspect.getsource(train)
+    assert "assistance_mask_key" in source
+    assert "compute_environment_torso_wrench(" in source
+    assert "write_torso_wrench(" in source
+    assert '"torso_wrench_assistance": torso_wrench_assistance' in source
+    assert '"torso_wrench_assistance_scale_current"' in source
+    assert '"torso_wrench_assistance_valid"' in source

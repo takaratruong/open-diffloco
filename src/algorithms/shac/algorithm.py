@@ -45,6 +45,13 @@ from src.algorithms.shac.microbatch import (
     reshape_population,
     summarize_shard_stats,
 )
+from src.algorithms.shac.torso_wrench_curriculum import (
+    assistance_scale_at_step,
+    resolve_torso_wrench_assistance_resume_settings,
+    sample_assistance_scales,
+    torso_wrench_assistance_diagnostics,
+    validate_torso_wrench_assistance_configuration,
+)
 from src.algorithms.shac.initialization import (
     canonicalize_normalizer_dtype,
     canonicalize_step_dtype,
@@ -77,6 +84,11 @@ from src.algorithms.shac.residual_preview_adapter import (
     initialize_residual_muon_optimizer,
     residual_adapter_migration_report,
     residual_muon_migration_report,
+)
+from src.evaluation.g1_torso_wrench_oracle import (
+    compute_environment_torso_wrench,
+    torso_wrench_parameters_from_environment,
+    write_torso_wrench,
 )
 from src.envs.g1_tracking.training_distribution import (
     PhaseSamplerState,
@@ -1075,6 +1087,11 @@ def train(
     carried_reset_probability: float = 0.0,
     carried_reset_bank_start: int = 0,
     allow_resume_carried_reset_change: bool = False,
+    torso_wrench_assistance: bool = False,
+    torso_wrench_assistance_start_step: int = 0,
+    torso_wrench_assistance_end_step: int = 1,
+    torso_wrench_assistance_zero_fraction: float = 0.0,
+    allow_resume_torso_wrench_assistance_change: bool = False,
     reference_path: str | None = None,
     reference_stride: int | None = None,
 ):
@@ -1114,6 +1131,14 @@ def train(
         carried_reset_bank_start: Leading bank rows excluded from sampling.
         allow_resume_carried_reset_change: Explicitly permit a resumed reset-
                                            distribution treatment.
+        torso_wrench_assistance: Apply the bounded analytic torso wrench during
+                                 actor rollouts only.
+        torso_wrench_assistance_start_step: Absolute step with assistance one.
+        torso_wrench_assistance_end_step: Absolute step reaching exact zero.
+        torso_wrench_assistance_zero_fraction: Fraction of environments held at
+                                               exact zero assistance per unroll.
+        allow_resume_torso_wrench_assistance_change: Explicitly permit changing
+                                                     a resumed assistance treatment.
         kp_range: (lo, hi) absolute range for actuator position gain per episode
         kd_range: (lo, hi) absolute range for actuator velocity gain per episode
         push_velocity_range: Interval root x/y velocity disturbance range.
@@ -1261,6 +1286,10 @@ def train(
         raise ValueError(
             "allow_resume_carried_reset_change must be boolean"
         )
+    if not isinstance(allow_resume_torso_wrench_assistance_change, bool):
+        raise ValueError(
+            "allow_resume_torso_wrench_assistance_change must be boolean"
+        )
     if (
         isinstance(reference_reset_noise_scale, bool)
         or not math.isfinite(reference_reset_noise_scale)
@@ -1407,6 +1436,19 @@ def train(
             requested_start=carried_reset_bank_start,
             allow_change=allow_resume_carried_reset_change,
         )
+        (
+            torso_wrench_assistance,
+            torso_wrench_assistance_start_step,
+            torso_wrench_assistance_end_step,
+            torso_wrench_assistance_zero_fraction,
+        ) = resolve_torso_wrench_assistance_resume_settings(
+            resumed_hparams,
+            requested_enabled=torso_wrench_assistance,
+            requested_start_step=torso_wrench_assistance_start_step,
+            requested_end_step=torso_wrench_assistance_end_step,
+            requested_zero_fraction=torso_wrench_assistance_zero_fraction,
+            allow_change=allow_resume_torso_wrench_assistance_change,
+        )
         if resumed_hparams:
             print(f"Resuming from step {resumed_step}")
             resumed_accumulation_steps = resumed_hparams.get(
@@ -1544,6 +1586,14 @@ def train(
             env_variant=env_variant,
         )
 
+    validate_torso_wrench_assistance_configuration(
+        enabled=torso_wrench_assistance,
+        start_step=torso_wrench_assistance_start_step,
+        end_step=torso_wrench_assistance_end_step,
+        zero_fraction=torso_wrench_assistance_zero_fraction,
+        env_variant=env_variant,
+    )
+
     if actor_reference_lookahead_steps and not env_variant.startswith(
         "g1_tracking"
     ):
@@ -1625,6 +1675,21 @@ def train(
     if env_variant.startswith("g1_tracking"):
         max_episode_length = env.reference_transitions
         reference_hparams = reference_hparams_for_env(env)
+    torso_body_id = -1
+    torso_slot = -1
+    torso_wrench_parameters = None
+    if torso_wrench_assistance:
+        torso_body_id, torso_wrench_parameters = (
+            torso_wrench_parameters_from_environment(env)
+        )
+        try:
+            torso_slot = env.body_ids.index(torso_body_id)
+        except ValueError as error:
+            raise ValueError(
+                "G1 reference body slots do not include torso_link"
+            ) from error
+        if torso_slot != 7:
+            raise ValueError("torso_link must occupy reference body slot 7")
     actor_norm = Normalizer(env.actor_frame_obs_dim)
     critic_norm = Normalizer(env.critic_obs_dim)
 
@@ -1821,7 +1886,12 @@ def train(
         current_actor_bootstrap_scale,
     ):
         """Short-horizon actor objective with sampled perturbations."""
-        action_noise, velocity_pushes, terrain_bump_innovations = randomization
+        (
+            action_noise,
+            velocity_pushes,
+            terrain_bump_innovations,
+            assistance_scale,
+        ) = randomization
 
         def rollout_step(carry, inputs):
             state, foot_bump_ou = carry
@@ -1850,6 +1920,23 @@ def train(
             for i in range(4):
                 xfrc = xfrc.at[_foot_body_ids[i], :3].add(terrain_bump_forces[i])
             state = state.replace(data=state.data.replace(xfrc_applied=xfrc))
+
+            if torso_wrench_assistance:
+                torso_wrench, _, _ = compute_environment_torso_wrench(
+                    env,
+                    state,
+                    torso_slot=torso_slot,
+                    parameters=torso_wrench_parameters,
+                    scale=assistance_scale,
+                )
+                xfrc = write_torso_wrench(
+                    state.data.xfrc_applied,
+                    torso_body_id=torso_body_id,
+                    world_wrench=torso_wrench,
+                )
+                state = state.replace(
+                    data=state.data.replace(xfrc_applied=xfrc)
+                )
 
             # Actor sees noisy observations; critic/training targets keep raw obs.
             obs_rng, env_rng = jax.random.split(state.info["rng"])
@@ -1959,6 +2046,8 @@ def train(
                         "transition_phase": transition_phase,
                     }
                 )
+            if torso_wrench_assistance:
+                transition["torso_wrench"] = torso_wrench
             return (next_state, foot_bump_ou), transition
 
         env_state = jax.lax.stop_gradient(env_state)
@@ -2104,9 +2193,14 @@ def train(
 
     @jax.jit
     def train_step(state: TrainState):
-        key, noise_key, push_key, bump_key, diff_mask_key, _ = jax.random.split(
-            state.key, 6
-        )
+        (
+            key,
+            noise_key,
+            push_key,
+            bump_key,
+            diff_mask_key,
+            assistance_mask_key,
+        ) = jax.random.split(state.key, 6)
 
         # Curriculum: difficulty=0 during grace, then ramp to 1
         difficulty = jp.clip(
@@ -2150,10 +2244,34 @@ def train(
         all_terrain_bump_innovations = jax.random.normal(
             bump_key, (effective_num_envs, unroll_length, 4, 3)
         )
+        if torso_wrench_assistance:
+            current_torso_wrench_assistance_scale = (
+                assistance_scale_at_step(
+                    state.step,
+                    start_step=torso_wrench_assistance_start_step,
+                    end_step=torso_wrench_assistance_end_step,
+                )
+            )
+            all_torso_wrench_assistance_scales = (
+                sample_assistance_scales(
+                    assistance_mask_key,
+                    num_envs=effective_num_envs,
+                    scheduled_scale=current_torso_wrench_assistance_scale,
+                    zero_fraction=torso_wrench_assistance_zero_fraction,
+                )
+            )
+        else:
+            current_torso_wrench_assistance_scale = jp.asarray(
+                0.0, dtype=jp.float32
+            )
+            all_torso_wrench_assistance_scales = jp.zeros(
+                (effective_num_envs,), dtype=jp.float32
+            )
         all_randomization = (
             all_action_noise,
             all_velocity_pushes,
             all_terrain_bump_innovations,
+            all_torso_wrench_assistance_scales,
         )
 
         # Preserve the checkpoint's original schedule on exact continuation.
@@ -2320,6 +2438,17 @@ def train(
                 trajs["transition_phase"],
                 phase_count=int(env.reference_transitions),
                 bin_count=actor_phase_bin_count,
+            )
+        if torso_wrench_assistance:
+            torso_wrench_diagnostics = (
+                torso_wrench_assistance_diagnostics(
+                    trajs["torso_wrench"],
+                    assistance_scales=(
+                        all_torso_wrench_assistance_scales
+                    ),
+                    force_cap=torso_wrench_parameters.force_cap,
+                    torque_cap=torso_wrench_parameters.torque_cap,
+                )
             )
 
         if adaptive_phase_sampling:
@@ -2621,6 +2750,32 @@ def train(
                     "actor_phase_bin_weights": phase_weighting.bin_weights,
                     "actor_phase_weighting_valid": phase_weighting.valid,
                     "actor_loss_weighted": phase_weighting.weighted_loss,
+                }
+            )
+        if torso_wrench_assistance:
+            metrics.update(
+                {
+                    "torso_wrench_assistance_scale_current": (
+                        current_torso_wrench_assistance_scale
+                    ),
+                    "torso_wrench_assistance_active_fraction": (
+                        torso_wrench_diagnostics["active_fraction"]
+                    ),
+                    "torso_wrench_assistance_rms_force": (
+                        torso_wrench_diagnostics["rms_force"]
+                    ),
+                    "torso_wrench_assistance_rms_torque": (
+                        torso_wrench_diagnostics["rms_torque"]
+                    ),
+                    "torso_wrench_assistance_max_force": (
+                        torso_wrench_diagnostics["max_force"]
+                    ),
+                    "torso_wrench_assistance_max_torque": (
+                        torso_wrench_diagnostics["max_torque"]
+                    ),
+                    "torso_wrench_assistance_valid": (
+                        torso_wrench_diagnostics["valid"]
+                    ),
                 }
             )
         if actor_cagrad:
@@ -3033,6 +3188,19 @@ def train(
         "allow_resume_carried_reset_change": (
             allow_resume_carried_reset_change
         ),
+        "torso_wrench_assistance": torso_wrench_assistance,
+        "torso_wrench_assistance_start_step": (
+            torso_wrench_assistance_start_step
+        ),
+        "torso_wrench_assistance_end_step": (
+            torso_wrench_assistance_end_step
+        ),
+        "torso_wrench_assistance_zero_fraction": (
+            torso_wrench_assistance_zero_fraction
+        ),
+        "allow_resume_torso_wrench_assistance_change": (
+            allow_resume_torso_wrench_assistance_change
+        ),
         "kp_range": list(kp_range),
         "kd_range": list(kd_range),
         "com_offset_range": list(com_offset_range),
@@ -3152,6 +3320,10 @@ def train(
             raise RuntimeError("actor CAGrad aggregation is invalid")
         if frozen_preview_treatment and not bool(metrics["actor_preview_valid"]):
             raise RuntimeError("actor preview adapter telemetry is invalid")
+        if torso_wrench_assistance and not bool(
+            metrics["torso_wrench_assistance_valid"]
+        ):
+            raise RuntimeError("torso wrench assistance telemetry is invalid")
 
         if should_log_training_iteration(i, start_iteration=start_iter):
             jax.block_until_ready(state.step)
@@ -3379,6 +3551,36 @@ def train(
                             ),
                         }
                     )
+                if torso_wrench_assistance:
+                    diag_entry.update(
+                        {
+                            "torso_wrench_assistance_scale_current": float(
+                                metrics[
+                                    "torso_wrench_assistance_scale_current"
+                                ]
+                            ),
+                            "torso_wrench_assistance_active_fraction": float(
+                                metrics[
+                                    "torso_wrench_assistance_active_fraction"
+                                ]
+                            ),
+                            "torso_wrench_assistance_rms_force": float(
+                                metrics["torso_wrench_assistance_rms_force"]
+                            ),
+                            "torso_wrench_assistance_rms_torque": float(
+                                metrics["torso_wrench_assistance_rms_torque"]
+                            ),
+                            "torso_wrench_assistance_max_force": float(
+                                metrics["torso_wrench_assistance_max_force"]
+                            ),
+                            "torso_wrench_assistance_max_torque": float(
+                                metrics["torso_wrench_assistance_max_torque"]
+                            ),
+                            "torso_wrench_assistance_valid": bool(
+                                metrics["torso_wrench_assistance_valid"]
+                            ),
+                        }
+                    )
                 if adaptive_phase_sampling:
                     if not bool(metrics["adaptive_phase_sampling_valid"]):
                         raise RuntimeError(
@@ -3511,6 +3713,47 @@ def train(
                         ).tolist(),
                         "actor_preview_valid": bool(
                             metrics["actor_preview_valid"]
+                        ),
+                        **(
+                            {
+                                "torso_wrench_assistance_scale_current": float(
+                                    metrics[
+                                        "torso_wrench_assistance_scale_current"
+                                    ]
+                                ),
+                                "torso_wrench_assistance_active_fraction": float(
+                                    metrics[
+                                        "torso_wrench_assistance_active_fraction"
+                                    ]
+                                ),
+                                "torso_wrench_assistance_rms_force": float(
+                                    metrics[
+                                        "torso_wrench_assistance_rms_force"
+                                    ]
+                                ),
+                                "torso_wrench_assistance_rms_torque": float(
+                                    metrics[
+                                        "torso_wrench_assistance_rms_torque"
+                                    ]
+                                ),
+                                "torso_wrench_assistance_max_force": float(
+                                    metrics[
+                                        "torso_wrench_assistance_max_force"
+                                    ]
+                                ),
+                                "torso_wrench_assistance_max_torque": float(
+                                    metrics[
+                                        "torso_wrench_assistance_max_torque"
+                                    ]
+                                ),
+                                "torso_wrench_assistance_valid": bool(
+                                    metrics[
+                                        "torso_wrench_assistance_valid"
+                                    ]
+                                ),
+                            }
+                            if torso_wrench_assistance
+                            else {}
                         ),
                         **(
                             {

@@ -37,6 +37,43 @@ def sample_assistance_scales(
     return jp.where(held_out, jp.zeros_like(scale), scale)
 
 
+def torso_wrench_assistance_diagnostics(
+    wrenches: jax.Array,
+    *,
+    assistance_scales: jax.Array,
+    force_cap: float,
+    torque_cap: float,
+) -> dict[str, jax.Array]:
+    """Summarize a population rollout and validate its assistance contract."""
+    values = jp.asarray(wrenches)
+    scales = jp.asarray(assistance_scales)
+    force_norms = jp.linalg.norm(values[..., :3], axis=-1)
+    torque_norms = jp.linalg.norm(values[..., 3:], axis=-1)
+    zero_environments = scales == 0.0
+    zero_wrenches = jp.all(
+        jp.where(
+            zero_environments[..., None, None],
+            values == 0.0,
+            jp.ones_like(values, dtype=bool),
+        )
+    )
+    finite = jp.all(jp.isfinite(values)) & jp.all(jp.isfinite(scales))
+    max_force = jp.max(force_norms)
+    max_torque = jp.max(torque_norms)
+    cap_compliant = (max_force <= force_cap + 1e-5) & (max_torque <= torque_cap + 1e-5)
+    return {
+        "active_fraction": jp.mean(scales > 0.0),
+        "rms_force": jp.sqrt(jp.mean(jp.square(force_norms))),
+        "rms_torque": jp.sqrt(jp.mean(jp.square(torque_norms))),
+        "max_force": max_force,
+        "max_torque": max_torque,
+        "finite": finite,
+        "cap_compliant": cap_compliant,
+        "zero_environments_exact": zero_wrenches,
+        "valid": finite & cap_compliant & zero_wrenches,
+    }
+
+
 def validate_torso_wrench_assistance_configuration(
     *,
     enabled: bool,
