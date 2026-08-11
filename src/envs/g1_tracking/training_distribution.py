@@ -63,14 +63,17 @@ def init_phase_sampler(
 
 
 def phase_sampling_probabilities(
-    state: PhaseSamplerState, uniform_ratio: float = 0.2
+    state: PhaseSamplerState, uniform_ratio: float = 0.5
 ) -> jax.Array:
-    """Returns RMR's normalized failure-plus-uniform bin probabilities."""
-    if uniform_ratio <= 0.0:
-        raise ValueError("uniform_ratio must be positive")
-    bin_count = state.failed_count.shape[0]
-    count = state.failed_count + uniform_ratio / float(bin_count)
-    return count / jp.sum(count)
+    """Returns a literal mixture of uniform and failure distributions."""
+    if not 0.0 <= uniform_ratio <= 1.0:
+        raise ValueError("uniform_ratio must be in [0, 1]")
+    failures = jp.maximum(jp.asarray(state.failed_count), 0.0)
+    bin_count = failures.shape[0]
+    uniform = jp.full_like(failures, 1.0 / float(bin_count))
+    total = jp.sum(failures)
+    failure_distribution = jp.where(total > 0.0, failures / total, uniform)
+    return uniform_ratio * uniform + (1.0 - uniform_ratio) * failure_distribution
 
 
 def update_phase_sampler(

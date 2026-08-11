@@ -31,6 +31,20 @@ CONTROLLER = Path(
 
 
 class PhaseSamplerTest(unittest.TestCase):
+    def test_failure_mixture_retains_literal_uniform_floor(self):
+        state = PhaseSamplerState(failed_count=jnp.array([0.0, 4.0]))
+        probabilities = np.asarray(
+            phase_sampling_probabilities(state, uniform_ratio=0.5)
+        )
+        np.testing.assert_allclose(probabilities, np.array([0.25, 0.75]))
+
+    def test_zero_failure_mixture_is_exactly_uniform(self):
+        state = PhaseSamplerState(failed_count=jnp.zeros(5))
+        probabilities = np.asarray(
+            phase_sampling_probabilities(state, uniform_ratio=0.5)
+        )
+        np.testing.assert_allclose(probabilities, np.full(5, 0.2))
+
     def test_starts_uniform_and_moves_toward_failed_bin(self):
         state = init_phase_sampler(reference_length=212)
         before = np.asarray(phase_sampling_probabilities(state))
