@@ -1,10 +1,17 @@
 import inspect
+import json
 import pickle
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
+from src.algorithms.shac import algorithm
 from src.algorithms.shac.algorithm import (
     adaptive_phase_diagnostics,
     broadcast_adaptive_phase_state,
@@ -193,3 +200,83 @@ def test_completed_ema_is_broadcast_only_after_the_actor_update():
     assert {
         name: _leaf_bytes(updated.info[name]) for name in old_leaves
     } == old_leaves
+
+
+def _checkpoint_state(*, adaptive: bool):
+    info = {"phase": jnp.array([10, 150], dtype=jnp.int32)}
+    if adaptive:
+        info["phase_sampler_failed_count"] = jnp.zeros((2, 11))
+    return SimpleNamespace(
+        step=12_288,
+        env_state=SimpleNamespace(info=info),
+    )
+
+
+def test_due_adaptive_checkpoint_persists_complete_hparams_before_state():
+    state = _checkpoint_state(adaptive=True)
+    hparams = {
+        "algorithm": "shac",
+        "adaptive_phase_sampling": True,
+        "adaptive_phase_uniform_ratio": 0.5,
+        "adaptive_phase_alpha": 0.001,
+        "best_reward": 1.25,
+    }
+
+    with tempfile.TemporaryDirectory() as directory:
+        output = Path(directory)
+        observed_hparams = None
+
+        def assert_hparams_then_save(_state, save_dir, step):
+            nonlocal observed_hparams
+            with (Path(save_dir) / "hparams.json").open() as stream:
+                observed_hparams = json.load(stream)
+            return Path(save_dir) / f"checkpoint_step_{step:06d}.pkl"
+
+        with mock.patch.object(
+            algorithm,
+            "save_periodic_checkpoint",
+            side_effect=assert_hparams_then_save,
+        ):
+            last_step, checkpoint_path = (
+                algorithm.archive_periodic_checkpoint_if_due(
+                    state,
+                    output,
+                    last_checkpoint_step=0,
+                    checkpoint_interval=12_288,
+                    hparams=hparams,
+                )
+            )
+
+    assert last_step == 12_288
+    assert checkpoint_path.name == "checkpoint_step_012288.pkl"
+    assert observed_hparams == hparams
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        None,
+        {},
+        {"adaptive_phase_sampling": False},
+        {"adaptive_phase_sampling": True},
+    ],
+)
+def test_adaptive_checkpoint_rejects_missing_or_false_resume_metadata(metadata):
+    with pytest.raises(ValueError, match="adaptive checkpoint.*metadata"):
+        algorithm.validate_adaptive_phase_resume_metadata(
+            _checkpoint_state(adaptive=True),
+            metadata,
+            requested_adaptive_phase_sampling=False,
+        )
+
+
+def test_legacy_e006_state_allows_cli_adaptive_migration():
+    resolved = algorithm.resolve_adaptive_phase_resume_settings(
+        _checkpoint_state(adaptive=False),
+        {"algorithm": "shac", "adaptive_phase_sampling": False},
+        requested_adaptive_phase_sampling=True,
+        requested_uniform_ratio=0.5,
+        requested_alpha=0.001,
+    )
+
+    assert resolved == (True, 0.5, 0.001)

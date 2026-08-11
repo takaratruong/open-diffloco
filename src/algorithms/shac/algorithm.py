@@ -110,6 +110,103 @@ def save_periodic_checkpoint(state, save_dir: str | Path, step: int) -> Path:
     return step_path
 
 
+def persist_run_hparams(
+    save_dir: str | Path, hparams: dict[str, object]
+) -> Path:
+    """Atomically persist resume metadata before a checkpoint references it."""
+    path = Path(save_dir) / "hparams.json"
+    temp_path = path.with_name(f".{path.name}.tmp")
+    with temp_path.open("w") as stream:
+        json.dump(hparams, stream, indent=2)
+    os.replace(temp_path, path)
+    return path
+
+
+def _has_adaptive_phase_state(state) -> bool:
+    env_state = getattr(state, "env_state", None)
+    info = getattr(env_state, "info", {})
+    return "phase_sampler_failed_count" in info
+
+
+def validate_adaptive_phase_resume_metadata(
+    resumed_state,
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested_adaptive_phase_sampling: bool,
+) -> None:
+    """Reject adaptive state that cannot restore its sampling treatment."""
+    if not _has_adaptive_phase_state(resumed_state):
+        if requested_adaptive_phase_sampling:
+            return
+        return
+    required = {
+        "adaptive_phase_sampling",
+        "adaptive_phase_uniform_ratio",
+        "adaptive_phase_alpha",
+    }
+    if (
+        resumed_hparams is None
+        or resumed_hparams.get("adaptive_phase_sampling") is not True
+        or not required.issubset(resumed_hparams)
+    ):
+        raise ValueError(
+            "adaptive checkpoint requires complete resume metadata with "
+            "adaptive_phase_sampling=true"
+        )
+    uniform_ratio = resumed_hparams["adaptive_phase_uniform_ratio"]
+    alpha = resumed_hparams["adaptive_phase_alpha"]
+    if (
+        isinstance(uniform_ratio, bool)
+        or not isinstance(uniform_ratio, (int, float))
+        or not math.isfinite(uniform_ratio)
+        or not 0.0 <= uniform_ratio <= 1.0
+        or isinstance(alpha, bool)
+        or not isinstance(alpha, (int, float))
+        or not math.isfinite(alpha)
+        or not 0.0 < alpha <= 1.0
+    ):
+        raise ValueError(
+            "adaptive checkpoint resume metadata contains invalid sampling settings"
+        )
+
+
+def resolve_adaptive_phase_resume_settings(
+    resumed_state,
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested_adaptive_phase_sampling: bool,
+    requested_uniform_ratio: float,
+    requested_alpha: float,
+) -> tuple[bool, float, float]:
+    """Resolve exact adaptive resumes while allowing legacy treatment starts."""
+    validate_adaptive_phase_resume_metadata(
+        resumed_state,
+        resumed_hparams,
+        requested_adaptive_phase_sampling=requested_adaptive_phase_sampling,
+    )
+    if _has_adaptive_phase_state(resumed_state):
+        return (
+            True,
+            float(resumed_hparams["adaptive_phase_uniform_ratio"]),
+            float(resumed_hparams["adaptive_phase_alpha"]),
+        )
+    if requested_adaptive_phase_sampling or resumed_hparams is None:
+        return (
+            requested_adaptive_phase_sampling,
+            requested_uniform_ratio,
+            requested_alpha,
+        )
+    return (
+        bool(resumed_hparams.get("adaptive_phase_sampling", False)),
+        float(
+            resumed_hparams.get(
+                "adaptive_phase_uniform_ratio", requested_uniform_ratio
+            )
+        ),
+        float(resumed_hparams.get("adaptive_phase_alpha", requested_alpha)),
+    )
+
+
 def archive_periodic_checkpoint_if_due(
     state,
     save_dir: str | Path,
@@ -117,11 +214,20 @@ def archive_periodic_checkpoint_if_due(
     checkpoint_interval: int,
     *,
     current_step: int | None = None,
+    hparams: dict[str, object] | None = None,
 ) -> tuple[int, Path | None]:
     """Archive a due checkpoint without coupling persistence to log cadence."""
     step = int(state.step) if current_step is None else current_step
     if step - last_checkpoint_step < checkpoint_interval:
         return last_checkpoint_step, None
+    if _has_adaptive_phase_state(state):
+        validate_adaptive_phase_resume_metadata(
+            state,
+            hparams,
+            requested_adaptive_phase_sampling=True,
+        )
+    if hparams is not None:
+        persist_run_hparams(save_dir, hparams)
     checkpoint_path = save_periodic_checkpoint(state, save_dir, step)
     return step, checkpoint_path
 
@@ -625,6 +731,17 @@ def train(
 
     if resume_from:
         resumed_state, resumed_hparams, resumed_step = load_checkpoint(resume_from)
+        (
+            adaptive_phase_sampling,
+            adaptive_phase_uniform_ratio,
+            adaptive_phase_alpha,
+        ) = resolve_adaptive_phase_resume_settings(
+            resumed_state,
+            resumed_hparams,
+            requested_adaptive_phase_sampling=adaptive_phase_sampling,
+            requested_uniform_ratio=adaptive_phase_uniform_ratio,
+            requested_alpha=adaptive_phase_alpha,
+        )
         if resumed_hparams:
             print(f"Resuming from step {resumed_step}")
             resumed_accumulation_steps = resumed_hparams.get(
@@ -687,16 +804,6 @@ def train(
             )
             carried_reset_bank_start = resumed_hparams.get(
                 "carried_reset_bank_start", carried_reset_bank_start
-            )
-            adaptive_phase_sampling = resumed_hparams.get(
-                "adaptive_phase_sampling", adaptive_phase_sampling
-            )
-            adaptive_phase_uniform_ratio = resumed_hparams.get(
-                "adaptive_phase_uniform_ratio",
-                adaptive_phase_uniform_ratio,
-            )
-            adaptive_phase_alpha = resumed_hparams.get(
-                "adaptive_phase_alpha", adaptive_phase_alpha
             )
             if "kp_range" in resumed_hparams:
                 kp_range = tuple(resumed_hparams["kp_range"])
@@ -1693,6 +1800,93 @@ def train(
     best_reward = (
         resumed_hparams.get("best_reward", -np.inf) if resumed_hparams else -np.inf
     )
+    hparams = {
+        "algorithm": "shac",
+        "total_steps": total_steps,
+        "unroll_length": unroll_length,
+        "num_envs": num_envs,
+        "gradient_accumulation_steps": gradient_accumulation_steps,
+        "effective_num_envs": effective_num_envs,
+        "steps_per_actor_update": steps_per_actor_update,
+        "actor_lr": actor_lr,
+        "critic_lr": critic_lr,
+        "gamma": gamma,
+        "gae_lambda": gae_lambda,
+        "target_update_rate": target_update_rate,
+        "critic_iterations": critic_iterations,
+        "xml_path": xml_path,
+        "action_scale": action_scale,
+        "cmd_vel_x_range": list(cmd_vel_x_range),
+        "cmd_vel_y_range": list(cmd_vel_y_range),
+        "cmd_yaw_rate_range": list(cmd_yaw_rate_range),
+        "cmd_zero_prob": list(cmd_zero_prob),
+        "cmd_ctrl_interval_range": list(cmd_ctrl_interval_range),
+        "action_noise_std_start": action_noise_std_start,
+        "action_noise_std_end": action_noise_std_end,
+        "action_noise_schedule_steps": action_noise_schedule_steps,
+        "friction_range": list(friction_range),
+        "mass_range": list(mass_range),
+        "effort_limit_scale": effort_limit_scale,
+        "termination_margin_weight": termination_margin_weight,
+        "allow_resume_termination_margin_change": (
+            allow_resume_termination_margin_change
+        ),
+        "reference_reset_noise_scale": reference_reset_noise_scale,
+        "reference_residual_control": reference_residual_control,
+        "reference_residual_scale": reference_residual_scale,
+        "carried_reset_bank_path": carried_reset_bank_path,
+        "carried_reset_probability": carried_reset_probability,
+        "carried_reset_bank_start": carried_reset_bank_start,
+        "kp_range": list(kp_range),
+        "kd_range": list(kd_range),
+        "com_offset_range": list(com_offset_range),
+        "push_velocity_range": list(push_velocity_range),
+        "push_interval_s": push_interval_s,
+        "terrain_flat_prob": terrain_flat_prob,
+        "terrain_slope_max": terrain_slope_max,
+        "terrain_bump_std": terrain_bump_std,
+        "terrain_bump_decay": terrain_bump_decay,
+        "terrain": terrain,
+        "domain_randomization": domain_randomization,
+        "solver_profile": solver_profile,
+        "solver_iterations": solver_iterations,
+        "solver_ls_iterations": solver_ls_iterations,
+        "zero_difficulty_frac": zero_difficulty_frac,
+        "curriculum_grace": curriculum_grace,
+        "curriculum_steps": curriculum_steps,
+        "seed": seed,
+        "best_reward": best_reward,
+        "max_episode_length": max_episode_length,
+        "actor_history_len": actor_history_len,
+        "actor_observation_noise": actor_observation_noise,
+        "actor_per_env_grad_clip": actor_per_env_grad_clip,
+        "critic_per_env_grad_clip": critic_per_env_grad_clip,
+        "actor_phase_robust_weighting": actor_phase_robust_weighting,
+        "actor_phase_bin_count": actor_phase_bin_count,
+        "actor_phase_robust_fraction": actor_phase_robust_fraction,
+        "adaptive_phase_sampling": adaptive_phase_sampling,
+        "adaptive_phase_uniform_ratio": adaptive_phase_uniform_ratio,
+        "adaptive_phase_alpha": adaptive_phase_alpha,
+        "actor_bootstrap_scale": actor_bootstrap_scale,
+        "actor_bootstrap_delay_steps": actor_bootstrap_delay_steps,
+        "actor_hidden": list(actor_hidden),
+        "actor_layer_norm": actor_layer_norm,
+        "actor_zero_output": actor_zero_output,
+        "source_actor_policy": source_actor_policy is not None,
+        "actor_kind": (
+            "full_rmr"
+            if initial_full_actor_policy is not None
+            else "bounded_rmr_residual"
+            if source_actor_policy is not None
+            else "flax"
+        ),
+        "residual_action_scale": residual_action_scale,
+        "differentiate_source_feedback": differentiate_source_feedback,
+        "env_variant": env_variant,
+        "squash_actor_actions": squash_actor_actions,
+        **reference_hparams,
+    }
+    persist_run_hparams(save_dir, hparams)
     log = []
     diag_log = []
     last_checkpoint_step = state.step
@@ -1902,6 +2096,7 @@ def train(
                 print(f"  >> New best! Reward: {best_reward:.3f}")
 
         current_step = (i + 1) * steps_per_iter
+        hparams["best_reward"] = best_reward
         last_checkpoint_step, checkpoint_path = (
             archive_periodic_checkpoint_if_due(
                 state,
@@ -1909,6 +2104,7 @@ def train(
                 last_checkpoint_step,
                 checkpoint_interval,
                 current_step=current_step,
+                hparams=hparams,
             )
         )
         if checkpoint_path is not None:
@@ -1944,94 +2140,7 @@ def train(
     )
     print(f"Best reward: {best_reward:.3f}")
 
-    # Save hyperparameters
-    hparams = {
-        "algorithm": "shac",
-        "total_steps": total_steps,
-        "unroll_length": unroll_length,
-        "num_envs": num_envs,
-        "gradient_accumulation_steps": gradient_accumulation_steps,
-        "effective_num_envs": effective_num_envs,
-        "steps_per_actor_update": steps_per_actor_update,
-        "actor_lr": actor_lr,
-        "critic_lr": critic_lr,
-        "gamma": gamma,
-        "gae_lambda": gae_lambda,
-        "target_update_rate": target_update_rate,
-        "critic_iterations": critic_iterations,
-        "xml_path": xml_path,
-        "action_scale": action_scale,
-        "cmd_vel_x_range": list(cmd_vel_x_range),
-        "cmd_vel_y_range": list(cmd_vel_y_range),
-        "cmd_yaw_rate_range": list(cmd_yaw_rate_range),
-        "cmd_zero_prob": list(cmd_zero_prob),
-        "cmd_ctrl_interval_range": list(cmd_ctrl_interval_range),
-        "action_noise_std_start": action_noise_std_start,
-        "action_noise_std_end": action_noise_std_end,
-        "action_noise_schedule_steps": action_noise_schedule_steps,
-        "friction_range": list(friction_range),
-        "mass_range": list(mass_range),
-        "effort_limit_scale": effort_limit_scale,
-        "termination_margin_weight": termination_margin_weight,
-        "allow_resume_termination_margin_change": (
-            allow_resume_termination_margin_change
-        ),
-        "reference_reset_noise_scale": reference_reset_noise_scale,
-        "reference_residual_control": reference_residual_control,
-        "reference_residual_scale": reference_residual_scale,
-        "carried_reset_bank_path": carried_reset_bank_path,
-        "carried_reset_probability": carried_reset_probability,
-        "carried_reset_bank_start": carried_reset_bank_start,
-        "kp_range": list(kp_range),
-        "kd_range": list(kd_range),
-        "com_offset_range": list(com_offset_range),
-        "push_velocity_range": list(push_velocity_range),
-        "push_interval_s": push_interval_s,
-        "terrain_flat_prob": terrain_flat_prob,
-        "terrain_slope_max": terrain_slope_max,
-        "terrain_bump_std": terrain_bump_std,
-        "terrain_bump_decay": terrain_bump_decay,
-        "terrain": terrain,
-        "domain_randomization": domain_randomization,
-        "solver_profile": solver_profile,
-        "solver_iterations": solver_iterations,
-        "solver_ls_iterations": solver_ls_iterations,
-        "zero_difficulty_frac": zero_difficulty_frac,
-        "curriculum_grace": curriculum_grace,
-        "curriculum_steps": curriculum_steps,
-        "seed": seed,
-        "best_reward": best_reward,
-        "max_episode_length": max_episode_length,
-        "actor_history_len": actor_history_len,
-        "actor_observation_noise": actor_observation_noise,
-        "actor_per_env_grad_clip": actor_per_env_grad_clip,
-        "critic_per_env_grad_clip": critic_per_env_grad_clip,
-        "actor_phase_robust_weighting": actor_phase_robust_weighting,
-        "actor_phase_bin_count": actor_phase_bin_count,
-        "actor_phase_robust_fraction": actor_phase_robust_fraction,
-        "adaptive_phase_sampling": adaptive_phase_sampling,
-        "adaptive_phase_uniform_ratio": adaptive_phase_uniform_ratio,
-        "adaptive_phase_alpha": adaptive_phase_alpha,
-        "actor_bootstrap_scale": actor_bootstrap_scale,
-        "actor_bootstrap_delay_steps": actor_bootstrap_delay_steps,
-        "actor_hidden": list(actor_hidden),
-        "actor_layer_norm": actor_layer_norm,
-        "actor_zero_output": actor_zero_output,
-        "source_actor_policy": source_actor_policy is not None,
-        "actor_kind": (
-            "full_rmr"
-            if initial_full_actor_policy is not None
-            else "bounded_rmr_residual"
-            if source_actor_policy is not None
-            else "flax"
-        ),
-        "residual_action_scale": residual_action_scale,
-        "differentiate_source_feedback": differentiate_source_feedback,
-        "env_variant": env_variant,
-        "squash_actor_actions": squash_actor_actions,
-        **reference_hparams,
-    }
-    with open(f"{save_dir}/hparams.json", "w") as f:
-        json.dump(hparams, f, indent=2)
+    hparams["best_reward"] = best_reward
+    persist_run_hparams(save_dir, hparams)
 
     return state, save_dir
