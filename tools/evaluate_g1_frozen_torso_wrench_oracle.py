@@ -20,15 +20,13 @@ from src.algorithms.shac.residual_preview_adapter import (
     FrozenPreviewResidualParams,
     PreviewResidualAdapter,
 )
-from src.envs.g1_tracking.environment import _quat_apply, _quat_inv, _quat_mul
-from src.envs.g1_tracking.environment import _yaw_quaternion
 from src.envs.g1_tracking.solver_profiles import (
     get_solver_profile,
     solver_context,
 )
 from src.evaluation.g1_torso_wrench_oracle import (
     TorsoWrenchParameters,
-    compute_torso_wrench,
+    compute_environment_torso_wrench,
     torso_wrench_parameters_from_environment,
     write_torso_wrench,
 )
@@ -403,42 +401,6 @@ def evaluate_frozen_e008_action(
     )
 
 
-def _aligned_torso_targets(
-    env: Any,
-    state: Any,
-    *,
-    torso_slot: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Return current and yaw-aligned torso targets in world coordinates."""
-    positions, quaternions, linear_velocities, angular_velocities = (
-        env._body_state(state.data)
-    )
-    phase = state.info["phase"]
-    reference_positions, reference_quaternions = (
-        env._aligned_reference_body_targets(positions[0], quaternions[0], phase)
-    )
-    reference_anchor_quaternion = env.body_quat_reference[phase, 0]
-    yaw_delta = _yaw_quaternion(
-        _quat_mul(quaternions[0], _quat_inv(reference_anchor_quaternion))
-    )
-    reference_linear_velocity = _quat_apply(
-        yaw_delta, env.body_lin_vel_reference[phase, torso_slot]
-    )
-    reference_angular_velocity = _quat_apply(
-        yaw_delta, env.body_ang_vel_reference[phase, torso_slot]
-    )
-    return (
-        positions[torso_slot],
-        quaternions[torso_slot],
-        linear_velocities[torso_slot],
-        angular_velocities[torso_slot],
-        reference_positions[torso_slot],
-        reference_quaternions[torso_slot],
-        reference_linear_velocity,
-        reference_angular_velocity,
-    )
-
-
 def _wrench_for_state(
     env: Any,
     state: Any,
@@ -448,27 +410,14 @@ def _wrench_for_state(
     parameters: TorsoWrenchParameters,
     scale: float,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    (
-        actual_position,
-        actual_quaternion,
-        actual_linear_velocity,
-        actual_angular_velocity,
-        reference_position,
-        reference_quaternion,
-        reference_linear_velocity,
-        reference_angular_velocity,
-    ) = _aligned_torso_targets(env, state, torso_slot=torso_slot)
-    wrench = compute_torso_wrench(
-        parameters=parameters,
-        actual_position=actual_position,
-        actual_quaternion=actual_quaternion,
-        actual_linear_velocity=actual_linear_velocity,
-        actual_angular_velocity=actual_angular_velocity,
-        reference_position=reference_position,
-        reference_quaternion=reference_quaternion,
-        reference_linear_velocity=reference_linear_velocity,
-        reference_angular_velocity=reference_angular_velocity,
-        scale=scale,
+    wrench, actual_linear_velocity, actual_angular_velocity = (
+        compute_environment_torso_wrench(
+            env,
+            state,
+            torso_slot=torso_slot,
+            parameters=parameters,
+            scale=scale,
+        )
     )
     return (
         wrench,

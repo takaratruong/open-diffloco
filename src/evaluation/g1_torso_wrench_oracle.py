@@ -201,6 +201,55 @@ def compute_torso_wrench(
     return jp.where(bounded_scale == 0.0, zero, bounded * bounded_scale)
 
 
+def compute_environment_torso_wrench(
+    environment: Any,
+    state: Any,
+    *,
+    torso_slot: int,
+    parameters: TorsoWrenchParameters,
+    scale: float | jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Compute the aligned torso wrench and return its actual velocities."""
+    positions, quaternions, linear_velocities, angular_velocities = (
+        environment._body_state(state.data)
+    )
+    phase = state.info["phase"]
+    reference_positions, reference_quaternions = (
+        environment._aligned_reference_body_targets(
+            positions[0], quaternions[0], phase
+        )
+    )
+    reference_anchor = environment.body_quat_reference[phase, 0]
+    yaw_delta = _yaw_quaternion(
+        _quaternion_multiply(
+            quaternions[0], _quaternion_conjugate(reference_anchor)
+        )
+    )
+    reference_linear_velocity = _quaternion_apply(
+        yaw_delta, environment.body_lin_vel_reference[phase, torso_slot]
+    )
+    reference_angular_velocity = _quaternion_apply(
+        yaw_delta, environment.body_ang_vel_reference[phase, torso_slot]
+    )
+    wrench = compute_torso_wrench(
+        parameters=parameters,
+        actual_position=positions[torso_slot],
+        actual_quaternion=quaternions[torso_slot],
+        actual_linear_velocity=linear_velocities[torso_slot],
+        actual_angular_velocity=angular_velocities[torso_slot],
+        reference_position=reference_positions[torso_slot],
+        reference_quaternion=reference_quaternions[torso_slot],
+        reference_linear_velocity=reference_linear_velocity,
+        reference_angular_velocity=reference_angular_velocity,
+        scale=scale,
+    )
+    return (
+        wrench,
+        linear_velocities[torso_slot],
+        angular_velocities[torso_slot],
+    )
+
+
 def write_torso_wrench(
     xfrc_applied: jax.Array,
     *,

@@ -2,6 +2,7 @@
 
 import math
 import unittest
+from types import SimpleNamespace
 
 import jax.numpy as jp
 import mujoco
@@ -87,6 +88,63 @@ class G1TorsoWrenchOracleTest(unittest.TestCase):
         )
 
         np.testing.assert_array_equal(np.asarray(wrench), np.zeros(6))
+
+    def test_environment_helper_uses_aligned_reference_and_exact_zero_scale(self):
+        from src.evaluation.g1_torso_wrench_oracle import (
+            compute_environment_torso_wrench,
+        )
+
+        positions = jp.array([[0.0, 0.0, 0.0], [0.2, -0.1, 0.9]])
+        quaternions = jp.array(
+            [[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]
+        )
+        linear_velocities = jp.array(
+            [[0.0, 0.0, 0.0], [0.3, -0.2, 0.1]]
+        )
+        angular_velocities = jp.array(
+            [[0.0, 0.0, 0.0], [-0.1, 0.2, -0.3]]
+        )
+        reference_positions = positions.at[1, 0].add(0.05)
+        reference_quaternions = quaternions
+
+        class Environment:
+            body_quat_reference = quaternions[jp.newaxis, ...]
+            body_lin_vel_reference = linear_velocities[jp.newaxis, ...]
+            body_ang_vel_reference = angular_velocities[jp.newaxis, ...]
+
+            @staticmethod
+            def _body_state(_data):
+                return (
+                    positions,
+                    quaternions,
+                    linear_velocities,
+                    angular_velocities,
+                )
+
+            @staticmethod
+            def _aligned_reference_body_targets(
+                _anchor_position, _anchor_quaternion, _phase
+            ):
+                return reference_positions, reference_quaternions
+
+        state = SimpleNamespace(data=object(), info={"phase": jp.array(0)})
+        wrench, actual_linear, actual_angular = (
+            compute_environment_torso_wrench(
+                Environment(),
+                state,
+                torso_slot=1,
+                parameters=self.parameters,
+                scale=0.0,
+            )
+        )
+
+        np.testing.assert_array_equal(np.asarray(wrench), np.zeros(6))
+        np.testing.assert_array_equal(
+            np.asarray(actual_linear), np.asarray(linear_velocities[1])
+        )
+        np.testing.assert_array_equal(
+            np.asarray(actual_angular), np.asarray(angular_velocities[1])
+        )
 
     def test_quaternion_error_uses_the_shortest_rotation(self):
         from src.evaluation.g1_torso_wrench_oracle import (
