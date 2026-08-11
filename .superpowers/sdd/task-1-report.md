@@ -178,3 +178,74 @@ the yaw frame before returning them to world coordinates, and does not change
 the frozen gain, cap, body-resolution, or rollout interfaces. The new residual
 test guards against the only extra scaling edge case introduced by the
 normalization. No concerns remain for this scoped follow-up.
+
+## Follow-up: float-limit yaw-frame rotation fix
+
+### Scope and root cause
+
+This follow-up remains limited to the Task 1 oracle, its tests, and this
+report. The earlier PD normalization happened after the initial world-to-yaw
+rotation. With a valid 45-degree yaw and finite `float32` world error
+`[3e38, 3e38, 0]`, the quaternion dot/cross intermediates overflowed and
+corrupted the direction before the PD cap was reached. Direct reproduction
+before this fix returned a full-cap but incorrect direction:
+
+```text
+wrench [-7.0710683  7.0710697  0.         0.         0.         0.       ]
+force norm 10.000001 force cap 10.0
+direction [-0.70710677  0.70710695  0.        ]
+```
+
+### RED and GREEN evidence
+
+Added `test_float_limit_yaw_rotation_preserves_capped_world_direction`. It
+requires the same 45-degree yaw and finite `[3e38, 3e38, 0]` position request
+to yield a finite full-cap world force in `[+1, +1, 0] / sqrt(2)` direction,
+while the actual/reference orientation is equal to isolate translation. The
+RED run was:
+
+```text
+1 failed, 9 passed in 4.62s
+```
+
+The fix represents each initial reference-minus-actual vector as a normalized
+finite difference plus a separate finite magnitude, rotates only that bounded
+vector into the yaw frame, and passes both parts to the bounded PD response.
+The capped yaw-frame force is small before its final world rotation. This also
+handles finite opposite-sign reference/actual inputs without overflowing their
+subtraction. The oracle-only GREEN run was:
+
+```text
+..........                                                               [100%]
+10 passed in 5.08s
+```
+
+### Final verification
+
+Ran exactly:
+
+```bash
+conda run -n diffsim python -m pytest tests/test_g1_torso_wrench_oracle.py tests/test_g1_tracking_controller.py -q
+conda run -n diffsim ruff check src/evaluation/g1_torso_wrench_oracle.py tests/test_g1_torso_wrench_oracle.py
+conda run -n diffsim python -m py_compile src/evaluation/g1_torso_wrench_oracle.py tests/test_g1_torso_wrench_oracle.py
+git diff --check
+```
+
+Exact relevant output:
+
+```text
+.............                                                            [100%]
+13 passed in 5.01s
+
+All checks passed!
+```
+
+`py_compile` and `git diff --check` exited zero.
+
+### Follow-up self-review and concerns
+
+The fix affects only the pre-PD yaw-frame error representation. It leaves the
+fixed gains, body resolution, world-frame force/torque order, cap values,
+disabled-zero path, and rollout interface unchanged. The full oracle suite
+passes the previous nominal, direct float-limit, and cancellation-residual
+tests as well as the new non-identity-yaw regression. No concerns remain.

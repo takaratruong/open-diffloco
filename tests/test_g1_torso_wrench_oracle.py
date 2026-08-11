@@ -217,6 +217,30 @@ class G1TorsoWrenchOracleTest(unittest.TestCase):
             atol=1e-6,
         )
 
+    def test_float_limit_yaw_rotation_preserves_capped_world_direction(self):
+        yaw_forty_five_degrees = jp.array(
+            [math.cos(math.pi / 8.0), 0.0, 0.0, math.sin(math.pi / 8.0)],
+            dtype=jp.float32,
+        )
+        wrench = self._wrench(
+            actual_quaternion=yaw_forty_five_degrees,
+            reference_position=jp.array(
+                [3e38, 3e38, 0.0], dtype=jp.float32
+            ),
+            reference_quaternion=yaw_forty_five_degrees,
+        )
+        force = np.asarray(wrench[:3])
+
+        self.assertTrue(np.isfinite(force).all())
+        np.testing.assert_allclose(
+            np.linalg.norm(force), self.parameters.force_cap, rtol=1e-6
+        )
+        np.testing.assert_allclose(
+            force / np.linalg.norm(force),
+            np.array([1.0, 1.0, 0.0]) / math.sqrt(2.0),
+            atol=1e-6,
+        )
+
     def test_uncapped_pd_preserves_a_small_cancellation_residual(self):
         velocity_residual = 1e-3
         wrench = self._wrench(

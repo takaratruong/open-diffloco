@@ -149,37 +149,46 @@ def compute_torso_wrench(
     """Compute one capped world-frame force/torque wrench without side effects."""
     yaw_quaternion = _yaw_quaternion(actual_quaternion)
     yaw_inverse = _quaternion_conjugate(yaw_quaternion)
-    position_error = _quaternion_apply(
+    position_error, position_scale = _scale_stable_quaternion_difference(
         yaw_inverse,
-        _finite_vector(reference_position) - _finite_vector(actual_position),
+        reference_position,
+        actual_position,
     )
-    linear_velocity_error = _quaternion_apply(
-        yaw_inverse,
-        _finite_vector(reference_linear_velocity)
-        - _finite_vector(actual_linear_velocity),
+    linear_velocity_error, linear_velocity_scale = (
+        _scale_stable_quaternion_difference(
+            yaw_inverse,
+            reference_linear_velocity,
+            actual_linear_velocity,
+        )
     )
-    orientation_error = _quaternion_apply(
+    orientation_error, orientation_scale = _scale_stable_quaternion_apply(
         yaw_inverse,
         shortest_quaternion_rotation_vector(
             target_quaternion=reference_quaternion,
             actual_quaternion=actual_quaternion,
         ),
     )
-    angular_velocity_error = _quaternion_apply(
-        yaw_inverse,
-        _finite_vector(reference_angular_velocity)
-        - _finite_vector(actual_angular_velocity),
+    angular_velocity_error, angular_velocity_scale = (
+        _scale_stable_quaternion_difference(
+            yaw_inverse,
+            reference_angular_velocity,
+            actual_angular_velocity,
+        )
     )
     force_yaw = _bounded_pd_response(
         proportional_error=position_error,
+        proportional_scale=position_scale,
         derivative_error=linear_velocity_error,
+        derivative_scale=linear_velocity_scale,
         proportional_gain=parameters.translational_kp,
         derivative_gain=parameters.translational_kd,
         maximum_norm=parameters.force_cap,
     )
     torque_yaw = _bounded_pd_response(
         proportional_error=orientation_error,
+        proportional_scale=orientation_scale,
         derivative_error=angular_velocity_error,
+        derivative_scale=angular_velocity_scale,
         proportional_gain=parameters.rotational_kp,
         derivative_gain=parameters.rotational_kd,
         maximum_norm=parameters.torque_cap,
@@ -224,7 +233,9 @@ def _safe_norm(vector: jax.Array) -> jax.Array:
 def _bounded_pd_response(
     *,
     proportional_error: jax.Array,
+    proportional_scale: jax.Array,
     derivative_error: jax.Array,
+    derivative_scale: jax.Array,
     proportional_gain: float,
     derivative_gain: float,
     maximum_norm: float,
@@ -233,18 +244,42 @@ def _bounded_pd_response(
     proportional_error = _finite_vector(proportional_error)
     derivative_error = _finite_vector(derivative_error)
     error_scale = jp.maximum(
-        jp.max(jp.abs(proportional_error)),
-        jp.max(jp.abs(derivative_error)),
+        proportional_scale,
+        derivative_scale,
     )
     denominator = jp.where(error_scale > 0.0, error_scale, 1.0)
     normalized_demand = (
-        proportional_gain * (proportional_error / denominator)
-        + derivative_gain * (derivative_error / denominator)
+        proportional_gain * proportional_error * (proportional_scale / denominator)
+        + derivative_gain * derivative_error * (derivative_scale / denominator)
     )
     demand_norm = _safe_norm(normalized_demand)
     direction = normalized_demand / jp.where(demand_norm > 0.0, demand_norm, 1.0)
     response_norm = jp.minimum(maximum_norm, error_scale * demand_norm)
     return _finite_vector(direction * response_norm)
+
+
+def _scale_stable_quaternion_difference(
+    quaternion: jax.Array,
+    reference: jax.Array,
+    actual: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Rotate a finite difference without constructing an overflowing vector."""
+    reference = _finite_vector(reference)
+    actual = _finite_vector(actual)
+    scale = jp.maximum(jp.max(jp.abs(reference)), jp.max(jp.abs(actual)))
+    denominator = jp.where(scale > 0.0, scale, 1.0)
+    normalized_difference = reference / denominator - actual / denominator
+    return _quaternion_apply(quaternion, normalized_difference), scale
+
+
+def _scale_stable_quaternion_apply(
+    quaternion: jax.Array, vector: jax.Array
+) -> tuple[jax.Array, jax.Array]:
+    """Rotate a finite vector while keeping its magnitude as a separate scale."""
+    vector = _finite_vector(vector)
+    scale = jp.max(jp.abs(vector))
+    denominator = jp.where(scale > 0.0, scale, 1.0)
+    return _quaternion_apply(quaternion, vector / denominator), scale
 
 
 def _unit_quaternion(quaternion: jax.Array) -> jax.Array:
