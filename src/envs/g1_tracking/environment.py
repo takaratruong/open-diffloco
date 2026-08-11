@@ -127,6 +127,7 @@ class G1TrackingEnv:
         controller_path: str = DEFAULT_CONTROLLER_PATH,
         actor_history_len: int = 1,
         actor_observation_noise: bool = False,
+        actor_reference_lookahead_steps: tuple[int, ...] = (),
         physics_substeps: int = 5,
         reference_stride: int = 1,
         reward_scale: float = 1.0,
@@ -158,6 +159,28 @@ class G1TrackingEnv:
         if not isinstance(actor_observation_noise, bool):
             raise ValueError("actor_observation_noise must be boolean")
         self.actor_observation_noise = actor_observation_noise
+        if not isinstance(actor_reference_lookahead_steps, tuple):
+            raise ValueError(
+                "actor reference lookahead steps must be a tuple"
+            )
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value <= 0
+            for value in actor_reference_lookahead_steps
+        ):
+            raise ValueError(
+                "actor reference lookahead steps must be positive integers"
+            )
+        if tuple(sorted(set(actor_reference_lookahead_steps))) != (
+            actor_reference_lookahead_steps
+        ):
+            raise ValueError(
+                "actor reference lookahead steps must be strictly increasing"
+            )
+        self.actor_reference_lookahead_steps = (
+            actor_reference_lookahead_steps
+        )
         if physics_substeps < 1:
             raise ValueError("physics_substeps must be at least one")
         if reference_stride < 1:
@@ -498,7 +521,10 @@ class G1TrackingEnv:
         self.max_episode_length = self.reference_transitions
         self.action_dim = 29
         self.actor_history_len = actor_history_len
-        self.actor_frame_obs_dim = 154
+        self.actor_future_reference_dim = (
+            58 * len(self.actor_reference_lookahead_steps)
+        )
+        self.actor_frame_obs_dim = 154 + self.actor_future_reference_dim
         self.actor_obs_dim = self.actor_frame_obs_dim * actor_history_len
         self.actor_noise_mask = jp.concatenate(
             (
@@ -508,6 +534,7 @@ class G1TrackingEnv:
                 jp.full(29, 0.01),
                 jp.full(29, 0.01),
                 jp.zeros(29),
+                jp.zeros(self.actor_future_reference_dim),
             )
         )
         self.critic_obs_dim = 286
@@ -636,8 +663,31 @@ class G1TrackingEnv:
                 (data.qpos[7:] - self.default_joints)[actor_order],
                 data.qvel[6:][actor_order],
                 info["last_act"][actor_order],
+                self._future_reference_command(phase),
             )
         )
+
+    def _future_reference_command(self, phase: jax.Array) -> jax.Array:
+        """Return clamped future joint commands in declared offset order."""
+        if not self.actor_reference_lookahead_steps:
+            return jp.zeros((0,), dtype=self.qpos_reference.dtype)
+        offsets = jp.asarray(
+            self.actor_reference_lookahead_steps, dtype=jp.int32
+        )
+        indices = jp.minimum(
+            jp.asarray(phase, dtype=jp.int32)
+            + offsets * self.reference_stride,
+            self.reference_length - 1,
+        )
+        actor_order = self.model_to_actor_permutation
+        commands = jp.concatenate(
+            (
+                self.qpos_reference[indices, 7:][:, actor_order],
+                self.qvel_reference[indices, 6:][:, actor_order],
+            ),
+            axis=-1,
+        )
+        return commands.reshape(-1)
 
     def _get_critic_obs(self, data: mjx.Data, info: dict) -> jax.Array:
         phase = info["phase"]

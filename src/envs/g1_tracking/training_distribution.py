@@ -177,10 +177,14 @@ def _quaternion_from_euler_xyz(euler_xyz: jax.Array) -> jax.Array:
 def corrupt_actor_observation(
     key: jax.Array, observation: jax.Array
 ) -> jax.Array:
-    """Adds independent RMR corruption to registered 154-D actor fields."""
+    """Add RMR corruption while preserving future-reference suffixes."""
     observation = jp.asarray(observation)
-    if observation.shape[-1] != 154:
-        raise ValueError("actor observation must have trailing dimension 154")
+    dimension = observation.shape[-1]
+    if dimension < 154 or (dimension - 154) % 58 != 0:
+        raise ValueError(
+            "actor observation trailing dimension must be 154 plus "
+            "complete 58-value future-reference commands"
+        )
     keys = jax.random.split(key, len(ACTOR_NOISE_SLICES))
     noisy = observation
     for noise_key, (region, bound) in zip(

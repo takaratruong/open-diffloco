@@ -129,6 +129,22 @@ class TrainingNoiseTest(unittest.TestCase):
         self.assertEqual(noisy.shape, obs.shape)
         self.assertTrue(np.isfinite(np.asarray(noisy)).all())
 
+    def test_corruption_preserves_future_reference_suffix(self):
+        obs = jnp.arange(328, dtype=jnp.float64)
+
+        noisy = np.asarray(
+            corrupt_actor_observation(jax.random.PRNGKey(61), obs)
+        )
+
+        np.testing.assert_array_equal(noisy[154:], np.asarray(obs)[154:])
+        self.assertTrue(np.any(noisy[:154] != np.asarray(obs)[:154]))
+
+    def test_corruption_rejects_non_reference_suffix_dimensions(self):
+        with self.assertRaisesRegex(ValueError, "trailing dimension"):
+            corrupt_actor_observation(
+                jax.random.PRNGKey(63), jnp.zeros(155)
+            )
+
     def test_reset_perturbation_samples_respect_recorded_ranges(self):
         perturbation = sample_reset_perturbations(
             jax.random.PRNGKey(7), action_dim=29

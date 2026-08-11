@@ -577,6 +577,90 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
             atol=1e-5,
         )
 
+    def test_actor_observation_appends_multiscale_future_reference(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        env = G1TrackingEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=10,
+            actor_reference_lookahead_steps=(4, 8, 12),
+        )
+        phase = 37
+        state = env.reset_at_phase(
+            jax.random.PRNGKey(71),
+            jnp.array(0.0),
+            jnp.array(phase),
+        )
+        frames = np.asarray(state.obs).reshape(10, 328)
+        actor_order = np.asarray(env.model_to_actor_permutation)
+        expected = []
+        for offset in (4, 8, 12):
+            index = min(
+                phase + offset * env.reference_stride,
+                env.reference_length - 1,
+            )
+            expected.extend(
+                np.asarray(env.qpos_reference[index, 7:])[actor_order]
+            )
+            expected.extend(
+                np.asarray(env.qvel_reference[index, 6:])[actor_order]
+            )
+
+        self.assertEqual(env.actor_reference_lookahead_steps, (4, 8, 12))
+        self.assertEqual(env.actor_frame_obs_dim, 328)
+        self.assertEqual(env.actor_obs_dim, 3280)
+        self.assertEqual(env.critic_obs_dim, 286)
+        np.testing.assert_allclose(
+            frames[-1, :154],
+            np.asarray(self.env._get_actor_obs(state.data, state.info)),
+            rtol=0.0,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            frames[-1, 154:], expected, rtol=0.0, atol=1e-12
+        )
+        np.testing.assert_array_equal(frames, np.repeat(frames[-1:], 10, axis=0))
+        self.assertEqual(state.info["bootstrap_obs"].shape, (3280,))
+
+    def test_future_reference_clamps_and_validates_offsets(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        env = G1TrackingEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+            actor_reference_lookahead_steps=(4, 8, 12),
+        )
+        phase = env.reference_length - 2
+        state = env.reset_at_phase(
+            jax.random.PRNGKey(73),
+            jnp.array(0.0),
+            jnp.array(phase),
+        )
+        suffix = np.asarray(state.obs)[154:].reshape(3, 58)
+        final = env.reference_length - 1
+        expected = np.concatenate(
+            (
+                np.asarray(env.qpos_reference[final, 7:]),
+                np.asarray(env.qvel_reference[final, 6:]),
+            )
+        )
+        np.testing.assert_allclose(
+            suffix, np.repeat(expected[None, :], 3, axis=0), atol=1e-12
+        )
+
+        for offsets in ((0,), (-1,), (8, 4), (4, 4), (True,), (4.0,)):
+            with self.subTest(offsets=offsets):
+                with self.assertRaisesRegex(
+                    ValueError, "lookahead steps"
+                ):
+                    G1TrackingEnv(
+                        actor_reference_lookahead_steps=offsets
+                    )
+
     def test_global_anchor_translation_does_not_corrupt_relative_body_pose(self):
         env = self.env
         state = env.reset(jax.random.PRNGKey(13), jnp.array(0.0))
