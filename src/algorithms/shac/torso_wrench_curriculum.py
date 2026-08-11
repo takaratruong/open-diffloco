@@ -124,8 +124,7 @@ def resolve_torso_wrench_assistance_resume_settings(
         requested_end_step,
         float(requested_zero_fraction),
     )
-    if not resumed_hparams:
-        return requested
+    resumed_hparams = resumed_hparams or {}
 
     resumed_enabled = resumed_hparams.get("torso_wrench_assistance", False)
     if not isinstance(resumed_enabled, bool):

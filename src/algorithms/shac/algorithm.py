@@ -3647,7 +3647,11 @@ def train(
             )
 
             # Save best policy
-            if reward > best_reward and state.step > 5000:
+            if (
+                reward > best_reward
+                and state.step > 5000
+                and not torso_wrench_assistance
+            ):
                 best_reward = reward
                 with open(f"{save_dir}/policy_best.pkl", "wb") as f:
                     pickle.dump(state, f)

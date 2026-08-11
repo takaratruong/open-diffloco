@@ -119,6 +119,10 @@ def test_assistance_resume_requires_authority_and_restores_active_defaults() -> 
     }
     with pytest.raises(ValueError, match="must match the checkpoint"):
         resolve_torso_wrench_assistance_resume_settings(
+            None, **requested, allow_change=False
+        )
+    with pytest.raises(ValueError, match="must match the checkpoint"):
+        resolve_torso_wrench_assistance_resume_settings(
             legacy, **requested, allow_change=False
         )
     assert resolve_torso_wrench_assistance_resume_settings(
@@ -211,3 +215,4 @@ def test_train_exposes_default_off_assistance_and_wires_rollout_telemetry() -> N
     assert '"torso_wrench_assistance": torso_wrench_assistance' in source
     assert '"torso_wrench_assistance_scale_current"' in source
     assert '"torso_wrench_assistance_valid"' in source
+    assert "and not torso_wrench_assistance" in source
