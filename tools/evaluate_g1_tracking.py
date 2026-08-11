@@ -52,6 +52,7 @@ def make_evaluation_env(
     reference_stride: int | None = None,
     actor_history_len: int = 1,
     actor_reference_lookahead_steps: tuple[int, ...] = (),
+    actor_reference_preview_mode: str = "absolute",
     reference_residual_control: bool = False,
     reference_residual_scale: float = 0.5,
 ) -> G1TrackingEnv:
@@ -63,6 +64,7 @@ def make_evaluation_env(
     kwargs = {
         "actor_history_len": actor_history_len,
         "actor_reference_lookahead_steps": actor_reference_lookahead_steps,
+        "actor_reference_preview_mode": actor_reference_preview_mode,
         "actor_observation_noise": False,
         "mass_range": (body_mass_scale, body_mass_scale),
         "effort_limit_scale": effort_limit_scale,

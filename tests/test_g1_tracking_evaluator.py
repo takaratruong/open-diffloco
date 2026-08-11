@@ -216,6 +216,19 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         self.assertEqual(candidate.actor_frame_obs_dim, 328)
         self.assertEqual(candidate.actor_obs_dim, 3280)
 
+    def test_evaluator_forwards_delta_future_reference_mode(self):
+        candidate = make_evaluation_env(
+            "g1_tracking_rmr_50hz_source_step",
+            actor_history_len=10,
+            actor_reference_lookahead_steps=(4, 8, 12),
+            actor_reference_preview_mode="delta",
+            reference_residual_control=True,
+            reference_residual_scale=0.5,
+        )
+
+        self.assertEqual(candidate.actor_reference_preview_mode, "delta")
+        self.assertEqual(candidate.actor_obs_dim, 3280)
+
     def test_validated_evaluator_uses_smallest_passing_solver_budget(self):
         validated = make_evaluation_env(
             "g1_tracking_rmr_50hz_validated"
