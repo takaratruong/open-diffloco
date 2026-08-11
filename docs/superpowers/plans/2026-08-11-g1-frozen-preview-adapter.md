@@ -427,7 +427,7 @@ JAX_ENABLE_X64=1 conda run -n diffsim python -m pytest \
   tests/test_g1_frozen_preview_adapter_runner.py \
   tests/test_g1_cagrad_future_reference_runner.py \
   tests/test_preview_objective_survival_evaluator.py \
-  tests/test_g1_future_reference_environment.py -q
+  tests/test_g1_tracking_environment.py -q
 ```
 
 Expected: all selected tests pass. Do not rerun the full suite for a test-only floating tolerance correction; rerun only the failing slice.
