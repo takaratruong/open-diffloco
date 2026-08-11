@@ -4,8 +4,10 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+from flax.core import FrozenDict, freeze
 import numpy as np
 import optax
+import pytest
 
 from src.core.networks import Actor
 
@@ -21,6 +23,30 @@ def _tree_arrays_equal(left: Any, right: Any) -> bool:
 
 def _adam_state(state):
     return state[1][0]
+
+
+def _optimizer_counts(state):
+    count_types = (
+        optax.ScaleByAdamState,
+        optax.ScaleByScheduleState,
+        optax.contrib.MuonState,
+    )
+    counts = []
+
+    def visit(value):
+        if isinstance(value, count_types):
+            counts.append(int(np.asarray(value.count)))
+            return
+        if isinstance(value, dict):
+            for item in value.values():
+                visit(item)
+            return
+        if isinstance(value, (tuple, list)):
+            for item in value:
+                visit(item)
+
+    visit(state)
+    return sorted(counts)
 
 
 def _toy_policy():
@@ -245,3 +271,223 @@ def test_migration_report_detects_parent_or_adapter_moment_drift():
     )
     assert invalid["valid"] is False
     assert invalid["parent_parameters_exact"] is False
+
+
+def test_residual_muon_partition_round_trips_registered_adapter_tree():
+    from src.algorithms.shac.residual_preview_adapter import (
+        merge_residual_adapter_params,
+        split_residual_adapter_params,
+    )
+
+    _, _, params = _toy_policy()
+    kernel, auxiliary = split_residual_adapter_params(params.adapter)
+
+    assert kernel.shape == (5, 4)
+    assert auxiliary.dense0_bias.shape == (4,)
+    assert auxiliary.dense1_kernel.shape == (4, 2)
+    assert auxiliary.dense1_bias.shape == (2,)
+    rebuilt = merge_residual_adapter_params(
+        params.adapter, kernel, auxiliary
+    )
+    assert _tree_arrays_equal(rebuilt, params.adapter)
+    assert type(rebuilt) is type(params.adapter)
+
+    frozen = freeze(params.adapter)
+    frozen_kernel, frozen_auxiliary = split_residual_adapter_params(frozen)
+    frozen_rebuilt = merge_residual_adapter_params(
+        frozen, frozen_kernel, frozen_auxiliary
+    )
+    assert isinstance(frozen_rebuilt, FrozenDict)
+    assert _tree_arrays_equal(frozen_rebuilt, frozen)
+
+
+def test_residual_muon_partition_rejects_unregistered_or_nonmatrix_kernel():
+    from src.algorithms.shac.residual_preview_adapter import (
+        split_residual_adapter_params,
+    )
+
+    _, _, params = _toy_policy()
+    layers = params.adapter["params"]
+    missing_kernel = {
+        "params": {
+            "Dense_0": {"bias": layers["Dense_0"]["bias"]},
+            "Dense_1": layers["Dense_1"],
+        }
+    }
+    wrong_rank = {
+        "params": {
+            "Dense_0": {
+                "kernel": layers["Dense_0"]["kernel"].reshape(-1),
+                "bias": layers["Dense_0"]["bias"],
+            },
+            "Dense_1": layers["Dense_1"],
+        }
+    }
+
+    with pytest.raises(ValueError, match="only kernel and bias"):
+        split_residual_adapter_params(missing_kernel)
+    with pytest.raises(ValueError, match="must be a matrix"):
+        split_residual_adapter_params(wrong_rank)
+
+
+def test_residual_muon_initialization_inherits_counts_and_zeroes_momenta():
+    from src.algorithms.shac.residual_preview_adapter import (
+        build_residual_muon_optimizers,
+        initialize_residual_muon_optimizer,
+        residual_muon_migration_report,
+    )
+
+    _, _, params = _toy_policy()
+    schedule = optax.linear_schedule(1e-3, 5e-4, 20)
+    parent_optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0), optax.adam(schedule)
+    )
+    parent_state = parent_optimizer.init(params.parent)
+    parent_gradients = jax.tree_util.tree_map(jnp.ones_like, params.parent)
+    _, parent_state = parent_optimizer.update(
+        parent_gradients, parent_state, params.parent
+    )
+    muon_optimizer, adam_optimizer = build_residual_muon_optimizers(schedule)
+
+    candidate_state = initialize_residual_muon_optimizer(
+        muon_optimizer=muon_optimizer,
+        adam_optimizer=adam_optimizer,
+        parent_optimizer_state=parent_state,
+        adapter_params=params.adapter,
+    )
+    report = residual_muon_migration_report(
+        parent_optimizer_state=parent_state,
+        candidate_optimizer_state=candidate_state,
+    )
+
+    assert _tree_arrays_equal(
+        candidate_state.parent_optimizer_state, parent_state
+    )
+    assert len(_optimizer_counts(candidate_state.muon_state)) >= 2
+    assert set(_optimizer_counts(candidate_state.muon_state)) == {1}
+    assert _optimizer_counts(candidate_state.adam_state) == [1, 1]
+    assert report["parent_optimizer_snapshot_exact"] is True
+    assert report["muon_momentum_zero"] is True
+    assert report["adam_mu_zero"] is True
+    assert report["adam_nu_zero"] is True
+    assert report["optimizer_counts_exact"] is True
+    assert report["valid"] is True
+
+    changed_parent_adam = _adam_state(parent_state)._replace(
+        count=_adam_state(parent_state).count + 1
+    )
+    changed_parent_snapshot = (
+        parent_state[0],
+        (changed_parent_adam, parent_state[1][1]),
+    )
+    snapshot_drift = residual_muon_migration_report(
+        parent_optimizer_state=parent_state,
+        candidate_optimizer_state=candidate_state._replace(
+            parent_optimizer_state=changed_parent_snapshot
+        ),
+    )
+    reset_muon_counts = jax.tree_util.tree_map(
+        lambda value: value._replace(count=jnp.asarray(0, value.count.dtype))
+        if isinstance(
+            value,
+            (
+                optax.ScaleByAdamState,
+                optax.ScaleByScheduleState,
+                optax.contrib.MuonState,
+            ),
+        )
+        else value,
+        candidate_state.muon_state,
+        is_leaf=lambda value: isinstance(
+            value,
+            (
+                optax.ScaleByAdamState,
+                optax.ScaleByScheduleState,
+                optax.contrib.MuonState,
+            ),
+        ),
+    )
+    count_reset = residual_muon_migration_report(
+        parent_optimizer_state=parent_state,
+        candidate_optimizer_state=candidate_state._replace(
+            muon_state=reset_muon_counts
+        ),
+    )
+    assert snapshot_drift["parent_optimizer_snapshot_exact"] is False
+    assert snapshot_drift["valid"] is False
+    assert count_reset["optimizer_counts_exact"] is False
+    assert count_reset["valid"] is False
+
+
+def test_residual_muon_update_clips_once_and_preserves_parent_snapshot():
+    from src.algorithms.shac.residual_preview_adapter import (
+        apply_residual_muon_update,
+        build_residual_muon_optimizers,
+        initialize_residual_muon_optimizer,
+        split_residual_adapter_params,
+    )
+
+    _, _, params = _toy_policy()
+    schedule = optax.linear_schedule(1e-3, 5e-4, 20)
+    parent_optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0), optax.adam(schedule)
+    )
+    parent_state = parent_optimizer.init(params.parent)
+    parent_gradients = jax.tree_util.tree_map(jnp.ones_like, params.parent)
+    _, parent_state = parent_optimizer.update(
+        parent_gradients, parent_state, params.parent
+    )
+    muon_optimizer, adam_optimizer = build_residual_muon_optimizers(schedule)
+    state = initialize_residual_muon_optimizer(
+        muon_optimizer=muon_optimizer,
+        adam_optimizer=adam_optimizer,
+        parent_optimizer_state=parent_state,
+        adapter_params=params.adapter,
+    )
+    gradients = params._replace(
+        parent=jax.tree_util.tree_map(
+            lambda value: jnp.full_like(value, 7.0), params.parent
+        ),
+        adapter=jax.tree_util.tree_map(
+            lambda value: jnp.full_like(value, 3.0), params.adapter
+        ),
+    )
+    clipped_adapter, _ = optax.clip_by_global_norm(1.0).update(
+        gradients.adapter, optax.EmptyState()
+    )
+    _, clipped_auxiliary = split_residual_adapter_params(clipped_adapter)
+    _, adapter_auxiliary = split_residual_adapter_params(params.adapter)
+    expected_aux_updates, _ = adam_optimizer.update(
+        clipped_auxiliary,
+        state.adam_state,
+        adapter_auxiliary,
+    )
+
+    updates, new_state, diagnostics = apply_residual_muon_update(
+        muon_optimizer=muon_optimizer,
+        adam_optimizer=adam_optimizer,
+        gradients=gradients,
+        optimizer_state=state,
+        params=params,
+    )
+    kernel_update, auxiliary_updates = split_residual_adapter_params(
+        updates.adapter
+    )
+
+    assert all(
+        bool(jnp.all(leaf == 0.0))
+        for leaf in jax.tree_util.tree_leaves(updates.parent)
+    )
+    assert _tree_arrays_equal(auxiliary_updates, expected_aux_updates)
+    assert all(
+        bool(jnp.all(jnp.isfinite(leaf)))
+        for leaf in jax.tree_util.tree_leaves(kernel_update)
+    )
+    assert float(jnp.linalg.norm(kernel_update)) > 0.0
+    assert _tree_arrays_equal(
+        new_state.parent_optimizer_state, parent_state
+    )
+    assert float(diagnostics["muon_kernel_update_norm"]) > 0.0
+    assert float(diagnostics["aux_adam_update_norm"]) > 0.0
+    assert float(diagnostics["frozen_update_max_abs"]) == 0.0
+    assert float(diagnostics["frozen_moment_drift_max_abs"]) == 0.0
