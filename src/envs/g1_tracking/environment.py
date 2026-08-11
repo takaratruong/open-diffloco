@@ -128,6 +128,7 @@ class G1TrackingEnv:
         actor_history_len: int = 1,
         actor_observation_noise: bool = False,
         actor_reference_lookahead_steps: tuple[int, ...] = (),
+        actor_reference_preview_mode: str = "absolute",
         physics_substeps: int = 5,
         reference_stride: int = 1,
         reward_scale: float = 1.0,
@@ -181,6 +182,16 @@ class G1TrackingEnv:
         self.actor_reference_lookahead_steps = (
             actor_reference_lookahead_steps
         )
+        if actor_reference_preview_mode not in {"absolute", "delta"}:
+            raise ValueError(
+                "actor reference preview mode must be 'absolute' or 'delta'"
+            )
+        if (
+            actor_reference_preview_mode == "delta"
+            and not actor_reference_lookahead_steps
+        ):
+            raise ValueError("delta preview mode requires lookahead steps")
+        self.actor_reference_preview_mode = actor_reference_preview_mode
         if physics_substeps < 1:
             raise ValueError("physics_substeps must be at least one")
         if reference_stride < 1:
@@ -687,6 +698,14 @@ class G1TrackingEnv:
             ),
             axis=-1,
         )
+        if self.actor_reference_preview_mode == "delta":
+            current = jp.concatenate(
+                (
+                    self.qpos_reference[phase, 7:][actor_order],
+                    self.qvel_reference[phase, 6:][actor_order],
+                )
+            )
+            commands = commands - current[None, :]
         return commands.reshape(-1)
 
     def _get_critic_obs(self, data: mjx.Data, info: dict) -> jax.Array:

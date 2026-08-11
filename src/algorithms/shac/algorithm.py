@@ -346,6 +346,39 @@ def resolve_future_reference_resume_settings(
     )
 
 
+def resolve_future_reference_preview_mode(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested_mode: str,
+    future_reference_upgrade: bool,
+) -> str:
+    """Resolve a preview representation without silently changing inputs."""
+    valid_modes = {"absolute", "delta"}
+    if requested_mode not in valid_modes:
+        raise ValueError("future reference preview mode is invalid")
+    if resumed_hparams is None:
+        return requested_mode
+    saved_steps = tuple(
+        resumed_hparams.get("actor_reference_lookahead_steps", ())
+    )
+    if not saved_steps:
+        if requested_mode == "delta" and not future_reference_upgrade:
+            raise ValueError(
+                "delta preview requires explicit upgrade authority"
+            )
+        return requested_mode
+    saved_mode = resumed_hparams.get(
+        "actor_reference_preview_mode", "absolute"
+    )
+    if saved_mode not in valid_modes:
+        raise ValueError("saved future reference preview mode is invalid")
+    if saved_mode != requested_mode:
+        raise ValueError(
+            "future reference preview mode must match the checkpoint"
+        )
+    return saved_mode
+
+
 def resolve_preview_adapter_resume_setting(
     resumed_hparams: dict[str, object] | None, *, requested: bool
 ) -> bool:
@@ -828,6 +861,7 @@ def train(
     actor_history_len: int = 10,
     actor_observation_noise: bool = False,
     actor_reference_lookahead_steps: tuple[int, ...] = (),
+    actor_reference_preview_mode: str = "absolute",
     allow_resume_actor_reference_lookahead_upgrade: bool = False,
     actor_preview_adapter: bool = False,
     env_variant: str = "blind_nolinvel_nokinref",
@@ -1075,6 +1109,15 @@ def train(
         raise ValueError(
             "actor_reference_lookahead_steps must be a tuple"
         )
+    if actor_reference_preview_mode not in {"absolute", "delta"}:
+        raise ValueError("actor_reference_preview_mode is invalid")
+    if (
+        actor_reference_preview_mode == "delta"
+        and not actor_reference_lookahead_steps
+    ):
+        raise ValueError(
+            "delta actor_reference_preview_mode requires lookahead steps"
+        )
     if not isinstance(
         allow_resume_actor_reference_lookahead_upgrade, bool
     ):
@@ -1111,6 +1154,13 @@ def train(
             allow_upgrade=(
                 allow_resume_actor_reference_lookahead_upgrade
             ),
+        )
+        actor_reference_preview_mode = (
+            resolve_future_reference_preview_mode(
+                resumed_hparams,
+                requested_mode=actor_reference_preview_mode,
+                future_reference_upgrade=future_reference_upgrade,
+            )
         )
         actor_preview_adapter = resolve_preview_adapter_resume_setting(
             resumed_hparams,
@@ -1307,6 +1357,9 @@ def train(
                 "actor_observation_noise": actor_observation_noise,
                 "actor_reference_lookahead_steps": (
                     actor_reference_lookahead_steps
+                ),
+                "actor_reference_preview_mode": (
+                    actor_reference_preview_mode
                 ),
                 "solver_iterations": solver_iterations,
                 "solver_ls_iterations": solver_ls_iterations,
@@ -2569,6 +2622,7 @@ def train(
         "actor_reference_lookahead_steps": list(
             actor_reference_lookahead_steps
         ),
+        "actor_reference_preview_mode": actor_reference_preview_mode,
         "actor_preview_adapter": actor_preview_adapter,
         "actor_preview_trainable_parameter_count": (
             preview_trainable_parameter_count

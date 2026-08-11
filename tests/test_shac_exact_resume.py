@@ -14,6 +14,9 @@ class ShacExactResumeTest(unittest.TestCase):
         self.assertEqual(
             parameters["actor_reference_lookahead_steps"].default, ()
         )
+        self.assertEqual(
+            parameters["actor_reference_preview_mode"].default, "absolute"
+        )
         self.assertIs(
             parameters[
                 "allow_resume_actor_reference_lookahead_upgrade"
@@ -21,6 +24,60 @@ class ShacExactResumeTest(unittest.TestCase):
             False,
         )
         self.assertIs(parameters["actor_preview_adapter"].default, False)
+
+    def test_delta_preview_mode_requires_upgrade_or_exact_resume(self):
+        from src.algorithms.shac.algorithm import (
+            resolve_future_reference_preview_mode,
+        )
+
+        self.assertEqual(
+            resolve_future_reference_preview_mode(
+                {"actor_reference_lookahead_steps": []},
+                requested_mode="delta",
+                future_reference_upgrade=True,
+            ),
+            "delta",
+        )
+        self.assertEqual(
+            resolve_future_reference_preview_mode(
+                {
+                    "actor_reference_lookahead_steps": [4, 8, 12],
+                    "actor_reference_preview_mode": "delta",
+                },
+                requested_mode="delta",
+                future_reference_upgrade=False,
+            ),
+            "delta",
+        )
+        with self.assertRaisesRegex(ValueError, "must match"):
+            resolve_future_reference_preview_mode(
+                {"actor_reference_lookahead_steps": [4, 8, 12]},
+                requested_mode="delta",
+                future_reference_upgrade=False,
+            )
+
+    def test_preview_mode_defaults_legacy_preview_to_absolute(self):
+        from src.algorithms.shac.algorithm import (
+            resolve_future_reference_preview_mode,
+        )
+
+        self.assertEqual(
+            resolve_future_reference_preview_mode(
+                {"actor_reference_lookahead_steps": [4, 8, 12]},
+                requested_mode="absolute",
+                future_reference_upgrade=False,
+            ),
+            "absolute",
+        )
+        with self.assertRaisesRegex(ValueError, "invalid"):
+            resolve_future_reference_preview_mode(
+                {
+                    "actor_reference_lookahead_steps": [4],
+                    "actor_reference_preview_mode": "relative",
+                },
+                requested_mode="relative",
+                future_reference_upgrade=False,
+            )
 
     def test_preview_adapter_resume_is_explicit_and_exact(self):
         from src.algorithms.shac.algorithm import (

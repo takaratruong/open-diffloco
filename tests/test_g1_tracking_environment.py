@@ -624,6 +624,67 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         np.testing.assert_array_equal(frames, np.repeat(frames[-1:], 10, axis=0))
         self.assertEqual(state.info["bootstrap_obs"].shape, (3280,))
 
+    def test_actor_observation_supports_delta_future_reference(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        env = G1TrackingEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+            actor_reference_lookahead_steps=(4, 8, 12),
+            actor_reference_preview_mode="delta",
+        )
+        phase = 37
+        actual = np.asarray(
+            env._future_reference_command(jnp.array(phase))
+        ).reshape(3, 58)
+        actor_order = np.asarray(env.model_to_actor_permutation)
+        current = np.concatenate(
+            (
+                np.asarray(env.qpos_reference[phase, 7:])[actor_order],
+                np.asarray(env.qvel_reference[phase, 6:])[actor_order],
+            )
+        )
+        expected = []
+        for offset in (4, 8, 12):
+            future_phase = min(
+                phase + offset * env.reference_stride,
+                env.reference_length - 1,
+            )
+            expected.append(
+                np.concatenate(
+                    (
+                        np.asarray(
+                            env.qpos_reference[future_phase, 7:]
+                        )[actor_order],
+                        np.asarray(
+                            env.qvel_reference[future_phase, 6:]
+                        )[actor_order],
+                    )
+                )
+                - current
+            )
+
+        self.assertEqual(env.actor_reference_preview_mode, "delta")
+        np.testing.assert_allclose(
+            actual, np.stack(expected), rtol=0.0, atol=1e-12
+        )
+
+    def test_future_reference_preview_mode_is_explicit_and_validated(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        self.assertEqual(self.env.actor_reference_preview_mode, "absolute")
+        for mode in ("relative", True, None):
+            with self.subTest(mode=mode):
+                with self.assertRaisesRegex(ValueError, "preview mode"):
+                    G1TrackingEnv(
+                        actor_reference_lookahead_steps=(4,),
+                        actor_reference_preview_mode=mode,
+                    )
+        with self.assertRaisesRegex(ValueError, "requires lookahead"):
+            G1TrackingEnv(actor_reference_preview_mode="delta")
+
     def test_future_reference_clamps_and_validates_offsets(self):
         from src.envs.g1_tracking.environment import G1TrackingEnv
 
