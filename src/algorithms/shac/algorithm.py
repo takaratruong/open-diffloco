@@ -768,6 +768,41 @@ def validate_termination_margin_resume(
         )
 
 
+def resolve_carried_reset_resume_settings(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested_bank_path: str | None,
+    requested_probability: float,
+    requested_start: int,
+    allow_change: bool,
+) -> tuple[str | None, float, int]:
+    """Restore carried resets or admit one explicit distribution treatment."""
+    if not isinstance(allow_change, bool):
+        raise ValueError(
+            "allow_resume_carried_reset_change must be boolean"
+        )
+    requested = (
+        requested_bank_path,
+        requested_probability,
+        requested_start,
+    )
+    if not resumed_hparams:
+        return requested
+    resumed = (
+        resumed_hparams.get("carried_reset_bank_path"),
+        resumed_hparams.get("carried_reset_probability", 0.0),
+        resumed_hparams.get("carried_reset_bank_start", 0),
+    )
+    if requested == (None, 0.0, 0) and not allow_change:
+        return resumed
+    if requested != resumed and not allow_change:
+        raise ValueError(
+            "carried reset settings must match the checkpoint unless "
+            "allow_resume_carried_reset_change is enabled"
+        )
+    return requested
+
+
 def resolve_cagrad_resume_settings(
     resumed_hparams: dict[str, object] | None,
     *,
@@ -1039,6 +1074,7 @@ def train(
     carried_reset_bank_path: str | None = None,
     carried_reset_probability: float = 0.0,
     carried_reset_bank_start: int = 0,
+    allow_resume_carried_reset_change: bool = False,
     reference_path: str | None = None,
     reference_stride: int | None = None,
 ):
@@ -1076,6 +1112,8 @@ def train(
         carried_reset_bank_path: Optional NPZ containing rollout qpos/qvel/phase.
         carried_reset_probability: Fraction of resets sampled from that bank.
         carried_reset_bank_start: Leading bank rows excluded from sampling.
+        allow_resume_carried_reset_change: Explicitly permit a resumed reset-
+                                           distribution treatment.
         kp_range: (lo, hi) absolute range for actuator position gain per episode
         kd_range: (lo, hi) absolute range for actuator velocity gain per episode
         push_velocity_range: Interval root x/y velocity disturbance range.
@@ -1219,6 +1257,10 @@ def train(
         raise ValueError(
             "allow_resume_termination_margin_change must be boolean"
         )
+    if not isinstance(allow_resume_carried_reset_change, bool):
+        raise ValueError(
+            "allow_resume_carried_reset_change must be boolean"
+        )
     if (
         isinstance(reference_reset_noise_scale, bool)
         or not math.isfinite(reference_reset_noise_scale)
@@ -1358,6 +1400,17 @@ def train(
             requested_iterations=actor_cagrad_iterations,
             requested_bin_count=actor_phase_bin_count,
         )
+        (
+            carried_reset_bank_path,
+            carried_reset_probability,
+            carried_reset_bank_start,
+        ) = resolve_carried_reset_resume_settings(
+            resumed_hparams,
+            requested_bank_path=carried_reset_bank_path,
+            requested_probability=carried_reset_probability,
+            requested_start=carried_reset_bank_start,
+            allow_change=allow_resume_carried_reset_change,
+        )
         if resumed_hparams:
             print(f"Resuming from step {resumed_step}")
             resumed_accumulation_steps = resumed_hparams.get(
@@ -1411,15 +1464,6 @@ def train(
             )
             solver_ls_iterations = resumed_hparams.get(
                 "solver_ls_iterations", solver_ls_iterations
-            )
-            carried_reset_bank_path = resumed_hparams.get(
-                "carried_reset_bank_path", carried_reset_bank_path
-            )
-            carried_reset_probability = resumed_hparams.get(
-                "carried_reset_probability", carried_reset_probability
-            )
-            carried_reset_bank_start = resumed_hparams.get(
-                "carried_reset_bank_start", carried_reset_bank_start
             )
             if "kp_range" in resumed_hparams:
                 kp_range = tuple(resumed_hparams["kp_range"])
@@ -2990,6 +3034,9 @@ def train(
         "carried_reset_bank_path": carried_reset_bank_path,
         "carried_reset_probability": carried_reset_probability,
         "carried_reset_bank_start": carried_reset_bank_start,
+        "allow_resume_carried_reset_change": (
+            allow_resume_carried_reset_change
+        ),
         "kp_range": list(kp_range),
         "kd_range": list(kd_range),
         "com_offset_range": list(com_offset_range),

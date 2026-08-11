@@ -323,6 +323,79 @@ class ShacExactResumeTest(unittest.TestCase):
             allow_change=True,
         )
 
+    def test_carried_reset_change_requires_explicit_resume_treatment(self):
+        from src.algorithms.shac.algorithm import (
+            resolve_carried_reset_resume_settings,
+        )
+
+        resumed = {
+            "carried_reset_bank_path": "/tmp/old-bank.npz",
+            "carried_reset_probability": 0.25,
+            "carried_reset_bank_start": 7,
+        }
+        self.assertEqual(
+            resolve_carried_reset_resume_settings(
+                resumed,
+                requested_bank_path=None,
+                requested_probability=0.0,
+                requested_start=0,
+                allow_change=False,
+            ),
+            ("/tmp/old-bank.npz", 0.25, 7),
+        )
+        with self.assertRaisesRegex(ValueError, "must match the checkpoint"):
+            resolve_carried_reset_resume_settings(
+                resumed,
+                requested_bank_path="/tmp/new-bank.npz",
+                requested_probability=0.5,
+                requested_start=0,
+                allow_change=False,
+            )
+        self.assertEqual(
+            resolve_carried_reset_resume_settings(
+                resumed,
+                requested_bank_path="/tmp/new-bank.npz",
+                requested_probability=0.5,
+                requested_start=0,
+                allow_change=True,
+            ),
+            ("/tmp/new-bank.npz", 0.5, 0),
+        )
+        self.assertEqual(
+            resolve_carried_reset_resume_settings(
+                resumed,
+                requested_bank_path=None,
+                requested_probability=0.0,
+                requested_start=0,
+                allow_change=True,
+            ),
+            (None, 0.0, 0),
+        )
+
+    def test_fresh_carried_reset_settings_need_no_resume_override(self):
+        from src.algorithms.shac.algorithm import (
+            resolve_carried_reset_resume_settings,
+        )
+
+        self.assertEqual(
+            resolve_carried_reset_resume_settings(
+                None,
+                requested_bank_path="/tmp/bank.npz",
+                requested_probability=0.5,
+                requested_start=0,
+                allow_change=False,
+            ),
+            ("/tmp/bank.npz", 0.5, 0),
+        )
+        with self.assertRaisesRegex(ValueError, "must be boolean"):
+            resolve_carried_reset_resume_settings(
+                None,
+                requested_bank_path=None,
+                requested_probability=0.0,
+                requested_start=0,
+                allow_change=1,
+            )
+
     def test_legacy_checkpoint_keeps_original_noise_schedule_endpoint(self):
         from src.algorithms.shac.algorithm import (
             resolve_action_noise_schedule_steps,
