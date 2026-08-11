@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import os
+import pickle
 from pathlib import Path
 from typing import Any, Callable
 
@@ -14,10 +15,14 @@ import jax.numpy as jnp
 import numpy as np
 
 from src.core.data_structures import Normalizer
+from src.core.networks import Actor
+from src.algorithms.shac.residual_preview_adapter import (
+    FrozenPreviewResidualParams,
+    PreviewResidualAdapter,
+)
 from src.envs.g1_tracking.environment import _quat_apply, _quat_inv, _quat_mul
 from src.envs.g1_tracking.environment import _yaw_quaternion
 from src.envs.g1_tracking.solver_profiles import (
-    SOLVER_PROFILES,
     get_solver_profile,
     solver_context,
 )
@@ -28,13 +33,9 @@ from src.evaluation.g1_torso_wrench_oracle import (
     write_torso_wrench,
 )
 from tools.compare_g1_tracking_residual import summarize_records
-from tools.evaluate_g1_phase_grid import (
-    CHECKPOINT_SHA256,
-    REFERENCE_SHA256,
-    build_phase_grid_payload,
-)
+from tools.evaluate_g1_flax_phase_grid import evaluate_actor_action
+from tools.evaluate_g1_phase_grid import build_phase_grid_payload
 from tools.evaluate_g1_tracking import (
-    _load_policy,
     configure_jax,
     make_evaluation_env,
     remaining_reference_transitions,
@@ -45,7 +46,21 @@ from tools.prepare_g1_rmr_reference import sha256_file
 
 PHASES = (0, 100, 200, 300, 400)
 EXPECTED_SUFFIX_TRANSITIONS = (499, 399, 299, 199, 99)
+EXPECTED_UNASSISTED_SURVIVAL = (70, 63, 95, 70, 44)
 EXPECTED_TORSO_BODY_ID = 16
+FROZEN_E008_CHECKPOINT_SHA256 = (
+    "fbea5e272d1431c08753a3600014623cd5577e34e01aeeba18b16af46d369377"
+)
+FROZEN_REFERENCE_SHA256 = (
+    "bf8c8b407062d1b309440f4c1787c345b04d79501ea75f615e5b41c0c5ebb6db"
+)
+FROZEN_SOLVER_PROFILE = "g1-4x5"
+FROZEN_SEED = 0
+FROZEN_ASSISTANCE_SCALE = 1.0
+CAP_COMPLIANCE_ATOL = 1e-5
+LOOKAHEAD_STEPS = (4, 8, 12)
+ACTOR_HISTORY_LEN = 10
+RESIDUAL_HIDDEN = 256
 TRACE_COLUMNS = (
     "force_x",
     "force_y",
@@ -68,16 +83,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--reference-path", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--phases", type=int, nargs=5, default=PHASES)
-    parser.add_argument("--assistance-scale", type=float, default=1.0)
-    parser.add_argument(
-        "--solver-profile",
-        choices=tuple(sorted(SOLVER_PROFILES)),
-        default="g1-4x5",
+    parser.set_defaults(
+        seed=FROZEN_SEED,
+        phases=PHASES,
+        assistance_scale=FROZEN_ASSISTANCE_SCALE,
+        solver_profile=FROZEN_SOLVER_PROFILE,
+        checkpoint_sha256=FROZEN_E008_CHECKPOINT_SHA256,
+        reference_sha256=FROZEN_REFERENCE_SHA256,
     )
-    parser.add_argument("--checkpoint-sha256", default=CHECKPOINT_SHA256)
-    parser.add_argument("--reference-sha256", default=REFERENCE_SHA256)
     return parser
 
 
@@ -124,7 +137,7 @@ def summarize_wrench_trace(
         np.einsum("ij,ij->i", force, linear_velocity)
         + np.einsum("ij,ij->i", torque, angular_velocity)
     )
-    tolerance = 1e-9
+    tolerance = CAP_COMPLIANCE_ATOL
     return {
         "steps": int(values.shape[0]),
         "max_force": float(np.max(force_norm)),
@@ -148,13 +161,18 @@ def summarize_wrench_trace(
 
 
 def passes_oracle_gate(
+    unassisted: dict[int, dict[str, Any]],
     assisted: dict[int, dict[str, Any]],
     telemetry: dict[int, dict[str, Any]],
 ) -> bool:
     """Require the preregistered all-suffix completion and safe trace gate."""
-    if set(assisted) != set(PHASES) or set(telemetry) != set(PHASES):
+    if (
+        set(unassisted) != set(PHASES)
+        or set(assisted) != set(PHASES)
+        or set(telemetry) != set(PHASES)
+    ):
         return False
-    return all(
+    return baseline_is_valid(unassisted) and all(
         int(assisted[phase].get("steps", -1)) == expected_steps
         and not bool(assisted[phase].get("terminal", True))
         and bool(assisted[phase].get("completed_reference_suffix", False))
@@ -167,13 +185,20 @@ def passes_oracle_gate(
     )
 
 
+def baseline_is_valid(unassisted: dict[int, dict[str, Any]]) -> bool:
+    """Require the registered deterministic E008 baseline survival vector."""
+    return set(unassisted) == set(PHASES) and all(
+        int(unassisted[phase].get("steps", -1)) == expected_steps
+        for phase, expected_steps in zip(
+            PHASES, EXPECTED_UNASSISTED_SURVIVAL, strict=True
+        )
+    )
+
+
 def frozen_provenance(
     *,
     checkpoint: Path,
     reference: Path,
-    expected_checkpoint_sha256: str,
-    expected_reference_sha256: str,
-    solver_profile: str,
     torso_body_id: int,
 ) -> dict[str, Any]:
     """Hash and validate every immutable causal input before evaluation."""
@@ -183,25 +208,90 @@ def frozen_provenance(
         raise ValueError("checkpoint and reference must be readable files")
     checkpoint_sha256 = sha256_file(checkpoint)
     reference_sha256 = sha256_file(reference)
-    if checkpoint_sha256 != expected_checkpoint_sha256:
+    if checkpoint_sha256 != FROZEN_E008_CHECKPOINT_SHA256:
         raise ValueError("checkpoint SHA-256 does not match frozen E008")
-    if reference_sha256 != expected_reference_sha256:
+    if reference_sha256 != FROZEN_REFERENCE_SHA256:
         raise ValueError("reference SHA-256 does not match frozen E008")
     if torso_body_id != EXPECTED_TORSO_BODY_ID:
         raise ValueError("resolved torso body ID does not match frozen model")
-    profile = get_solver_profile(solver_profile)
+    profile = get_solver_profile(FROZEN_SOLVER_PROFILE)
     return {
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": checkpoint_sha256,
         "reference": str(reference),
         "reference_sha256": reference_sha256,
-        "solver_profile": solver_profile,
+        "solver_profile": FROZEN_SOLVER_PROFILE,
         "solver_iterations": profile.iterations,
         "solver_ls_iterations": profile.ls_iterations,
         "torso_body_id": torso_body_id,
         "phases": list(PHASES),
         "expected_suffix_transitions": list(EXPECTED_SUFFIX_TRANSITIONS),
+        "expected_unassisted_survival": list(EXPECTED_UNASSISTED_SURVIVAL),
     }
+
+
+def frozen_e008_environment_kwargs(
+    reference_path: Path | None = None,
+) -> dict[str, Any]:
+    """Return the sole environment layout compatible with frozen E008."""
+    profile = get_solver_profile(FROZEN_SOLVER_PROFILE)
+    kwargs = {
+        "solver_iterations": profile.iterations,
+        "solver_ls_iterations": profile.ls_iterations,
+        "reference_stride": 1,
+        "actor_history_len": ACTOR_HISTORY_LEN,
+        "actor_reference_lookahead_steps": LOOKAHEAD_STEPS,
+        "actor_reference_preview_mode": "delta",
+        "reference_residual_control": True,
+        "reference_residual_scale": 0.5,
+    }
+    if reference_path is not None:
+        kwargs["reference_path"] = reference_path
+    return kwargs
+
+
+def load_frozen_e008_policy(
+    env: Any, checkpoint: Path
+) -> tuple[Actor, FrozenPreviewResidualParams, PreviewResidualAdapter, Any]:
+    """Load the E008 composite actor exactly as its preview training used it."""
+    with checkpoint.open("rb") as stream:
+        checkpoint_state = pickle.load(stream)
+    actor_params = checkpoint_state.actor_params
+    if not isinstance(actor_params, FrozenPreviewResidualParams):
+        raise ValueError("checkpoint is not a frozen E008 residual preview actor")
+    leaves = jax.tree_util.tree_leaves(actor_params)
+    if not leaves or not all(np.isfinite(np.asarray(leaf)).all() for leaf in leaves):
+        raise ValueError("frozen E008 composite actor parameters must be finite")
+    actor = Actor(
+        env.action_dim,
+        hidden=(512, 256, 128),
+        squash=getattr(env, "squash_actor_actions", True),
+        layer_norm=True,
+        zero_output=False,
+    )
+    residual_actor = PreviewResidualAdapter(
+        action_dim=env.action_dim, hidden_dim=RESIDUAL_HIDDEN
+    )
+    return actor, actor_params, residual_actor, checkpoint_state.normalizer
+
+
+def evaluate_frozen_e008_action(
+    actor: Actor,
+    actor_params: FrozenPreviewResidualParams,
+    normalized_observations: jax.Array,
+    *,
+    residual_actor: PreviewResidualAdapter,
+    treatment_frame_dim: int,
+) -> jax.Array:
+    """Apply the parent plus E008 residual through the proven evaluator path."""
+    return evaluate_actor_action(
+        actor,
+        actor_params,
+        normalized_observations,
+        residual_actor=residual_actor,
+        history_len=ACTOR_HISTORY_LEN,
+        treatment_frame_dim=treatment_frame_dim,
+    )
 
 
 def _aligned_torso_targets(
@@ -373,29 +463,15 @@ def _write_json_atomically(path: Path, document: dict[str, Any]) -> None:
 def main() -> None:
     configure_jax()
     args = build_parser().parse_args()
-    phases = tuple(args.phases)
-    if phases != PHASES:
-        raise ValueError(f"phases must be exactly {PHASES}")
-    if not math.isfinite(args.assistance_scale) or not 0.0 < args.assistance_scale <= 1.0:
-        raise ValueError("assistance scale must be finite and in (0, 1]")
-    profile = get_solver_profile(args.solver_profile)
+    profile = get_solver_profile(FROZEN_SOLVER_PROFILE)
     env = make_evaluation_env(
         "g1_tracking_rmr_50hz_source_step",
-        solver_iterations=profile.iterations,
-        solver_ls_iterations=profile.ls_iterations,
-        reference_path=args.reference_path,
-        reference_stride=1,
-        actor_history_len=10,
-        reference_residual_control=True,
-        reference_residual_scale=0.5,
+        **frozen_e008_environment_kwargs(args.reference_path),
     )
     torso_body_id, parameters = torso_wrench_parameters_from_environment(env)
     provenance = frozen_provenance(
         checkpoint=args.checkpoint,
         reference=args.reference_path,
-        expected_checkpoint_sha256=args.checkpoint_sha256,
-        expected_reference_sha256=args.reference_sha256,
-        solver_profile=args.solver_profile,
         torso_body_id=torso_body_id,
     )
     if int(env.mj_model.opt.iterations) != profile.iterations or int(
@@ -408,7 +484,9 @@ def main() -> None:
         raise RuntimeError("reference body slots do not include torso_link") from error
     if torso_slot != 7:
         raise RuntimeError("torso_link must occupy frozen reference body slot 7")
-    actor, actor_params, normalizer_state = _load_policy(env, args.checkpoint, args.seed)
+    actor, actor_params, residual_actor, normalizer_state = load_frozen_e008_policy(
+        env, args.checkpoint
+    )
     normalizer = Normalizer(env.actor_frame_obs_dim)
 
     def action_fn(state: Any) -> jax.Array:
@@ -416,8 +494,15 @@ def main() -> None:
             normalizer, normalizer_state, state.obs
         ).astype(jnp.float32)
         return scale_policy_action(
-            actor.apply(actor_params, normalized).astype(jnp.float64), 1.0
-        )
+            evaluate_frozen_e008_action(
+                actor,
+                actor_params,
+                normalized,
+                residual_actor=residual_actor,
+                treatment_frame_dim=env.actor_frame_obs_dim,
+            ),
+            FROZEN_ASSISTANCE_SCALE,
+        ).astype(jnp.float64)
 
     phase_results: dict[int, dict[str, Any]] = {}
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -445,7 +530,7 @@ def main() -> None:
             torso_body_id=torso_body_id,
             torso_slot=torso_slot,
             parameters=parameters,
-            scale=args.assistance_scale,
+            scale=FROZEN_ASSISTANCE_SCALE,
             profile=profile,
         )
         unassisted_telemetry = summarize_wrench_trace(
@@ -466,6 +551,10 @@ def main() -> None:
             "unassisted_wrench": unassisted_telemetry,
             "assisted_wrench": assisted_telemetry,
             "paired_reset": "single-identical-exact-reference-state",
+            "unassisted_matches_registered_e008": (
+                unassisted["steps"]
+                == EXPECTED_UNASSISTED_SURVIVAL[PHASES.index(phase)]
+            ),
         }
     assisted_summaries = {
         phase: phase_results[phase]["assisted"] for phase in PHASES
@@ -483,23 +572,24 @@ def main() -> None:
             "frequency_hz": parameters.frequency_hz,
             "force_cap": parameters.force_cap,
             "torque_cap": parameters.torque_cap,
-            "assistance_scale": args.assistance_scale,
+            "assistance_scale": FROZEN_ASSISTANCE_SCALE,
         },
         "results": {str(phase): phase_results[phase] for phase in PHASES},
         "unassisted_phase_grid": build_phase_grid_payload(
             unassisted_summaries,
             checkpoint_sha256=provenance["checkpoint_sha256"],
             reference_sha256=provenance["reference_sha256"],
-            solver_profile=args.solver_profile,
+            solver_profile=FROZEN_SOLVER_PROFILE,
         ),
         "assisted_phase_grid": build_phase_grid_payload(
             assisted_summaries,
             checkpoint_sha256=provenance["checkpoint_sha256"],
             reference_sha256=provenance["reference_sha256"],
-            solver_profile=args.solver_profile,
+            solver_profile=FROZEN_SOLVER_PROFILE,
         ),
+        "baseline_valid": baseline_is_valid(unassisted_summaries),
         "passes_all_suffix_gate": passes_oracle_gate(
-            assisted_summaries, assisted_telemetry
+            unassisted_summaries, assisted_summaries, assisted_telemetry
         ),
     }
     _write_json_atomically(args.output, document)
