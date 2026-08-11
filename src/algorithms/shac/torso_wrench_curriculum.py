@@ -1,0 +1,129 @@
+"""Pure schedule and resume contract for analytic torso assistance."""
+
+from __future__ import annotations
+
+import math
+
+import jax
+import jax.numpy as jp
+
+
+DISABLED_ASSISTANCE_SETTINGS = (False, 0, 1, 0.0)
+
+
+def assistance_scale_at_step(
+    step: jax.Array | int,
+    *,
+    start_step: int,
+    end_step: int,
+) -> jax.Array:
+    """Return the clipped linear one-to-zero assistance schedule."""
+    progress = (jp.asarray(step, dtype=jp.float32) - float(start_step)) / float(
+        end_step - start_step
+    )
+    return jp.clip(1.0 - progress, 0.0, 1.0)
+
+
+def sample_assistance_scales(
+    key: jax.Array,
+    *,
+    num_envs: int,
+    scheduled_scale: jax.Array | float,
+    zero_fraction: float,
+) -> jax.Array:
+    """Sample one fixed assistance scale per environment and unroll."""
+    held_out = jax.random.uniform(key, (num_envs,)) < zero_fraction
+    scale = jp.asarray(scheduled_scale, dtype=jp.float32)
+    return jp.where(held_out, jp.zeros_like(scale), scale)
+
+
+def validate_torso_wrench_assistance_configuration(
+    *,
+    enabled: bool,
+    start_step: int,
+    end_step: int,
+    zero_fraction: float,
+    env_variant: str,
+) -> None:
+    """Fail closed on malformed or unsupported assistance settings."""
+    if not isinstance(enabled, bool):
+        raise ValueError("torso_wrench_assistance must be boolean")
+    if (
+        isinstance(start_step, bool)
+        or not isinstance(start_step, int)
+        or start_step < 0
+    ):
+        raise ValueError("start_step must be a non-negative integer")
+    if isinstance(end_step, bool) or not isinstance(end_step, int):
+        raise ValueError("end_step must be an integer")
+    if end_step <= start_step:
+        raise ValueError("end_step must be greater than start_step")
+    if (
+        isinstance(zero_fraction, bool)
+        or not isinstance(zero_fraction, (int, float))
+        or not math.isfinite(zero_fraction)
+        or not 0.0 <= zero_fraction <= 1.0
+    ):
+        raise ValueError("zero_fraction must be finite and in [0, 1]")
+    if enabled and not env_variant.startswith("g1_tracking"):
+        raise ValueError("torso wrench assistance requires a G1 tracking environment")
+
+
+def resolve_torso_wrench_assistance_resume_settings(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested_enabled: bool,
+    requested_start_step: int,
+    requested_end_step: int,
+    requested_zero_fraction: float,
+    allow_change: bool,
+) -> tuple[bool, int, int, float]:
+    """Restore an active curriculum or admit one explicitly authorized change."""
+    if not isinstance(allow_change, bool):
+        raise ValueError("allow_resume_torso_wrench_assistance_change must be boolean")
+    requested = (
+        requested_enabled,
+        requested_start_step,
+        requested_end_step,
+        float(requested_zero_fraction),
+    )
+    if not resumed_hparams:
+        return requested
+
+    resumed_enabled = resumed_hparams.get("torso_wrench_assistance", False)
+    if not isinstance(resumed_enabled, bool):
+        raise ValueError(
+            "torso wrench assistance checkpoint contains invalid resume metadata"
+        )
+    if resumed_enabled:
+        required = {
+            "torso_wrench_assistance_start_step",
+            "torso_wrench_assistance_end_step",
+            "torso_wrench_assistance_zero_fraction",
+        }
+        if not required.issubset(resumed_hparams):
+            raise ValueError(
+                "active torso wrench assistance requires complete resume metadata"
+            )
+    resumed = (
+        resumed_enabled,
+        resumed_hparams.get("torso_wrench_assistance_start_step", 0),
+        resumed_hparams.get("torso_wrench_assistance_end_step", 1),
+        resumed_hparams.get("torso_wrench_assistance_zero_fraction", 0.0),
+    )
+    validate_torso_wrench_assistance_configuration(
+        enabled=resumed[0],
+        start_step=resumed[1],
+        end_step=resumed[2],
+        zero_fraction=resumed[3],
+        env_variant="g1_tracking_resume",
+    )
+    resumed = (resumed[0], resumed[1], resumed[2], float(resumed[3]))
+    if requested == DISABLED_ASSISTANCE_SETTINGS and not allow_change:
+        return resumed
+    if requested != resumed and not allow_change:
+        raise ValueError(
+            "torso wrench assistance settings must match the checkpoint unless "
+            "allow_resume_torso_wrench_assistance_change is enabled"
+        )
+    return requested
