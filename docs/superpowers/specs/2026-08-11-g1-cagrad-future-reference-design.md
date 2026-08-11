@@ -55,8 +55,11 @@ min(current_phase + k * reference_stride, reference_length - 1)
 At that index, gather the 29 reference joint positions and 29 reference joint
 velocities in actor joint order. Append each 58-value command, in offset order,
 after the legacy 154-value actor frame. Appending preserves every legacy input
-index. The treatment frame therefore has `154 + 3 * 58 = 328` values. The
-critic observation remains unchanged at 286 values.
+index within a frame. The treatment frame therefore has
+`154 + 3 * 58 = 328` values. E008 stacks ten frames, so its full actor input
+grows from `10 * 154 = 1,540` to `10 * 328 = 3,280`; the ten legacy frame
+blocks retain their order inside the expanded layout. The critic observation
+remains unchanged at 286 values.
 
 Future commands receive no observation noise. Existing current-state noise is
 unchanged. Generalize the existing 154-value training-noise boundary to accept
@@ -71,29 +74,35 @@ frame and never wraps or teleports.
 Resume the exact E008 final TrainState at step `1,179,648`, checkpoint SHA-256
 `da661e4bec6fbbd578face31ea2129e00c01d985cc6308e20473db4d9055fe3c`.
 The migration is allowed only when the saved actor uses the legacy 154-value
-frame, history length is one, and the requested suffix is exactly the declared
-future-reference layout. Any other observation mismatch is an error.
+frame, history length is exactly ten, and the requested suffix is exactly the
+declared future-reference layout. Any other observation mismatch is an error.
 
 Perform one explicit append-only migration:
 
-- pad the actor's first-layer input kernel with zero rows for all 174 new
-  inputs, leaving every existing parameter byte unchanged;
-- pad the corresponding Adam first- and second-moment leaves with zero rows;
+- reshape the actor's first-layer input kernel into ten legacy frame blocks,
+  scatter each 154-row block into the first 154 rows of its corresponding
+  328-row treatment block, and zero all 174 new rows per block, leaving every
+  existing parameter byte unchanged;
+- apply the identical blockwise scatter to the corresponding Adam first- and
+  second-moment leaves, with zeros in every new row;
 - retain the normalizer's legacy mean and variance exactly, and initialize the
   new dimensions from deterministic mean and variance over the complete
   clamped reference-preview table, using the saved scalar count;
-- rebuild the saved environment actor observations, bootstrap observations,
-  and history from their unchanged physical data and phase information;
+- expand the saved environment actor history and bootstrap-history blocks by
+  retaining every legacy value and filling each future-command suffix from
+  the deterministic clamped reference table. Infer historical reference
+  phases from the saved current phase, reference stride, and episode step;
+  frames preceding the latest reset reuse that reset phase;
 - leave critic parameters, target critic, critic optimizer, critic normalizer,
   PRNG state, simulator state, and every non-observation training leaf
   unchanged.
 
 Before training, write a migration-equivalence artifact. On a fixed batch
-reconstructed from the saved environment state, the legacy 154 inputs and
-normalization must be exact, all new actor-kernel and optimizer rows must be
-zero, all new normalizer values must be finite, and migrated actor outputs must
-match E008 within `1e-7` absolute and relative tolerance. Failure is invalid
-execution, not a fresh initialization fallback.
+reconstructed from the saved environment state, all ten legacy 154-value frame
+blocks and their normalization must be exact, all new actor-kernel and
+optimizer rows must be zero, all new normalizer values must be finite, and
+migrated actor outputs must match E008 within `1e-7` absolute and relative
+tolerance. Failure is invalid execution, not a fresh initialization fallback.
 
 ## Training And Experiment Contract
 
