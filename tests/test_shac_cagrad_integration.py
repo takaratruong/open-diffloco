@@ -172,6 +172,7 @@ def test_train_wires_residual_preview_through_existing_frozen_boundary():
     assert '"actor_residual_preview_adapter": (' in source
     assert '"actor_residual_preview_hidden": (' in source
     assert '"residual_adapter_migration.json"' in source
+    assert '"flax_residual_preview"' in source
 
 
 def test_train_wires_native_rmr_preview_migration_and_parent_action():

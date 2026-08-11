@@ -2920,7 +2920,9 @@ def train(
         "actor_zero_output": actor_zero_output,
         "source_actor_policy": source_actor_policy is not None,
         "actor_kind": (
-            "full_rmr"
+            "flax_residual_preview"
+            if actor_residual_preview_adapter
+            else "full_rmr"
             if initial_full_actor_policy is not None
             else "bounded_rmr_residual"
             if source_actor_policy is not None
