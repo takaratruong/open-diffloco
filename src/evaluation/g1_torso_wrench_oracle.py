@@ -170,22 +170,23 @@ def compute_torso_wrench(
         _finite_vector(reference_angular_velocity)
         - _finite_vector(actual_angular_velocity),
     )
-    force_yaw = (
-        parameters.translational_kp * position_error
-        + parameters.translational_kd * linear_velocity_error
+    force_yaw = _bounded_pd_response(
+        proportional_error=position_error,
+        derivative_error=linear_velocity_error,
+        proportional_gain=parameters.translational_kp,
+        derivative_gain=parameters.translational_kd,
+        maximum_norm=parameters.force_cap,
     )
-    torque_yaw = (
-        parameters.rotational_kp * orientation_error
-        + parameters.rotational_kd * angular_velocity_error
+    torque_yaw = _bounded_pd_response(
+        proportional_error=orientation_error,
+        derivative_error=angular_velocity_error,
+        proportional_gain=parameters.rotational_kp,
+        derivative_gain=parameters.rotational_kd,
+        maximum_norm=parameters.torque_cap,
     )
     force_world = _quaternion_apply(yaw_quaternion, force_yaw)
     torque_world = _quaternion_apply(yaw_quaternion, torque_yaw)
-    bounded = jp.concatenate(
-        (
-            _cap_norm(force_world, parameters.force_cap),
-            _cap_norm(torque_world, parameters.torque_cap),
-        )
-    )
+    bounded = jp.concatenate((force_world, torque_world))
     bounded_scale = jp.clip(_finite_vector(jp.asarray(scale)), 0.0, 1.0)
     zero = jp.zeros(6, dtype=bounded.dtype)
     return jp.where(bounded_scale == 0.0, zero, bounded * bounded_scale)
@@ -220,11 +221,30 @@ def _safe_norm(vector: jax.Array) -> jax.Array:
     return maximum * jp.sqrt(jp.sum(jp.square(finite_vector / denominator)))
 
 
-def _cap_norm(vector: jax.Array, maximum_norm: float) -> jax.Array:
-    finite_vector = _finite_vector(vector)
-    norm = _safe_norm(finite_vector)
-    scale = jp.minimum(1.0, maximum_norm / jp.maximum(norm, 1e-12))
-    return finite_vector * scale
+def _bounded_pd_response(
+    *,
+    proportional_error: jax.Array,
+    derivative_error: jax.Array,
+    proportional_gain: float,
+    derivative_gain: float,
+    maximum_norm: float,
+) -> jax.Array:
+    """Compute a capped PD response without forming an overflowing demand."""
+    proportional_error = _finite_vector(proportional_error)
+    derivative_error = _finite_vector(derivative_error)
+    error_scale = jp.maximum(
+        jp.max(jp.abs(proportional_error)),
+        jp.max(jp.abs(derivative_error)),
+    )
+    denominator = jp.where(error_scale > 0.0, error_scale, 1.0)
+    normalized_demand = (
+        proportional_gain * (proportional_error / denominator)
+        + derivative_gain * (derivative_error / denominator)
+    )
+    demand_norm = _safe_norm(normalized_demand)
+    direction = normalized_demand / jp.where(demand_norm > 0.0, demand_norm, 1.0)
+    response_norm = jp.minimum(maximum_norm, error_scale * demand_norm)
+    return _finite_vector(direction * response_norm)
 
 
 def _unit_quaternion(quaternion: jax.Array) -> jax.Array:

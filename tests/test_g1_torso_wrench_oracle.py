@@ -199,6 +199,51 @@ class G1TorsoWrenchOracleTest(unittest.TestCase):
             self.parameters.torque_cap + 1e-5,
         )
 
+    def test_near_float_limit_force_error_remains_directionally_capped(self):
+        wrench = self._wrench(
+            reference_position=jp.array(
+                [1e38, -1e38, 0.0], dtype=jp.float32
+            )
+        )
+        force = np.asarray(wrench[:3])
+
+        self.assertTrue(np.isfinite(force).all())
+        np.testing.assert_allclose(
+            np.linalg.norm(force), self.parameters.force_cap, rtol=1e-6
+        )
+        np.testing.assert_allclose(
+            force / np.linalg.norm(force),
+            np.array([1.0, -1.0, 0.0]) / math.sqrt(2.0),
+            atol=1e-6,
+        )
+
+    def test_uncapped_pd_preserves_a_small_cancellation_residual(self):
+        velocity_residual = 1e-3
+        wrench = self._wrench(
+            reference_position=jp.array([1.0, 0.0, 0.0]),
+            reference_linear_velocity=jp.array(
+                [
+                    -self.parameters.translational_kp
+                    / self.parameters.translational_kd
+                    + velocity_residual,
+                    0.0,
+                    0.0,
+                ]
+            ),
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(wrench[:3]),
+            np.array(
+                [
+                    self.parameters.translational_kd * velocity_residual,
+                    0.0,
+                    0.0,
+                ]
+            ),
+            atol=1e-5,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

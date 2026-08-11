@@ -89,3 +89,92 @@ passed before the change: `3 passed in 0.37s`.
 None for Task 1. The later evaluator must call `write_torso_wrench` before each
 unchanged environment step, including the disabled path, so the target row is
 overwritten every policy step as designed.
+
+## Follow-up: float-limit PD overflow fix
+
+### Scope and root cause
+
+This follow-up changes only the Task 1 controller and its unit tests. A finite
+`float32` position error near `1e38` overflowed while forming
+`Kp * position_error`; `_finite_vector` then replaced the resulting infinity
+with zero before the norm cap could preserve its direction. Direct reproduction
+before the fix was:
+
+```bash
+conda run -n diffsim python -c '... reference_position=jp.array([1e38, 0.0, 0.0], dtype=jp.float32) ...'
+```
+
+```text
+wrench [0. 0. 0. 0. 0. 0.]
+force norm 0.0 force cap 10.0
+```
+
+The replacement first normalizes the finite proportional and derivative errors
+by their shared maximum magnitude, forms the bounded-gain demand at that safe
+scale, then restores only the capped magnitude. Thus a request that must
+saturate never forms the overflowing raw force or torque.
+
+### RED and GREEN evidence
+
+Added `test_near_float_limit_force_error_remains_directionally_capped`, which
+requires the `float32 [1e38, -1e38, 0]` request to remain finite, reach the
+force cap, and keep its normalized direction. Before the fix:
+
+```text
+1 failed, 7 passed in 5.03s
+```
+
+The first normalization attempt exposed an operator-ordering issue
+(`gain * error / scale` still overflowed before division). Evidence was:
+
+```text
+unsafe ordering [ inf -inf   0.]
+safe ordering [ 157.91367 -157.91367    0.     ]
+bounded [0. 0. 0.]
+```
+
+The final implementation divides before multiplying by the gain. During
+self-review, an additional cancellation-residual regression was added to prove
+that an uncapped low-norm PD demand is not double-scaled. Its RED run was:
+
+```text
+1 failed, 8 passed in 5.03s
+```
+
+After the one-line normalization-denominator correction, the oracle-only suite
+passed:
+
+```text
+.........                                                                [100%]
+9 passed in 4.80s
+```
+
+### Final verification
+
+Ran exactly:
+
+```bash
+conda run -n diffsim python -m pytest tests/test_g1_torso_wrench_oracle.py tests/test_g1_tracking_controller.py -q
+conda run -n diffsim ruff check src/evaluation/g1_torso_wrench_oracle.py tests/test_g1_torso_wrench_oracle.py
+conda run -n diffsim python -m py_compile src/evaluation/g1_torso_wrench_oracle.py tests/test_g1_torso_wrench_oracle.py
+git diff --check
+```
+
+Exact relevant output:
+
+```text
+............                                                             [100%]
+12 passed in 4.77s
+
+All checks passed!
+```
+
+`py_compile` and `git diff --check` exited zero.
+
+### Follow-up self-review and concerns
+
+The response helper is still pure and JAX-compatible, caps force and torque in
+the yaw frame before returning them to world coordinates, and does not change
+the frozen gain, cap, body-resolution, or rollout interfaces. The new residual
+test guards against the only extra scaling edge case introduced by the
+normalization. No concerns remain for this scoped follow-up.
