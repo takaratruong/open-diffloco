@@ -88,6 +88,20 @@ def test_two_shards_merge_like_one_population_with_finite_aware_means():
     )
 
 
+def test_missing_phase_bin_marks_finalized_gradients_invalid():
+    accumulator = accumulate_phase_gradients(
+        {"w": jnp.arange(8, dtype=jnp.float32).reshape(4, 2)},
+        jnp.array([0, 100, 200, 300]),
+        phase_count=500,
+        bin_count=5,
+    )
+
+    _, counts, valid = finalize_phase_gradients(accumulator)
+
+    np.testing.assert_array_equal(counts, np.array([1, 1, 1, 1, 0]))
+    assert not bool(valid)
+
+
 def test_identical_task_gradients_produce_collinear_combined_direction():
     task = jnp.array([2.0, -3.0, 4.0])
     task_gradients = {"w": jnp.broadcast_to(task, (5, task.size))}
@@ -104,6 +118,16 @@ def test_identical_task_gradients_produce_collinear_combined_direction():
     assert bool(result.valid)
 
 
+def test_nonfinite_task_gradient_marks_cagrad_result_invalid():
+    task_gradients = jnp.eye(5, dtype=jnp.float32).at[2, 3].set(jnp.nan)
+
+    result = combine_cagrad(
+        {"w": task_gradients}, alpha=0.5, iterations=32
+    )
+
+    assert not bool(result.valid)
+
+
 @pytest.mark.parametrize("seed", [3, 10])
 def test_fixed_frank_wolfe_matches_scipy_simplex_oracle(seed):
     rng = np.random.default_rng(seed)
@@ -111,7 +135,8 @@ def test_fixed_frank_wolfe_matches_scipy_simplex_oracle(seed):
     gram = matrix.T @ matrix
     uniform = np.full(5, 1.0 / 5)
     eps = 1e-8
-    coefficient = 0.5 * np.sqrt(uniform @ gram @ uniform)
+    alpha = 0.5
+    coefficient = alpha * np.sqrt(uniform @ gram @ uniform)
 
     def objective(weights):
         return (
@@ -129,9 +154,11 @@ def test_fixed_frank_wolfe_matches_scipy_simplex_oracle(seed):
     )
     assert oracle.success, oracle.message
 
-    result = combine_cagrad(
-        {"w": jnp.asarray(matrix.T)}, alpha=0.5, iterations=32
-    )
+    task_gradients = matrix.T
+    with jax.default_matmul_precision("highest"):
+        result = combine_cagrad(
+            {"w": jnp.asarray(task_gradients)}, alpha=alpha, iterations=32
+        )
 
     np.testing.assert_allclose(result.gram_matrix, gram, rtol=1e-5, atol=1e-5)
     assert all(
@@ -140,5 +167,70 @@ def test_fixed_frank_wolfe_matches_scipy_simplex_oracle(seed):
     )
     assert abs(float(jnp.sum(result.weights)) - 1.0) <= 1e-6
     assert float(jnp.min(result.weights)) >= 0.0
+    assert float(jnp.max(result.weights)) <= 1.0
     assert abs(float(result.objective) - oracle.fun) <= 1e-4
+
+    oracle_weighted_gradient = oracle.x @ task_gradients
+    uniform_gradient = np.mean(task_gradients, axis=0)
+    unscaled_oracle_gradient = (
+        uniform_gradient
+        + coefficient
+        * oracle_weighted_gradient
+        / (np.linalg.norm(oracle_weighted_gradient) + eps)
+    )
+    oracle_combined_gradient = unscaled_oracle_gradient / (1.0 + alpha**2)
+    np.testing.assert_allclose(
+        result.combined_gradient["w"],
+        oracle_combined_gradient,
+        rtol=5e-3,
+        atol=5e-3,
+    )
+    assert not np.allclose(
+        uniform_gradient,
+        oracle_combined_gradient,
+        rtol=5e-3,
+        atol=5e-3,
+    )
+    assert not np.allclose(
+        unscaled_oracle_gradient,
+        oracle_combined_gradient,
+        rtol=5e-3,
+        atol=5e-3,
+    )
+
+    task_norms = np.sqrt(np.maximum(np.diag(gram), 0.0))
+    expected_cosine_matrix = gram / (
+        task_norms[:, None] * task_norms[None, :] + eps
+    )
+    np.testing.assert_allclose(
+        result.cosine_matrix,
+        expected_cosine_matrix,
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    weights = np.asarray(result.weights)
+    objective_gradient = (
+        gram @ uniform
+        + coefficient
+        * (gram @ weights)
+        / np.sqrt(weights @ gram @ weights + eps)
+    )
+    expected_dual_gap = weights @ objective_gradient - np.min(
+        objective_gradient
+    )
+    np.testing.assert_allclose(result.dual_gap, expected_dual_gap, atol=1e-5)
+    assert float(result.dual_gap) >= -1e-6
+
+    combined_gradient = np.asarray(result.combined_gradient["w"])
+    expected_uniform_combined_cosine = np.vdot(
+        uniform_gradient, combined_gradient
+    ) / (
+        np.linalg.norm(uniform_gradient) * np.linalg.norm(combined_gradient)
+        + eps
+    )
+    np.testing.assert_allclose(
+        result.uniform_combined_cosine,
+        expected_uniform_combined_cosine,
+        atol=1e-6,
+    )
     assert bool(result.valid)
