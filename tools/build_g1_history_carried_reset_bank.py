@@ -15,7 +15,6 @@ import numpy as np
 
 PROTOCOL = "g1-history-carried-reset-bank-v1"
 SOURCE_PHASES = (0, 100, 200, 300, 400)
-SOURCE_SURVIVAL = (75, 63, 94, 74, 45)
 HISTORY_LEN = 10
 LOOKAHEAD_STEPS = (4, 8, 12)
 RESIDUAL_HIDDEN = 256
@@ -63,6 +62,27 @@ def source_rollout_step_limit(
     ):
         raise ValueError("source phase must index a reference transition")
     return reference_transitions - source_phase
+
+
+def validate_observed_survival(
+    observed: tuple[int, ...], *, source_count: int
+) -> tuple[int, ...]:
+    """Admit any terminal trace long enough for the fixed 29-step band."""
+    if len(observed) != source_count:
+        raise ValueError(
+            f"observed survival must contain exactly {source_count} "
+            "source values"
+        )
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 29
+        for value in observed
+    ):
+        raise ValueError(
+            "every observed source survival must be an integer at least 29"
+        )
+    return observed
 
 
 def _finite_array(
@@ -319,8 +339,7 @@ def collect_bank(
     reference_path: Path,
     *,
     seed: int,
-    expected_survival: tuple[int, ...] = SOURCE_SURVIVAL,
-) -> dict[str, np.ndarray]:
+) -> tuple[dict[str, np.ndarray], tuple[int, ...]]:
     """Collect the fixed E008 preterminal bank with the evaluation actor."""
     import jax.numpy as jnp
 
@@ -400,19 +419,16 @@ def collect_bank(
             )
             sources.append(source)
             observed_survival.append(survival)
-    if tuple(observed_survival) != expected_survival:
-        raise ValueError(
-            "same-GPU source survival does not match expected contract: "
-            f"observed {tuple(observed_survival)}, "
-            f"expected {expected_survival}"
-        )
+    observed = validate_observed_survival(
+        tuple(observed_survival), source_count=len(SOURCE_PHASES)
+    )
     names = tuple(sources[0])
     arrays = {
         name: np.concatenate([source[name] for source in sources], axis=0)
         for name in names
     }
     arrays["termination_thresholds"] = TERMINATION_THRESHOLDS.copy()
-    return arrays
+    return arrays, observed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -424,12 +440,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-npz", type=Path, required=True)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument(
-        "--expected-survival",
-        type=int,
-        nargs=5,
-        default=SOURCE_SURVIVAL,
-    )
     return parser
 
 
@@ -446,16 +456,15 @@ def main() -> None:
         actual = _sha256(path)
         if actual != expected:
             raise ValueError(f"SHA-256 mismatch for {path}: {actual}")
-    arrays = collect_bank(
+    arrays, observed_survival = collect_bank(
         checkpoint_path,
         reference_path,
         seed=args.seed,
-        expected_survival=tuple(args.expected_survival),
     )
     summary = validate_history_bank(
         arrays,
         expected_source_phases=SOURCE_PHASES,
-        expected_survival=tuple(args.expected_survival),
+        expected_survival=observed_survival,
         history_len=HISTORY_LEN,
         frame_dim=int(arrays["actor_obs_history"].shape[-1]),
     )

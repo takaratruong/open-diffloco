@@ -60,16 +60,16 @@ Each row stores:
 - the action subsequently selected by E008;
 - termination errors and thresholds for admission checks.
 
-The collector observes every complete suffix before admitting a bank. A GPU-7
-preflight of the exact E008 checkpoint measures same-realization survival
-`75/63/94/74/45`; the archived grid was `70/63/95/70/44` because its phases
-were evaluated across GPU realizations. E010 pins the same-GPU vector as its
-causal control and retains the archived vector as secondary historical evidence.
-The collector rejects any different source count, any row that is non-finite or
+The collector observes every complete suffix before admitting a bank. Two
+GPU-7 preflights of the exact E008 checkpoint measure `75/63/94/74/45` and
+`63/63/95/69/44`, demonstrating process-level MJX contact nondeterminism even
+on one physical GPU. Exact survival is therefore provenance, not an admission
+invariant. Every source must terminate and survive at least 29 transitions so
+the fixed band exists. The collector rejects any row that is non-finite or
 already outside a hard termination threshold, any phase discontinuity, any
 unnormalized root quaternion, or any last history frame that differs from a
 fresh observation of the stored physical state and previous action. It writes
-the NPZ atomically and records its SHA-256.
+the NPZ atomically; its SHA-256 freezes the exact sampled trajectory states.
 
 ## Reset Semantics
 
@@ -88,14 +88,14 @@ probability.
 
 ## Evaluation And Decision
 
-Every checkpoint is evaluated replay-free on the unchanged registered starts
-and GPU 7. E008's primary same-GPU control vector is `75/63/94/74/45`, with
-minimum/median/mean `45/74/70.2`; its archived cross-GPU vector is
-`70/63/95/70/44`, with `44/70/68.4`. The treatment advances only if its
-selected checkpoint:
+Every checkpoint is evaluated replay-free on the unchanged registered starts.
+E008's archived control vector is `70/63/95/70/44`, with minimum/median/mean
+`44/70/68.4`. Because individual contact traces are not repeatable, the selected
+treatment checkpoint is also evaluated against E008 in a paired parent-versus-
+treatment process on the same GPU. The treatment advances only if it:
 
-1. preserves or exceeds every same-GPU E008 phase survival;
-2. lexicographically improves minimum, then median, then mean survival;
+1. clears the archived E008 phase floors and lexicographic key;
+2. improves the paired parent comparison rather than only an unpaired replay;
 3. has finite training state and nonzero authorized adapter updates;
 4. preserves the frozen parent actor and actor normalizer exactly; and
 5. restores the registered carried context exactly in a reset audit.

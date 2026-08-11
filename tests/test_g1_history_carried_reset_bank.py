@@ -6,6 +6,7 @@ import pytest
 from tools.build_g1_history_carried_reset_bank import (
     select_preterminal_indices,
     source_rollout_step_limit,
+    validate_observed_survival,
     validate_history_bank,
 )
 
@@ -77,6 +78,16 @@ def test_source_rollout_observes_full_suffix_instead_of_expected_count() -> None
     assert source_rollout_step_limit(499, 400) == 99
     with pytest.raises(ValueError, match="source phase"):
         source_rollout_step_limit(499, 499)
+
+
+def test_observed_survival_only_requires_the_fixed_preterminal_band() -> None:
+    observed = (63, 63, 95, 69, 44)
+
+    assert validate_observed_survival(observed, source_count=5) == observed
+    with pytest.raises(ValueError, match="at least 29"):
+        validate_observed_survival((28, 63, 95, 69, 44), source_count=5)
+    with pytest.raises(ValueError, match="5 source"):
+        validate_observed_survival((63, 63), source_count=5)
 
 
 def test_valid_history_bank_preserves_exact_source_contract() -> None:
