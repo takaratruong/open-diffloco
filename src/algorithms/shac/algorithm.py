@@ -85,6 +85,10 @@ from src.algorithms.shac.residual_preview_adapter import (
     residual_adapter_migration_report,
     residual_muon_migration_report,
 )
+from src.algorithms.shac.resume_randomness import (
+    apply_resume_randomness_setting,
+    persist_resume_randomness_audit,
+)
 from src.evaluation.g1_torso_wrench_oracle import (
     compute_environment_torso_wrench,
     torso_wrench_parameters_from_environment,
@@ -1045,6 +1049,7 @@ def train(
     diagnose: bool = False,
     seed: int = 0,
     resume_from: str = None,
+    resume_random_seed: int | None = None,
     checkpoint_interval: int = 10_000,
     max_episode_length: int = 5000,
     actor_history_len: int = 10,
@@ -1153,6 +1158,8 @@ def train(
         diagnose: Enable detailed diagnostic logging
         seed: Random seed
         resume_from: Path to checkpoint .pkl file or training folder to resume from
+        resume_random_seed: Optional independent RNG stream for exact resume.
+                            Changes only trainer and per-environment RNG keys.
         checkpoint_interval: Save checkpoint every N steps
         actor_bootstrap_delay_steps: Environment steps before the actor uses
                                      target-critic terminal value estimates.
@@ -3094,6 +3101,22 @@ def train(
                     reference_length=env.reference_length,
                 )
             )
+    resumed_state, resume_randomness_report = (
+        apply_resume_randomness_setting(
+            resumed_state,
+            seed=resume_random_seed,
+        )
+    )
+    if resume_randomness_report is not None:
+        persist_resume_randomness_audit(
+            save_dir,
+            resume_randomness_report,
+        )
+        print(
+            "Rekeyed resumed trainer and environment randomness with "
+            f"resume_random_seed={resume_random_seed}; all non-RNG state "
+            "is exact"
+        )
     if actor_residual_preview_adapter and resumed_state is None:
         raise ValueError(
             "residual preview adapter requires an explicit resumed checkpoint"
@@ -3219,6 +3242,7 @@ def train(
         "curriculum_grace": curriculum_grace,
         "curriculum_steps": curriculum_steps,
         "seed": seed,
+        "resume_random_seed": resume_random_seed,
         "best_reward": best_reward,
         "max_episode_length": max_episode_length,
         "actor_history_len": actor_history_len,

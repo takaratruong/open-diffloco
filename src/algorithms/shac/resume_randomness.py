@@ -54,6 +54,23 @@ def rekey_resumed_train_state(state: Any, *, seed: int) -> Any:
     )
 
 
+def apply_resume_randomness_setting(
+    state: Any | None,
+    *,
+    seed: int | None,
+) -> tuple[Any | None, dict[str, object] | None]:
+    """Apply one explicit resume rekey, preserving legacy exact resume."""
+    if seed is None:
+        return state, None
+    if state is None:
+        raise ValueError("resume_random_seed requires a resumed checkpoint")
+    candidate = rekey_resumed_train_state(state, seed=seed)
+    audit = resume_randomness_audit(state, candidate, seed=seed)
+    if not audit["valid"]:
+        raise ValueError("resume randomness audit failed")
+    return candidate, audit
+
+
 def _array_sha256(value: Any) -> str:
     array = np.asarray(value)
     digest = hashlib.sha256()

@@ -100,6 +100,38 @@ def test_resume_rekey_is_deterministic_disjoint_and_preserves_non_rng_state() ->
     assert "key" not in audit
 
 
+def test_resume_randomness_setting_is_default_off_and_requires_resume() -> None:
+    from src.algorithms.shac.resume_randomness import (
+        apply_resume_randomness_setting,
+    )
+
+    original = _state()
+    unchanged, audit = apply_resume_randomness_setting(original, seed=None)
+    assert unchanged is original
+    assert audit is None
+
+    with pytest.raises(ValueError, match="requires a resumed checkpoint"):
+        apply_resume_randomness_setting(None, seed=1)
+
+    changed, audit = apply_resume_randomness_setting(original, seed=1)
+    assert audit is not None
+    assert audit["valid"] is True
+    assert changed is not original
+
+
+def test_train_exposes_and_persists_opt_in_resume_randomness() -> None:
+    import inspect
+
+    from src.algorithms.shac.algorithm import train
+
+    parameters = inspect.signature(train).parameters
+    assert parameters["resume_random_seed"].default is None
+    source = inspect.getsource(train)
+    assert "apply_resume_randomness_setting(" in source
+    assert "persist_resume_randomness_audit(" in source
+    assert '"resume_random_seed": resume_random_seed' in source
+
+
 @pytest.mark.parametrize(
     ("seed", "message"),
     [
