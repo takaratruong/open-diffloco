@@ -72,13 +72,31 @@ def build_rmr_action_noise_kwargs(
     resume_from: str | Path,
 ) -> dict:
     """Change only E008's endpoint and authorized fixed vector noise schedule."""
+    return build_action_noise_continuation_kwargs(
+        profile_name,
+        reference_path,
+        seed,
+        resume_from,
+        action_noise_std=RMR_ACTION_STD,
+    )
+
+
+def build_action_noise_continuation_kwargs(
+    profile_name: str,
+    reference_path: str | Path,
+    seed: int,
+    resume_from: str | Path,
+    *,
+    action_noise_std: object,
+) -> dict:
+    """Build the shared exact-E008 fixed-action-noise continuation."""
     kwargs = build_zero_bootstrap_kwargs(
         profile_name, reference_path, seed, resume_from
     )
     kwargs.update(
         total_steps=RMR_NOISE_END_STEP,
-        action_noise_std_start=RMR_ACTION_STD,
-        action_noise_std_end=RMR_ACTION_STD,
+        action_noise_std_start=action_noise_std,
+        action_noise_std_end=action_noise_std,
         action_noise_schedule_steps=RMR_NOISE_END_STEP,
         allow_resume_action_noise_change=True,
     )
@@ -236,14 +254,23 @@ def _validate_cagrad_row(row: dict[str, object], step: int) -> None:
         raise ValueError(f"checkpoint {step} has invalid CAGrad telemetry")
 
 
-def validate_training_artifacts(run_directory: Path) -> dict[str, Any]:
-    """Validate the exact 32-update RMR-noise treatment artifacts."""
+def validate_action_noise_training_artifacts(
+    run_directory: Path,
+    *,
+    expected_action_noise_std: object,
+    protocol: str,
+) -> dict[str, Any]:
+    """Validate one exact 32-update fixed-action-noise treatment."""
     run_directory = run_directory.resolve()
     hparams = json.loads((run_directory / "hparams.json").read_text())
     expected_hparams = {
         "total_steps": RMR_NOISE_END_STEP,
-        "action_noise_std_start": action_noise_std_hparam(RMR_ACTION_STD),
-        "action_noise_std_end": action_noise_std_hparam(RMR_ACTION_STD),
+        "action_noise_std_start": action_noise_std_hparam(
+            expected_action_noise_std
+        ),
+        "action_noise_std_end": action_noise_std_hparam(
+            expected_action_noise_std
+        ),
         "action_noise_schedule_steps": RMR_NOISE_END_STEP,
         "allow_resume_action_noise_change": True,
         "actor_bootstrap_scale": 0.0,
@@ -293,7 +320,7 @@ def validate_training_artifacts(run_directory: Path) -> dict[str, Any]:
     for step in steps:
         _validate_cagrad_row(rows_by_step[step], step)
     return {
-        "protocol": "g1-rmr-action-noise-continuation-training-v1",
+        "protocol": protocol,
         "valid": True,
         "run_directory": str(run_directory),
         "update_count": 32,
@@ -301,6 +328,15 @@ def validate_training_artifacts(run_directory: Path) -> dict[str, Any]:
         "checkpoint_interval": CHECKPOINT_INTERVAL,
         "hparams": expected_hparams,
     }
+
+
+def validate_training_artifacts(run_directory: Path) -> dict[str, Any]:
+    """Validate the exact 32-update RMR-noise treatment artifacts."""
+    return validate_action_noise_training_artifacts(
+        run_directory,
+        expected_action_noise_std=RMR_ACTION_STD,
+        protocol="g1-rmr-action-noise-continuation-training-v1",
+    )
 
 
 def main() -> None:
