@@ -748,6 +748,44 @@ def actor_bootstrap_scale_at_step(
     return jp.where(step >= delay_steps, target, jp.zeros_like(target))
 
 
+def resolve_actor_bootstrap_resume_scale(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested_scale: float,
+    allow_change: bool,
+) -> float:
+    """Restore actor bootstrap scale or admit one explicit objective change."""
+    if not isinstance(allow_change, bool):
+        raise ValueError(
+            "allow_resume_actor_bootstrap_scale_change must be boolean"
+        )
+    if (
+        isinstance(requested_scale, bool)
+        or not math.isfinite(requested_scale)
+        or requested_scale < 0.0
+    ):
+        raise ValueError("actor_bootstrap_scale must be finite and non-negative")
+    resumed_scale = (
+        1.0
+        if not resumed_hparams
+        else resumed_hparams.get("actor_bootstrap_scale", 1.0)
+    )
+    if (
+        isinstance(resumed_scale, bool)
+        or not math.isfinite(resumed_scale)
+        or resumed_scale < 0.0
+    ):
+        raise ValueError(
+            "checkpoint actor_bootstrap_scale must be finite and non-negative"
+        )
+    if resumed_scale != requested_scale and not allow_change:
+        raise ValueError(
+            "actor_bootstrap_scale must match the checkpoint unless "
+            "allow_resume_actor_bootstrap_scale_change is enabled"
+        )
+    return float(requested_scale if allow_change else resumed_scale)
+
+
 def _sha256_file(path: Path, block_size: int = 1024 * 1024) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -1125,6 +1163,7 @@ def train(
     adaptive_phase_alpha: float = 0.001,
     actor_bootstrap_scale: float = 1.0,
     actor_bootstrap_delay_steps: int = 0,
+    allow_resume_actor_bootstrap_scale_change: bool = False,
     actor_hidden: tuple[int, ...] = (512, 256, 128),
     actor_layer_norm: bool = True,
     actor_zero_output: bool = True,
@@ -1232,8 +1271,10 @@ def train(
         resume_random_seed: Optional independent RNG stream for exact resume.
                             Changes only trainer and per-environment RNG keys.
         checkpoint_interval: Save checkpoint every N steps
+        allow_resume_actor_bootstrap_scale_change: Explicitly permit changing
+            actor terminal-value scale when resuming a checkpoint.
         actor_bootstrap_delay_steps: Environment steps before the actor uses
-                                     target-critic terminal value estimates.
+            target-critic terminal value estimates.
 
     Returns:
         Tuple of (final_state, save_directory)
@@ -1339,6 +1380,18 @@ def train(
     if adaptive_phase_sampling and not env_variant.startswith("g1_tracking"):
         raise ValueError(
             "adaptive phase sampling requires G1 reference phases"
+        )
+    if (
+        isinstance(actor_bootstrap_scale, bool)
+        or not math.isfinite(actor_bootstrap_scale)
+        or actor_bootstrap_scale < 0.0
+    ):
+        raise ValueError(
+            "actor_bootstrap_scale must be finite and non-negative"
+        )
+    if not isinstance(allow_resume_actor_bootstrap_scale_change, bool):
+        raise ValueError(
+            "allow_resume_actor_bootstrap_scale_change must be boolean"
         )
     if (
         isinstance(actor_bootstrap_delay_steps, bool)
@@ -1472,6 +1525,11 @@ def train(
 
     if resume_from:
         resumed_state, resumed_hparams, resumed_step = load_checkpoint(resume_from)
+        actor_bootstrap_scale = resolve_actor_bootstrap_resume_scale(
+            resumed_hparams,
+            requested_scale=actor_bootstrap_scale,
+            allow_change=allow_resume_actor_bootstrap_scale_change,
+        )
         (
             actor_reference_lookahead_steps,
             future_reference_upgrade,
@@ -1669,9 +1727,6 @@ def train(
                 critic_per_env_grad_clip = resumed_hparams[
                     "critic_per_env_grad_clip"
                 ]
-            if "actor_bootstrap_scale" in resumed_hparams:
-                actor_bootstrap_scale = resumed_hparams["actor_bootstrap_scale"]
-
         validate_actor_cagrad_configuration(
             actor_cagrad=actor_cagrad,
             alpha=actor_cagrad_alpha,
@@ -3535,6 +3590,9 @@ def train(
         "adaptive_phase_alpha": adaptive_phase_alpha,
         "actor_bootstrap_scale": actor_bootstrap_scale,
         "actor_bootstrap_delay_steps": actor_bootstrap_delay_steps,
+        "allow_resume_actor_bootstrap_scale_change": (
+            allow_resume_actor_bootstrap_scale_change
+        ),
         "actor_hidden": list(actor_hidden),
         "actor_layer_norm": actor_layer_norm,
         "actor_zero_output": actor_zero_output,
