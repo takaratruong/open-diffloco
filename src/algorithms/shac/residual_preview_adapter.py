@@ -103,6 +103,7 @@ def apply_frozen_preview_residual(
     adapter_input_dim = int(
         _registered_adapter_arrays(params.adapter)[0].shape[0]
     )
+    conditioned_scale = None
     if adapter_input_dim == treatment_frame_dim + 1:
         leading_shape = frame.shape[:-1]
         if assistance_scale is None:
@@ -113,8 +114,9 @@ def apply_frozen_preview_residual(
                 raise ValueError("assistance scale shape must match observations")
             scale = jp.broadcast_to(scale, leading_shape)
         scale_valid = jp.isfinite(scale) & (scale >= 0.0) & (scale <= 1.0)
-        scale = jp.where(scale_valid, scale, jp.asarray(jp.nan, frame.dtype))
-        frame = jp.concatenate((frame, scale[..., None]), axis=-1)
+        conditioned_scale = jp.where(
+            scale_valid, scale, jp.asarray(jp.nan, frame.dtype)
+        )
     elif adapter_input_dim != treatment_frame_dim:
         raise ValueError("residual adapter input width is not registered")
     elif assistance_scale is not None:
@@ -123,7 +125,18 @@ def apply_frozen_preview_residual(
     parent_action = parent_actor.apply(
         frozen_parent, normalized_observations
     )
-    residual_action = residual_actor.apply(params.adapter, frame)
+    if conditioned_scale is None:
+        residual_action = residual_actor.apply(params.adapter, frame)
+    else:
+        dense0_kernel, dense0_bias, dense1_kernel, dense1_bias = (
+            _registered_adapter_arrays(params.adapter)
+        )
+        hidden = jp.matmul(frame, dense0_kernel[:-1]) + dense0_bias
+        hidden = hidden + conditioned_scale[..., None] * dense0_kernel[-1]
+        hidden = nn.elu(hidden)
+        residual_action = jp.tanh(
+            jp.matmul(hidden, dense1_kernel) + dense1_bias
+        )
     if residual_action.shape != parent_action.shape:
         raise ValueError("parent and residual actions must have matching shapes")
     return (

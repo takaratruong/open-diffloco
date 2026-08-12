@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import queue
 from types import SimpleNamespace
 
 import pytest
@@ -198,6 +199,46 @@ def test_worker_exit_without_queue_report_becomes_failure() -> None:
         False,
         "worker exited with code 9 without a report",
     )
+
+
+def test_worker_failure_terminates_paired_peer_immediately() -> None:
+    from tools.run_g1_assistance_observability_pair import (
+        collect_worker_results_fail_fast,
+    )
+
+    class Process:
+        def __init__(self, *, alive: bool, exitcode: int | None) -> None:
+            self.alive = alive
+            self.exitcode = exitcode
+            self.terminated = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            self.alive = False
+            self.exitcode = -15
+            self.terminated = True
+
+        def join(self) -> None:
+            self.alive = False
+            if self.exitcode is None:
+                self.exitcode = 0
+
+    result_queue: queue.Queue[tuple[str, bool, str]] = queue.Queue()
+    result_queue.put(("aware", False, "migration failed"))
+    aware = Process(alive=False, exitcode=1)
+    blind = Process(alive=True, exitcode=None)
+
+    results = collect_worker_results_fail_fast(
+        result_queue,
+        (("aware", aware), ("blind", blind)),
+        poll_seconds=0.0,
+    )
+
+    assert blind.terminated is True
+    assert ("aware", False, "migration failed") in results
+    assert ("blind", False, "worker exited with code -15 without a report") in results
 
 
 def test_zero_tail_selector_ranks_minimum_median_mean_then_earliest() -> None:

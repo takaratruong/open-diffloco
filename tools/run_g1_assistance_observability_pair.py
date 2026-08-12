@@ -745,6 +745,36 @@ def complete_worker_results(
     return completed
 
 
+def collect_worker_results_fail_fast(
+    result_queue,
+    workers,
+    *,
+    poll_seconds: float = 0.25,
+) -> list[tuple[str, bool, str]]:
+    """Collect paired workers while stopping the peer after any failure."""
+    worker_pairs = tuple(workers)
+    results: list[tuple[str, bool, str]] = []
+    while any(process.is_alive() for _, process in worker_pairs):
+        try:
+            result = result_queue.get(timeout=poll_seconds)
+        except queue.Empty:
+            continue
+        results.append(result)
+        if not result[1]:
+            for _, process in worker_pairs:
+                if process.is_alive():
+                    process.terminate()
+            break
+    for _, process in worker_pairs:
+        process.join()
+    while True:
+        try:
+            results.append(result_queue.get_nowait())
+        except queue.Empty:
+            break
+    return complete_worker_results(results, worker_pairs)
+
+
 def build_assistance_observability_pair_kwargs(
     profile_name: str,
     reference_path: str | Path,
@@ -945,16 +975,8 @@ def main() -> None:
     ]
     for process in processes:
         process.start()
-    for process in processes:
-        process.join()
-    results = []
-    while True:
-        try:
-            results.append(result_queue.get_nowait())
-        except queue.Empty:
-            break
-    results = complete_worker_results(
-        results,
+    results = collect_worker_results_fail_fast(
+        result_queue,
         tuple(zip(("aware", "blind"), processes, strict=True)),
     )
     failures = [result for result in results if not result[1]]

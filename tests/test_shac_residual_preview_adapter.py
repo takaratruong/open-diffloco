@@ -161,6 +161,44 @@ def test_conditioned_adapter_reads_scalar_without_changing_parent_input():
     assert bool(jnp.all(assisted_action > zero_action))
 
 
+def test_conditioned_adapter_keeps_legacy_projection_width() -> None:
+    from src.algorithms.shac.residual_preview_adapter import (
+        apply_frozen_preview_residual,
+        migrate_residual_adapter_assistance_conditioning,
+    )
+
+    parent_actor, residual_actor, params = _toy_policy()
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0), optax.adam(1e-3)
+    )
+    migrated_params, _, _ = migrate_residual_adapter_assistance_conditioning(
+        params=params,
+        optimizer_state=optimizer.init(params),
+        expected_input_dim=5,
+    )
+    observations = jnp.zeros((1, 15), dtype=jnp.float32)
+
+    graph = jax.make_jaxpr(
+        lambda obs, scale: apply_frozen_preview_residual(
+            parent_actor,
+            residual_actor,
+            migrated_params,
+            obs,
+            history_len=3,
+            treatment_frame_dim=5,
+            assistance_scale=scale,
+        )[2]
+    )(observations, jnp.asarray(0.0, dtype=jnp.float32))
+    dot_shapes = [
+        (equation.invars[0].aval.shape, equation.invars[1].aval.shape)
+        for equation in graph.jaxpr.eqns
+        if equation.primitive.name == "dot_general"
+    ]
+
+    assert ((1, 5), (5, 4)) in dot_shapes
+    assert ((1, 6), (6, 4)) not in dot_shapes
+
+
 def test_conditioned_adapter_rejects_scalar_shape_mismatch():
     from src.algorithms.shac.residual_preview_adapter import (
         FrozenPreviewResidualParams,
