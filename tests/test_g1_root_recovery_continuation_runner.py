@@ -27,6 +27,41 @@ def test_root_recovery_preflight_hashes_runtime_assets(tmp_path: Path) -> None:
         validate_runtime_assets(wrong, Path(DEFAULT_CONTROLLER_PATH))
 
 
+def test_root_recovery_preflight_binds_resume_consumed_asset_paths(
+    tmp_path: Path,
+) -> None:
+    from tools.run_g1_root_recovery_continuation import (
+        validate_consumed_resume_assets,
+    )
+
+    e012_hparams = Path(
+        "/home/ubuntu/projects/diffsim2real-lab/runs/E-20260811-012/"
+        "20260811T224802Z/seed-0/training_runs/shac_20260811_154806/hparams.json"
+    )
+    registered_reference = Path(
+        "/home/ubuntu/worktrees/open-diffloco/g1-rmr-50hz-20260805/"
+        "artifacts/E-20260808-000/reference/"
+        "dance1_subject2_f122_422_50hz.npz"
+    )
+
+    assets = validate_consumed_resume_assets(e012_hparams, registered_reference)
+
+    assert assets["reference_path"] == str(registered_reference.resolve())
+    assert assets["reference_sha256"] == (
+        "bf8c8b407062d1b309440f4c1787c345b04d79501ea75f615e5b41c0c5ebb6db"
+    )
+    assert assets["model_sha256"] == (
+        "5d76cf92f00dd49d6eb9fae38d7d38e46886848b602ac691051e886c3bcccfb1"
+    )
+
+    altered = json.loads(e012_hparams.read_text(encoding="utf-8"))
+    altered["reference_path"] = str(tmp_path / "different.npz")
+    altered_hparams = tmp_path / "hparams.json"
+    altered_hparams.write_text(json.dumps(altered), encoding="utf-8")
+    with pytest.raises(ValueError, match="consumed reference path"):
+        validate_consumed_resume_assets(altered_hparams, registered_reference)
+
+
 def test_root_recovery_changes_only_registered_distribution_and_endpoint(
     tmp_path: Path,
 ) -> None:

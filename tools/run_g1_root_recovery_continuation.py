@@ -11,7 +11,6 @@ from typing import Any
 from src.algorithms.shac.algorithm import train
 from src.envs.g1_tracking.environment import (
     DEFAULT_CONTROLLER_PATH,
-    DEFAULT_MODEL_PATH,
     DEFAULT_REFERENCE_PATH,
 )
 from src.envs.g1_tracking.solver_profiles import get_solver_profile, solver_context
@@ -22,6 +21,7 @@ from tools.run_g1_tracking_shac import configure_jax
 from tools.prepare_g1_rmr_reference import sha256_file
 from tools.run_g1_zero_assistance_consolidation import (
     CONSOLIDATION_END_STEP,
+    EXPECTED_REFERENCE_SHA256,
     _write_json_atomically,
     expected_checkpoint_steps as _expected_checkpoint_steps,
     validate_preflight,
@@ -60,6 +60,31 @@ def validate_runtime_assets(model_path: Path, controller_path: Path) -> dict[str
         "model_sha256": EXPECTED_MODEL_SHA256,
         "controller_path": str(controller_path),
         "controller_sha256": EXPECTED_CONTROLLER_SHA256,
+    }
+
+
+def validate_consumed_resume_assets(
+    hparams_path: Path, registered_reference_path: Path
+) -> dict[str, str]:
+    """Bind preflight to the model/reference paths restored by train()."""
+    hparams = json.loads(hparams_path.resolve().read_text(encoding="utf-8"))
+    consumed_reference = Path(str(hparams.get("reference_path", ""))).resolve()
+    registered_reference = registered_reference_path.resolve()
+    if consumed_reference != registered_reference:
+        raise ValueError("resume-consumed reference path does not match registration")
+    if (
+        not consumed_reference.is_file()
+        or sha256_file(consumed_reference) != EXPECTED_REFERENCE_SHA256
+    ):
+        raise ValueError("resume-consumed reference SHA-256 does not match")
+    consumed_model = Path(str(hparams.get("xml_path", ""))).resolve()
+    runtime_assets = validate_runtime_assets(
+        consumed_model, Path(DEFAULT_CONTROLLER_PATH)
+    )
+    return {
+        **runtime_assets,
+        "reference_path": str(consumed_reference),
+        "reference_sha256": EXPECTED_REFERENCE_SHA256,
     }
 
 
@@ -145,8 +170,8 @@ def main() -> None:
             "protocol": "g1-root-recovery-continuation-preflight-v1",
             "root_recovery_multiplier": ROOT_RECOVERY_MULTIPLIER,
             "root_recovery_probability": ROOT_RECOVERY_PROBABILITY,
-            "runtime_assets": validate_runtime_assets(
-                Path(DEFAULT_MODEL_PATH), Path(DEFAULT_CONTROLLER_PATH)
+            "runtime_assets": validate_consumed_resume_assets(
+                Path(str(preflight["hparams"])), args.reference_path
             ),
         }
     )
