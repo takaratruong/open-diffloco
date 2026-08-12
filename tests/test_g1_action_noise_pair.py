@@ -13,7 +13,13 @@ from src.core.rmr_action_noise import RMR_ACTION_STD, RMR_ACTION_STD_JOINT_NAMES
 
 
 def _write_arm(
-    root: Path, arm: str, *, zero: bool, reset: str = "r" * 64, rows: int = 2
+    root: Path,
+    arm: str,
+    *,
+    zero: bool,
+    reset: str = "r" * 64,
+    rows: int = 2,
+    terminal: bool = True,
 ) -> dict:
     from tools.evaluate_g1_action_noise_pair import RECORD_COLUMNS, epsilon_tape
 
@@ -28,7 +34,7 @@ def _write_arm(
     values[:, 0] = np.arange(rows)
     values[:, 1] = np.arange(rows)
     values[:, 11] = np.arange(1, rows + 1)
-    if rows < 2:
+    if terminal:
         values[-1, 4] = 1.0
     np.savez_compressed(
         directory / "evaluation.npz",
@@ -39,18 +45,18 @@ def _write_arm(
         action_noise=noise,
         action=action,
         joint_names=np.asarray(RMR_ACTION_STD_JOINT_NAMES),
-        xfrc_applied=np.zeros((rows, 3, 6), dtype=np.float64),
-        xfrc_body_count=np.asarray(3, dtype=np.int64),
+        xfrc_applied=np.zeros((rows, 31, 6), dtype=np.float64),
+        xfrc_body_count=np.asarray(31, dtype=np.int64),
         remaining_reference_transitions=np.asarray(499, dtype=np.int64),
         requested_step_limit=np.asarray(-1, dtype=np.int64),
     )
     summary = {
         "steps": rows,
-        "terminal": rows < 2,
+        "terminal": terminal,
         "evaluation_start_phase": 0,
         "remaining_reference_transitions": 499,
         "completed_reference_suffix": False,
-        "intermediate_reset_occurred": rows < 2,
+        "intermediate_reset_occurred": terminal,
         "paired_reset_state_sha256": reset,
         "action_noise_exact_zero": zero,
         "assistance_exact_zero": True,
@@ -143,6 +149,45 @@ def test_manifest_accepts_natural_unequal_terminal_lengths_with_shared_prefix(
         output_dir=tmp_path, provenance=_provenance(), arms=arms
     )
     assert manifest["arms"]["rmr-noisy"]["terminal"] is True
+
+
+def test_manifest_rejects_hidden_truncation_and_cochanged_constants(
+    tmp_path: Path,
+) -> None:
+    from tools.evaluate_g1_action_noise_pair import build_pair_manifest
+
+    arms = {
+        "deterministic": _write_arm(
+            tmp_path, "deterministic", zero=True, terminal=False
+        ),
+        "rmr-noisy": _write_arm(tmp_path, "rmr-noisy", zero=False, terminal=False),
+    }
+    with pytest.raises(ValueError, match="complete"):
+        build_pair_manifest(output_dir=tmp_path, provenance=_provenance(), arms=arms)
+    bad = _provenance()
+    bad.update(phase=1, expected_remaining_reference_transitions=498)
+    with pytest.raises(ValueError, match="immutable"):
+        build_pair_manifest(output_dir=tmp_path, provenance=bad, arms=arms)
+
+
+def test_manifest_rejects_self_consistent_wrong_wrench_body_count(
+    tmp_path: Path,
+) -> None:
+    from tools.evaluate_g1_action_noise_pair import build_pair_manifest
+
+    arms = {
+        "deterministic": _write_arm(tmp_path, "deterministic", zero=True),
+        "rmr-noisy": _write_arm(tmp_path, "rmr-noisy", zero=False),
+    }
+    for arm in arms:
+        path = tmp_path / arm / "evaluation.npz"
+        with np.load(path) as source:
+            arrays = {key: source[key] for key in source.files}
+        arrays["xfrc_applied"] = np.zeros((2, 1, 6))
+        arrays["xfrc_body_count"] = np.asarray(1)
+        np.savez_compressed(path, **arrays)
+    with pytest.raises(ValueError, match="wrench"):
+        build_pair_manifest(output_dir=tmp_path, provenance=_provenance(), arms=arms)
 
 
 @pytest.mark.parametrize(

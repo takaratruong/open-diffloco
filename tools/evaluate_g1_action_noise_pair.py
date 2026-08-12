@@ -54,6 +54,7 @@ REQUIRED_ARTIFACTS = (
 )
 PAIR_PHASE = 0
 PAIR_REMAINING_TRANSITIONS = 499
+PAIR_XFRC_BODY_COUNT = 31
 RECORD_COLUMNS = (
     "step",
     "phase",
@@ -403,7 +404,8 @@ def _validate_arm_artifacts(
     if not np.array_equal(epsilon, expected_epsilon):
         raise ValueError(f"{arm} epsilon is not the registered seeded tape")
     if (
-        xfrc.shape != (rows, xfrc_body_count, 6)
+        xfrc_body_count != PAIR_XFRC_BODY_COUNT
+        or xfrc.shape != (rows, PAIR_XFRC_BODY_COUNT, 6)
         or not np.isfinite(xfrc).all()
         or np.any(xfrc != 0.0)
         or np.signbit(xfrc).any()
@@ -609,6 +611,12 @@ def build_pair_manifest(
     """Reopen, validate, and cryptographically bind the complete pair evidence."""
     if set(arms) != {"deterministic", "rmr-noisy"}:
         raise ValueError("pair requires deterministic and rmr-noisy arms")
+    if (
+        provenance.get("phase") != PAIR_PHASE
+        or provenance.get("expected_remaining_reference_transitions")
+        != PAIR_REMAINING_TRANSITIONS
+    ):
+        raise ValueError("provenance phase and suffix constants are immutable")
     pinned = np.asarray(RMR_ACTION_STD, dtype=np.float64)
     received = np.asarray(provenance.get("rmr_action_std"), dtype=np.float64)
     if received.shape != pinned.shape or not np.array_equal(received, pinned):
@@ -632,6 +640,15 @@ def build_pair_manifest(
             raise ValueError(f"{arm} supplied arm summary is stale or mismatched")
         reopened[arm], hashes[arm], epsilons[arm] = summary, arm_hashes, epsilon
     deterministic, noisy = reopened["deterministic"], reopened["rmr-noisy"]
+    if require_media and any(
+        not summary["terminal"]
+        and not (
+            summary["steps"] == PAIR_REMAINING_TRANSITIONS
+            and summary["completed_reference_suffix"]
+        )
+        for summary in reopened.values()
+    ):
+        raise ValueError("each published arm must terminal or complete the full suffix")
     if deterministic["paired_reset_state_sha256"] != noisy["paired_reset_state_sha256"]:
         raise ValueError("arms do not share an identical reset state")
     shared = min(len(epsilons["deterministic"]), len(epsilons["rmr-noisy"]))
