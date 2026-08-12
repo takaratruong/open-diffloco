@@ -88,6 +88,7 @@ def apply_frozen_preview_residual(
     *,
     history_len: int,
     treatment_frame_dim: int,
+    assistance_scale: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Apply a frozen parent plus a current-frame nonlinear correction."""
     if not isinstance(params, FrozenPreviewResidualParams):
@@ -99,6 +100,23 @@ def apply_frozen_preview_residual(
         history_len=history_len,
         treatment_frame_dim=treatment_frame_dim,
     )
+    adapter_input_dim = int(
+        _registered_adapter_arrays(params.adapter)[0].shape[0]
+    )
+    if adapter_input_dim == treatment_frame_dim + 1:
+        leading_shape = frame.shape[:-1]
+        if assistance_scale is None:
+            scale = jp.zeros(leading_shape, dtype=frame.dtype)
+        else:
+            scale = jp.asarray(assistance_scale, dtype=frame.dtype)
+            if scale.shape not in ((), leading_shape):
+                raise ValueError("assistance scale shape must match observations")
+            scale = jp.broadcast_to(scale, leading_shape)
+        frame = jp.concatenate((frame, scale[..., None]), axis=-1)
+    elif adapter_input_dim != treatment_frame_dim:
+        raise ValueError("residual adapter input width is not registered")
+    elif assistance_scale is not None:
+        raise ValueError("legacy residual adapter cannot consume assistance scale")
     frozen_parent = jax.tree_util.tree_map(lax.stop_gradient, params.parent)
     parent_action = parent_actor.apply(
         frozen_parent, normalized_observations

@@ -56,6 +56,64 @@ def test_assistance_sampling_is_deterministic_bounded_and_exactly_zeroable() -> 
     )
 
 
+def test_continuous_assistance_sampling_spans_the_scheduled_interval() -> None:
+    from src.algorithms.shac.torso_wrench_curriculum import (
+        sample_assistance_scales,
+    )
+
+    key = jax.random.PRNGKey(23)
+    first = sample_assistance_scales(
+        key,
+        num_envs=4096,
+        scheduled_scale=jp.array(0.8),
+        zero_fraction=0.25,
+        continuous=True,
+    )
+    second = sample_assistance_scales(
+        key,
+        num_envs=4096,
+        scheduled_scale=jp.array(0.8),
+        zero_fraction=0.25,
+        continuous=True,
+    )
+
+    np.testing.assert_array_equal(np.asarray(first), np.asarray(second))
+    values = np.asarray(first)
+    assert np.isfinite(values).all()
+    assert values.min() == 0.0
+    assert values.max() <= 0.8
+    assert np.unique(values[values > 0.0]).size > 1000
+    assert 0.20 < float(np.mean(values == 0.0)) < 0.30
+    np.testing.assert_array_equal(
+        np.asarray(
+            sample_assistance_scales(
+                key,
+                num_envs=32,
+                scheduled_scale=jp.array(0.0),
+                zero_fraction=0.25,
+                continuous=True,
+            )
+        ),
+        np.zeros(32),
+    )
+
+
+def test_assistance_diagnostics_reject_out_of_range_scales() -> None:
+    from src.algorithms.shac.torso_wrench_curriculum import (
+        torso_wrench_assistance_diagnostics,
+    )
+
+    diagnostics = torso_wrench_assistance_diagnostics(
+        jp.zeros((2, 1, 6)),
+        assistance_scales=jp.array([0.0, 1.1]),
+        force_cap=10.0,
+        torque_cap=6.0,
+    )
+
+    assert not bool(diagnostics["valid"])
+    assert not bool(diagnostics["scales_bounded"])
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [

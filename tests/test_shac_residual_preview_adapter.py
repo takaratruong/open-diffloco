@@ -100,6 +100,94 @@ def test_zero_head_preserves_parent_action_exactly():
     )
 
 
+def test_conditioned_adapter_reads_scalar_without_changing_parent_input():
+    from src.algorithms.shac.residual_preview_adapter import (
+        FrozenPreviewResidualParams,
+        PreviewResidualAdapter,
+        apply_frozen_preview_residual,
+    )
+
+    parent_actor, _, legacy_params = _toy_policy()
+    residual_actor = PreviewResidualAdapter(action_dim=2, hidden_dim=4)
+    adapter = residual_actor.init(
+        jax.random.PRNGKey(31), jnp.zeros((1, 6), dtype=jnp.float32)
+    )
+    adapter = jax.tree_util.tree_map(jnp.array, adapter)
+    adapter["params"]["Dense_0"]["kernel"] = (
+        jnp.zeros_like(adapter["params"]["Dense_0"]["kernel"])
+        .at[-1]
+        .set(1.0)
+    )
+    adapter["params"]["Dense_1"]["kernel"] = jnp.ones((4, 2))
+    params = FrozenPreviewResidualParams(
+        parent=legacy_params.parent,
+        adapter=adapter,
+    )
+    observations = jnp.arange(15, dtype=jnp.float32).reshape(1, 15) / 10.0
+
+    zero_action, zero_parent, zero_residual = apply_frozen_preview_residual(
+        parent_actor,
+        residual_actor,
+        params,
+        observations,
+        history_len=3,
+        treatment_frame_dim=5,
+        assistance_scale=jnp.array(0.0),
+    )
+    assisted_action, assisted_parent, assisted_residual = (
+        apply_frozen_preview_residual(
+            parent_actor,
+            residual_actor,
+            params,
+            observations,
+            history_len=3,
+            treatment_frame_dim=5,
+            assistance_scale=jnp.array(1.0),
+        )
+    )
+    omitted_action, _, _ = apply_frozen_preview_residual(
+        parent_actor,
+        residual_actor,
+        params,
+        observations,
+        history_len=3,
+        treatment_frame_dim=5,
+    )
+
+    np.testing.assert_array_equal(zero_parent, assisted_parent)
+    np.testing.assert_array_equal(zero_action, omitted_action)
+    np.testing.assert_array_equal(zero_residual, jnp.zeros((1, 2)))
+    assert bool(jnp.all(assisted_residual > 0.0))
+    assert bool(jnp.all(assisted_action > zero_action))
+
+
+def test_conditioned_adapter_rejects_scalar_shape_mismatch():
+    from src.algorithms.shac.residual_preview_adapter import (
+        FrozenPreviewResidualParams,
+        PreviewResidualAdapter,
+        apply_frozen_preview_residual,
+    )
+
+    parent_actor, _, legacy_params = _toy_policy()
+    residual_actor = PreviewResidualAdapter(action_dim=2, hidden_dim=4)
+    adapter = residual_actor.init(
+        jax.random.PRNGKey(37), jnp.zeros((2, 6), dtype=jnp.float32)
+    )
+    params = FrozenPreviewResidualParams(legacy_params.parent, adapter)
+    observations = jnp.zeros((2, 15), dtype=jnp.float32)
+
+    with pytest.raises(ValueError, match="assistance scale shape"):
+        apply_frozen_preview_residual(
+            parent_actor,
+            residual_actor,
+            params,
+            observations,
+            history_len=3,
+            treatment_frame_dim=5,
+            assistance_scale=jnp.zeros((3,), dtype=jnp.float32),
+        )
+
+
 def test_adapter_reads_only_newest_treatment_frame():
     from src.algorithms.shac.residual_preview_adapter import (
         current_treatment_frame,

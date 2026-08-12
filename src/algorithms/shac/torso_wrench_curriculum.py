@@ -30,10 +30,16 @@ def sample_assistance_scales(
     num_envs: int,
     scheduled_scale: jax.Array | float,
     zero_fraction: float,
+    continuous: bool = False,
 ) -> jax.Array:
     """Sample one fixed assistance scale per environment and unroll."""
-    held_out = jax.random.uniform(key, (num_envs,)) < zero_fraction
+    mask_key, magnitude_key = jax.random.split(key)
+    held_out = jax.random.uniform(mask_key, (num_envs,)) < zero_fraction
     scale = jp.asarray(scheduled_scale, dtype=jp.float32)
+    if continuous:
+        scale = scale * jax.random.uniform(
+            magnitude_key, (num_envs,), dtype=jp.float32
+        )
     return jp.where(held_out, jp.zeros_like(scale), scale)
 
 
@@ -58,6 +64,7 @@ def torso_wrench_assistance_diagnostics(
         )
     )
     finite = jp.all(jp.isfinite(values)) & jp.all(jp.isfinite(scales))
+    scales_bounded = jp.all((scales >= 0.0) & (scales <= 1.0))
     max_force = jp.max(force_norms)
     max_torque = jp.max(torque_norms)
     cap_compliant = (max_force <= force_cap + 1e-5) & (max_torque <= torque_cap + 1e-5)
@@ -68,9 +75,10 @@ def torso_wrench_assistance_diagnostics(
         "max_force": max_force,
         "max_torque": max_torque,
         "finite": finite,
+        "scales_bounded": scales_bounded,
         "cap_compliant": cap_compliant,
         "zero_environments_exact": zero_wrenches,
-        "valid": finite & cap_compliant & zero_wrenches,
+        "valid": finite & scales_bounded & cap_compliant & zero_wrenches,
     }
 
 
