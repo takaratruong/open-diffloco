@@ -64,6 +64,52 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def validate_code_provenance(expected_commit: str) -> dict[str, str]:
+    """Require the exact registered clean code checkout."""
+    repository = Path(__file__).resolve().parents[1]
+    if not isinstance(expected_commit, str) or len(expected_commit) != 40:
+        raise ValueError("registered code commit must be a full Git SHA-1")
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if head != expected_commit:
+        raise ValueError(
+            f"registered code commit mismatch: expected {expected_commit}, got {head}"
+        )
+    diff = subprocess.run(
+        ["git", "diff", "--binary", "HEAD", "--", "src", "tools"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+    ).stdout
+    untracked = subprocess.run(
+        [
+            "git",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            "src",
+            "tools",
+        ],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+    ).stdout
+    if diff or untracked:
+        raise ValueError("registered code checkout has executable dirty changes")
+    return {
+        "repository": str(repository),
+        "code_commit": head,
+        "dirty_patch_sha256": hashlib.sha256(diff).hexdigest(),
+    }
+
+
 def validate_parent_checkpoint(path: str | Path) -> Path:
     """Require the exact selected E012 checkpoint before launching compute."""
     checkpoint = Path(path).resolve()
@@ -617,9 +663,16 @@ def render_selected_arm(
         if any(not path.is_file() or path.stat().st_size == 0 for path in required):
             raise ValueError(f"selected phase {phase} artifacts are incomplete")
         summary = json.loads(required[1].read_text(encoding="utf-8"))
+        phase_index = (0, 100, 200, 300, 400).index(phase)
         if (
             summary.get("evaluation_start_phase") != phase
             or summary.get("reference_sha256") != FROZEN_REFERENCE_SHA256
+            or summary.get("checkpoint_sha256")
+            != selection["selected_checkpoint_sha256"]
+            or summary.get("solver_profile") != "g1-4x5"
+            or summary.get("actor_assistance_conditioning_scale") != 0.0
+            or summary.get("steps")
+            != selection["selected_survival"][phase_index]
         ):
             raise ValueError("selected artifact summary provenance mismatch")
     return str(artifact_root)
@@ -776,11 +829,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--aware-device", default="0")
     parser.add_argument("--blind-device", default="1")
+    parser.add_argument("--code-commit", required=True)
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
+    code_provenance = validate_code_provenance(args.code_commit)
     devices = validate_device_ids(
         args.aware_device,
         args.blind_device,
@@ -815,6 +870,7 @@ def main() -> None:
         "checkpoint_path": str(checkpoint),
         "checkpoint_sha256": _sha256(checkpoint),
         "parent_hparams": parent_hparams,
+        "code_provenance": code_provenance,
         "runtime_assets": assets,
         "migration": migration,
         "gpu_hardware": hardware,

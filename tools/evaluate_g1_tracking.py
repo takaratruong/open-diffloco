@@ -665,6 +665,21 @@ def main() -> None:
             if rmr_policy is not None
             else "flax_policy"
         ),
+        "checkpoint_path": (
+            str(args.checkpoint.resolve())
+            if args.checkpoint is not None
+            else None
+        ),
+        "checkpoint_sha256": (
+            sha256_file(args.checkpoint.resolve())
+            if args.checkpoint is not None
+            else None
+        ),
+        "actor_assistance_conditioning_scale": (
+            0.0
+            if isinstance(actor_params, FrozenPreviewResidualParams)
+            else None
+        ),
         **stability_summary,
     }
     (args.output_dir / "summary.json").write_text(

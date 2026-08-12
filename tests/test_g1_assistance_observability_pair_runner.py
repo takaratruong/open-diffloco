@@ -59,6 +59,8 @@ def test_pair_parser_exposes_only_operational_paths_and_devices() -> None:
             "0",
             "--blind-device",
             "1",
+            "--code-commit",
+            "a" * 40,
         ]
     )
     for override in (
@@ -75,6 +77,8 @@ def test_pair_parser_exposes_only_operational_paths_and_devices() -> None:
                     "g1-4x5",
                     "--resume-from",
                     "checkpoint.pkl",
+                    "--code-commit",
+                    "a" * 40,
                     *override,
                 ]
             )
@@ -131,6 +135,28 @@ def test_pair_preflight_binds_runtime_assets(tmp_path: Path) -> None:
     assert report["reference_sha256"] == FROZEN_REFERENCE_SHA256
     assert report["model_path"] == str(FROZEN_MODEL_PATH.resolve())
     assert report["controller_path"] == str(FROZEN_CONTROLLER_PATH.resolve())
+
+
+def test_pair_preflight_binds_exact_clean_code_commit() -> None:
+    from tools.run_g1_assistance_observability_pair import (
+        validate_code_provenance,
+    )
+
+    repository = Path(__file__).resolve().parents[1]
+    import subprocess
+
+    expected = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    report = validate_code_provenance(expected)
+
+    assert report["code_commit"] == expected
+    assert report["dirty_patch_sha256"] == hashlib.sha256(b"").hexdigest()
 
 
 def test_zero_tail_evaluation_requires_exact_registered_checkpoint_grid() -> None:
