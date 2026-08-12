@@ -241,6 +241,42 @@ def test_worker_failure_terminates_paired_peer_immediately() -> None:
     assert ("blind", False, "worker exited with code -15 without a report") in results
 
 
+def test_worker_hard_crash_terminates_paired_peer_without_queue_report() -> None:
+    from tools.run_g1_assistance_observability_pair import (
+        collect_worker_results_fail_fast,
+    )
+
+    class Process:
+        def __init__(self, *, alive: bool, exitcode: int | None) -> None:
+            self.alive = alive
+            self.exitcode = exitcode
+            self.terminated = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            self.alive = False
+            self.exitcode = -15
+            self.terminated = True
+
+        def join(self) -> None:
+            self.alive = False
+
+    aware = Process(alive=False, exitcode=-9)
+    blind = Process(alive=True, exitcode=None)
+
+    results = collect_worker_results_fail_fast(
+        queue.Queue(),
+        (("aware", aware), ("blind", blind)),
+        poll_seconds=0.0,
+    )
+
+    assert blind.terminated is True
+    assert ("aware", False, "worker exited with code -9 without a report") in results
+    assert ("blind", False, "worker exited with code -15 without a report") in results
+
+
 def test_zero_tail_selector_ranks_minimum_median_mean_then_earliest() -> None:
     from tools.run_g1_assistance_observability_pair import (
         select_zero_tail_checkpoint,

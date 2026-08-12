@@ -758,6 +758,17 @@ def collect_worker_results_fail_fast(
         try:
             result = result_queue.get(timeout=poll_seconds)
         except queue.Empty:
+            hard_crashes = [
+                (arm, process)
+                for arm, process in worker_pairs
+                if not process.is_alive()
+                and process.exitcode not in (None, 0)
+            ]
+            if hard_crashes:
+                for _, process in worker_pairs:
+                    if process.is_alive():
+                        process.terminate()
+                break
             continue
         results.append(result)
         if not result[1]:
