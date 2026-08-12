@@ -43,6 +43,22 @@ class SelectPhaseGridCheckpointTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             select_checkpoint({10: self._summary([1, 2, 0, 4, 5])})
 
+    def test_accepts_provenance_rich_flax_summary(self):
+        from tools.select_phase_grid_checkpoint import select_checkpoint
+
+        summary = {
+            "checkpoint_sha256": "e" * 64,
+            "summary": {
+                "phases": [0, 100, 200, 300, 400],
+                "survival": [68, 62, 89, 56, 58],
+            },
+        }
+
+        result = select_checkpoint({1_867_776: summary})
+
+        self.assertEqual(result["selected_step"], 1_867_776)
+        self.assertEqual(result["selected_survival"], [68, 62, 89, 56, 58])
+
 
 if __name__ == "__main__":
     unittest.main()

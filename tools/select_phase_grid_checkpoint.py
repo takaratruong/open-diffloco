@@ -21,9 +21,25 @@ def select_checkpoint(
     for checkpoint_step, summary in sorted(summaries.items()):
         if isinstance(checkpoint_step, bool) or checkpoint_step < 0:
             raise ValueError("checkpoint steps must be non-negative integers")
-        if summary.get("phases") != list(PHASES):
+        rollout_summary = summary.get("summary")
+        if isinstance(rollout_summary, dict):
+            phases = rollout_summary.get("phases")
+            survival_values = rollout_summary.get("survival")
+            raw_steps = (
+                {
+                    str(phase): value
+                    for phase, value in zip(
+                        phases or (), survival_values or (), strict=True
+                    )
+                }
+                if isinstance(phases, list) and isinstance(survival_values, list)
+                else None
+            )
+        else:
+            phases = summary.get("phases")
+            raw_steps = summary.get("steps")
+        if phases != list(PHASES):
             raise ValueError("phase-grid phases do not match the protocol")
-        raw_steps = summary.get("steps")
         if not isinstance(raw_steps, dict) or set(raw_steps) != expected_step_keys:
             raise ValueError("phase-grid survival steps are incomplete")
         survival = [float(raw_steps[str(phase)]) for phase in PHASES]
