@@ -96,3 +96,86 @@ def test_classify_threshold_trajectory_rejects_wrong_checkpoint_order() -> None:
     ]
     with pytest.raises(ValueError, match="checkpoint labels"):
         classify_threshold_trajectory(checkpoints)
+
+
+def test_worker_parser_freezes_the_registered_grid() -> None:
+    from tools.evaluate_g1_assistance_dose_response import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "--checkpoint",
+            "/artifacts/checkpoint.pkl",
+            "--checkpoint-label",
+            "parent",
+            "--checkpoint-sha256",
+            "a" * 64,
+            "--reference-path",
+            "/artifacts/reference.npz",
+            "--code-commit",
+            "b" * 40,
+            "--output",
+            "/evidence/worker.json",
+        ]
+    )
+    assert args.phases == PHASES
+    assert args.assistance_scales == ASSISTANCE_SCALES
+    assert args.seed == 0
+    assert args.solver_profile == "g1-4x5"
+
+
+def test_registered_conditions_cover_each_phase_scale_once() -> None:
+    from tools.evaluate_g1_assistance_dose_response import registered_conditions
+
+    assert registered_conditions() == tuple(
+        (phase, scale) for phase in PHASES for scale in ASSISTANCE_SCALES
+    )
+
+
+def test_condition_validity_requires_safe_wrench_and_exact_zero() -> None:
+    from tools.evaluate_g1_assistance_dose_response import condition_is_valid
+
+    summary = {
+        "steps": 10,
+        "remaining_reference_transitions": 20,
+        "completed_reference_suffix": False,
+        "terminal": True,
+    }
+    telemetry = {
+        "steps": 10,
+        "finite": True,
+        "force_cap_compliant": True,
+        "torque_cap_compliant": True,
+        "exact_zero_wrench": True,
+    }
+    assert condition_is_valid(summary, telemetry, scale=0.0)
+    assert not condition_is_valid(
+        summary, {**telemetry, "exact_zero_wrench": False}, scale=0.0
+    )
+    assert condition_is_valid(
+        summary, {**telemetry, "exact_zero_wrench": False}, scale=0.1
+    )
+
+
+def test_worker_document_rejects_missing_condition() -> None:
+    from tools.evaluate_g1_assistance_dose_response import build_worker_document
+
+    conditions = [
+        {
+            "phase": phase,
+            "scale": scale,
+            "valid": True,
+            "completed_reference_suffix": False,
+        }
+        for phase, scale in tuple(
+            (phase, scale)
+            for phase in PHASES
+            for scale in ASSISTANCE_SCALES
+        )[:-1]
+    ]
+    with pytest.raises(ValueError, match="exact phase/scale grid"):
+        build_worker_document(
+            checkpoint_label="parent",
+            provenance={"checkpoint_sha256": "a" * 64},
+            conditions=conditions,
+            device={"platform": "gpu", "device_count": 1},
+        )
