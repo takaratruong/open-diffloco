@@ -1,3 +1,6 @@
+import json
+
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -114,6 +117,32 @@ def test_vector_noise_hparam_is_a_json_list_while_scalar_stays_a_scalar():
     assert action_noise_std_hparam(RMR_ACTION_STD) == RMR_STD.tolist()
 
 
+def test_scalar_noise_preserves_python_float_schedule_and_hparam_under_x64():
+    from src.algorithms.shac.algorithm import resolve_action_noise_resume_settings
+
+    with jax.experimental.enable_x64():
+        start, end = resolve_action_noise_resume_settings(
+            None,
+            requested_start=0.5,
+            requested_end=0.32,
+            allow_change=False,
+            action_dim=12,
+            actor_joint_names=(),
+        )
+        progress = jnp.array(0.625, dtype=jnp.float64)
+        epsilon = jnp.array([0.25, -0.5], dtype=jnp.float64)
+        expected_std = 0.5 + progress * (0.32 - 0.5)
+        expected_noisy = epsilon * expected_std
+        actual_std = start + progress * (end - start)
+        actual_noisy = epsilon * actual_std
+
+        assert isinstance(start, float)
+        assert isinstance(end, float)
+        assert actual_std.dtype == jnp.float64
+        np.testing.assert_array_equal(actual_noisy, expected_noisy)
+        assert json.dumps(action_noise_std_hparam(0.32)) == "0.32"
+
+
 @pytest.mark.parametrize(
     ("value", "message"),
     [
@@ -138,6 +167,15 @@ def test_vector_noise_rejects_a_joint_order_mismatch():
             RMR_ACTION_STD,
             action_dim=29,
             actor_joint_names=tuple(reversed(RMR_JOINT_NAMES)),
+        )
+
+
+def test_vector_noise_requires_the_fixed_29_action_contract():
+    with pytest.raises(ValueError, match="action dimension must be 29"):
+        validate_action_noise_std(
+            jnp.ones((30,), dtype=jnp.float32),
+            action_dim=30,
+            actor_joint_names=RMR_JOINT_NAMES + ("extra_joint",),
         )
 
 
@@ -182,7 +220,27 @@ def test_resume_noise_without_a_change_restores_scalar_checkpoint_values():
         actor_joint_names=(),
     )
 
-    assert start.shape == ()
-    assert end.shape == ()
-    assert float(start) == pytest.approx(0.5)
-    assert float(end) == pytest.approx(0.32)
+    assert isinstance(start, float)
+    assert isinstance(end, float)
+    assert start == 0.5
+    assert end == 0.32
+
+
+@pytest.mark.parametrize(
+    "resumed_hparams",
+    ({}, {"action_noise_std_start": 0.5}),
+)
+def test_incomplete_resume_noise_metadata_requires_explicit_authority(
+    resumed_hparams,
+):
+    from src.algorithms.shac.algorithm import resolve_action_noise_resume_settings
+
+    with pytest.raises(ValueError, match="complete action noise metadata"):
+        resolve_action_noise_resume_settings(
+            resumed_hparams,
+            requested_start=0.5,
+            requested_end=0.32,
+            allow_change=False,
+            action_dim=12,
+            actor_joint_names=(),
+        )

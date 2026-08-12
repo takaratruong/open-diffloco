@@ -85,10 +85,16 @@ def validate_action_noise_std(
         raise ValueError("action noise std must be finite")
     if (array < 0.0).any():
         raise ValueError("action noise std must be non-negative")
+    if array.ndim == 0:
+        if isinstance(value, jax.Array):
+            return value
+        return array.item()
     if array.ndim == 1:
-        if array.shape != (action_dim,):
+        if action_dim != len(RMR_ACTION_STD_JOINT_NAMES):
+            raise ValueError("action noise vector action dimension must be 29")
+        if array.shape != (len(RMR_ACTION_STD_JOINT_NAMES),):
             raise ValueError(
-                f"action noise std vector must have shape ({action_dim},)"
+                "action noise std vector must have shape (29,)"
             )
         if tuple(actor_joint_names) != RMR_ACTION_STD_JOINT_NAMES:
             raise ValueError(
@@ -99,9 +105,9 @@ def validate_action_noise_std(
 
 def action_noise_std_hparam(value) -> float | list[float]:
     """Convert action noise to JSON-safe scalar or lossless vector metadata."""
-    array = np.asarray(value, dtype=np.float32)
+    array = np.asarray(value)
     if array.ndim == 0:
-        return float(array)
+        return array.item()
     if array.ndim == 1:
         return array.tolist()
     raise ValueError("action noise std must be a scalar or a rank-one vector")
@@ -129,16 +135,21 @@ def resolve_action_noise_resume_settings(
         action_dim=action_dim,
         actor_joint_names=actor_joint_names,
     )
-    if not resumed_hparams:
+    if resumed_hparams is None:
         return requested_start, requested_end
+    required = {"action_noise_std_start", "action_noise_std_end"}
+    if not required.issubset(resumed_hparams):
+        if allow_change:
+            return requested_start, requested_end
+        raise ValueError("resume metadata requires complete action noise metadata")
 
     saved_start = validate_action_noise_std(
-        resumed_hparams.get("action_noise_std_start", requested_start),
+        resumed_hparams["action_noise_std_start"],
         action_dim=action_dim,
         actor_joint_names=actor_joint_names,
     )
     saved_end = validate_action_noise_std(
-        resumed_hparams.get("action_noise_std_end", requested_end),
+        resumed_hparams["action_noise_std_end"],
         action_dim=action_dim,
         actor_joint_names=actor_joint_names,
     )
