@@ -113,6 +113,8 @@ def test_worker_parser_freezes_the_registered_grid() -> None:
             "/artifacts/reference.npz",
             "--code-commit",
             "b" * 40,
+            "--physical-gpu-uuid",
+            "GPU-test",
             "--output",
             "/evidence/worker.json",
         ]

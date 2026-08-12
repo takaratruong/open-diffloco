@@ -16,6 +16,7 @@ from src.evaluation.g1_assistance_dose_response import (
     ASSISTANCE_SCALES,
     CHECKPOINT_LABELS,
     PHASES,
+    condition_is_valid,
     required_scale,
 )
 from src.evaluation.g1_torso_wrench_oracle import (
@@ -52,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint-sha256", required=True)
     parser.add_argument("--reference-path", type=Path, required=True)
     parser.add_argument("--code-commit", required=True)
+    parser.add_argument("--physical-gpu-uuid", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.set_defaults(
         seed=0,
@@ -66,33 +68,6 @@ def registered_conditions() -> tuple[tuple[int, float], ...]:
     """Return the fixed phase-major dose-response grid."""
     return tuple(
         (phase, scale) for phase in PHASES for scale in ASSISTANCE_SCALES
-    )
-
-
-def condition_is_valid(
-    summary: dict[str, Any],
-    telemetry: dict[str, Any],
-    *,
-    scale: float,
-) -> bool:
-    """Validate one rollout and its bounded wrench telemetry."""
-    try:
-        steps = int(summary["steps"])
-        remaining = int(summary["remaining_reference_transitions"])
-        terminal = bool(summary["terminal"])
-        completed = bool(summary["completed_reference_suffix"])
-        telemetry_steps = int(telemetry["steps"])
-    except (KeyError, TypeError, ValueError):
-        return False
-    expected_completion = steps == remaining and not terminal
-    return bool(
-        1 <= steps <= remaining
-        and telemetry_steps == steps
-        and completed == expected_completion
-        and telemetry.get("finite") is True
-        and telemetry.get("force_cap_compliant") is True
-        and telemetry.get("torque_cap_compliant") is True
-        and (scale != 0.0 or telemetry.get("exact_zero_wrench") is True)
     )
 
 
@@ -173,6 +148,7 @@ def main() -> None:
         "device_count": len(devices),
         "device_kind": devices[0].device_kind,
         "local_hardware_id": int(devices[0].local_hardware_id),
+        "physical_uuid": args.physical_gpu_uuid,
     }
     profile = get_solver_profile(FROZEN_SOLVER_PROFILE)
     env = make_evaluation_env(

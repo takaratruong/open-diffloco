@@ -12,6 +12,33 @@ ASSISTANCE_SCALES = (0.0, 0.1, 0.25, 0.5, 1.0)
 CHECKPOINT_LABELS = ("parent", "midpoint", "assistance_end", "final")
 
 
+def condition_is_valid(
+    summary: Mapping[str, Any],
+    telemetry: Mapping[str, Any],
+    *,
+    scale: float,
+) -> bool:
+    """Validate one rollout and its bounded wrench telemetry."""
+    try:
+        steps = int(summary["steps"])
+        remaining = int(summary["remaining_reference_transitions"])
+        terminal = bool(summary["terminal"])
+        completed = bool(summary["completed_reference_suffix"])
+        telemetry_steps = int(telemetry["steps"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    expected_completion = steps == remaining and not terminal
+    return bool(
+        1 <= steps <= remaining
+        and telemetry_steps == steps
+        and completed == expected_completion
+        and telemetry.get("finite") is True
+        and telemetry.get("force_cap_compliant") is True
+        and telemetry.get("torque_cap_compliant") is True
+        and (scale != 0.0 or telemetry.get("exact_zero_wrench") is True)
+    )
+
+
 def required_scale(
     records: Sequence[Mapping[str, Any]], *, scales: Sequence[float]
 ) -> float | None:

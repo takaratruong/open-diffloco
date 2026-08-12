@@ -18,6 +18,7 @@ from src.evaluation.g1_assistance_dose_response import (
     CHECKPOINT_LABELS,
     PHASES,
     classify_threshold_trajectory,
+    condition_is_valid,
     required_scale,
 )
 from tools.prepare_g1_rmr_reference import sha256_file
@@ -31,6 +32,12 @@ EXPECTED_CHECKPOINT_SHA256 = {
 }
 EXPECTED_REFERENCE_SHA256 = (
     "bf8c8b407062d1b309440f4c1787c345b04d79501ea75f615e5b41c0c5ebb6db"
+)
+EXPECTED_MODEL_SHA256 = (
+    "5d76cf92f00dd49d6eb9fae38d7d38e46886848b602ac691051e886c3bcccfb1"
+)
+EXPECTED_CONTROLLER_SHA256 = (
+    "f832285356d8fc10b226b6bbf557520d5323c7c9022ae6dbd00c683b06e5b7ee"
 )
 EMPTY_PATCH_SHA256 = hashlib.sha256(b"").hexdigest()
 
@@ -126,12 +133,28 @@ def monitor_workers(
         time.sleep(poll_interval_seconds)
 
 
+def stop_live_workers(workers: Mapping[str, Any]) -> None:
+    """Terminate any worker that is still live after launch exits or aborts."""
+    live = [process for process in workers.values() if process.poll() is None]
+    for process in live:
+        process.terminate()
+    for process in live:
+        try:
+            process.wait(timeout=10.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10.0)
+
+
 def build_aggregate(
     workers: Sequence[dict[str, Any]],
     *,
     expected_checkpoint_sha256: Mapping[str, str],
+    expected_device_uuid: Mapping[str, str],
     reference_sha256: str,
     code_commit: str,
+    model_sha256: str,
+    controller_sha256: str,
 ) -> dict[str, Any]:
     """Validate four worker manifests and classify the threshold trajectory."""
     if tuple(worker.get("checkpoint_label") for worker in workers) != CHECKPOINT_LABELS:
@@ -150,6 +173,22 @@ def build_aggregate(
             raise ValueError(f"{label} code commit does not match")
         if provenance.get("solver_profile") != "g1-4x5":
             raise ValueError(f"{label} solver profile does not match")
+        if provenance.get("solver_iterations") != 4 or provenance.get(
+            "solver_ls_iterations"
+        ) != 5:
+            raise ValueError(f"{label} solver iteration budget does not match")
+        runtime_assets = provenance.get("runtime_assets", {})
+        if runtime_assets.get("model_sha256") != model_sha256:
+            raise ValueError(f"{label} model SHA-256 does not match")
+        if runtime_assets.get("controller_sha256") != controller_sha256:
+            raise ValueError(f"{label} controller SHA-256 does not match")
+        device = worker.get("device", {})
+        if (
+            device.get("platform") != "gpu"
+            or device.get("device_count") != 1
+            or device.get("physical_uuid") != expected_device_uuid[label]
+        ):
+            raise ValueError(f"{label} device identity does not match")
         if worker.get("phases") != list(PHASES) or worker.get(
             "assistance_scales"
         ) != list(ASSISTANCE_SCALES):
@@ -169,8 +208,15 @@ def build_aggregate(
         )
         if observed_conditions != expected_conditions:
             raise ValueError(f"{label} worker condition grid does not match")
-        if not all(item.get("valid") is True for item in conditions):
-            raise ValueError(f"{label} has an invalid condition")
+        for item in conditions:
+            try:
+                scale = float(item["scale"])
+                wrench = item["wrench"]
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(f"{label} raw condition is incomplete") from error
+            recomputed_valid = condition_is_valid(item, wrench, scale=scale)
+            if item.get("valid") is not True or not recomputed_valid:
+                raise ValueError(f"{label} has an invalid raw condition")
         derived_thresholds = {
             str(phase): required_scale(
                 [item for item in conditions if item["phase"] == phase],
@@ -184,6 +230,8 @@ def build_aggregate(
             {
                 "label": label,
                 "checkpoint_sha256": provenance["checkpoint_sha256"],
+                "provenance": provenance,
+                "device": device,
                 "required_scales": derived_thresholds,
                 "conditions": conditions,
             }
@@ -282,49 +330,52 @@ def main() -> None:
     worker_root.mkdir(parents=True, exist_ok=True)
     processes: dict[str, subprocess.Popen[bytes]] = {}
     log_handles = []
-    for (label, checkpoint), device in zip(
-        checkpoints.items(), devices, strict=True
-    ):
-        output = worker_root / f"{label}.json"
-        stdout = (worker_root / f"{label}.stdout.log").open("wb")
-        stderr = (worker_root / f"{label}.stderr.log").open("wb")
-        log_handles.extend((stdout, stderr))
-        command = [
-            sys.executable,
-            "tools/evaluate_g1_assistance_dose_response.py",
-            "--checkpoint",
-            str(checkpoint.resolve()),
-            "--checkpoint-label",
-            label,
-            "--checkpoint-sha256",
-            EXPECTED_CHECKPOINT_SHA256[label],
-            "--reference-path",
-            str(args.reference_path.resolve()),
-            "--code-commit",
-            args.code_commit,
-            "--output",
-            str(output),
-        ]
-        environment = os.environ.copy()
-        environment.update(
-            {
-                "CUDA_VISIBLE_DEVICES": device,
-                "JAX_ENABLE_X64": "true",
-                "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
-                "PYTHONPATH": str(repository),
-                "PYTHONDONTWRITEBYTECODE": "1",
-            }
-        )
-        processes[label] = subprocess.Popen(
-            command,
-            cwd=repository,
-            env=environment,
-            stdout=stdout,
-            stderr=stderr,
-        )
     try:
+        for (label, checkpoint), device in zip(
+            checkpoints.items(), devices, strict=True
+        ):
+            output = worker_root / f"{label}.json"
+            stdout = (worker_root / f"{label}.stdout.log").open("wb")
+            stderr = (worker_root / f"{label}.stderr.log").open("wb")
+            log_handles.extend((stdout, stderr))
+            command = [
+                sys.executable,
+                "tools/evaluate_g1_assistance_dose_response.py",
+                "--checkpoint",
+                str(checkpoint.resolve()),
+                "--checkpoint-label",
+                label,
+                "--checkpoint-sha256",
+                EXPECTED_CHECKPOINT_SHA256[label],
+                "--reference-path",
+                str(args.reference_path.resolve()),
+                "--code-commit",
+                args.code_commit,
+                "--physical-gpu-uuid",
+                preflight["physical_devices"][device],
+                "--output",
+                str(output),
+            ]
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "CUDA_VISIBLE_DEVICES": device,
+                    "JAX_ENABLE_X64": "true",
+                    "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+                    "PYTHONPATH": str(repository),
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                }
+            )
+            processes[label] = subprocess.Popen(
+                command,
+                cwd=repository,
+                env=environment,
+                stdout=stdout,
+                stderr=stderr,
+            )
         monitor_workers(processes)
     finally:
+        stop_live_workers(processes)
         for handle in log_handles:
             handle.close()
     worker_documents = [
@@ -334,8 +385,14 @@ def main() -> None:
     aggregate = build_aggregate(
         worker_documents,
         expected_checkpoint_sha256=EXPECTED_CHECKPOINT_SHA256,
+        expected_device_uuid={
+            label: preflight["physical_devices"][device]
+            for label, device in zip(CHECKPOINT_LABELS, devices, strict=True)
+        },
         reference_sha256=EXPECTED_REFERENCE_SHA256,
         code_commit=args.code_commit,
+        model_sha256=EXPECTED_MODEL_SHA256,
+        controller_sha256=EXPECTED_CONTROLLER_SHA256,
     )
     aggregate["preflight"] = preflight
     _write_json_atomically(aggregate_path, aggregate)

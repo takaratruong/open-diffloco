@@ -13,6 +13,7 @@ from tools.run_g1_assistance_dose_response import (
     build_aggregate,
     monitor_workers,
     parse_checkpoint_specs,
+    stop_live_workers,
     validate_devices,
 )
 
@@ -79,19 +80,43 @@ def test_monitor_workers_terminates_peer_after_hard_crash() -> None:
     assert peer.terminated
 
 
-def _worker(label: str, required: tuple[float | None, ...]) -> dict:
+def test_stop_live_workers_terminates_partially_launched_worker() -> None:
+    started = _FakeProcess(None)
+    completed = _FakeProcess(0)
+    stop_live_workers({"parent": started, "midpoint": completed})
+    assert started.terminated
+    assert not completed.terminated
+
+
+def _worker(
+    label: str,
+    required: tuple[float | None, ...],
+    *,
+    device_uuid: str | None = None,
+) -> dict:
     conditions = []
     for phase in PHASES:
         threshold = required[PHASES.index(phase)]
         for scale in ASSISTANCE_SCALES:
+            completed = threshold is not None and scale >= threshold
+            remaining = 499 - phase
+            steps = remaining if completed else 1
             conditions.append(
                 {
                     "phase": phase,
                     "scale": scale,
                     "valid": True,
-                    "completed_reference_suffix": (
-                        threshold is not None and scale >= threshold
-                    ),
+                    "steps": steps,
+                    "remaining_reference_transitions": remaining,
+                    "terminal": not completed,
+                    "completed_reference_suffix": completed,
+                    "wrench": {
+                        "steps": steps,
+                        "finite": True,
+                        "force_cap_compliant": True,
+                        "torque_cap_compliant": True,
+                        "exact_zero_wrench": scale == 0.0,
+                    },
                 }
             )
     return {
@@ -102,8 +127,18 @@ def _worker(label: str, required: tuple[float | None, ...]) -> dict:
             "reference_sha256": "reference",
             "code_commit": "commit",
             "solver_profile": "g1-4x5",
+            "solver_iterations": 4,
+            "solver_ls_iterations": 5,
+            "runtime_assets": {
+                "model_sha256": "model",
+                "controller_sha256": "controller",
+            },
         },
-        "device": {"platform": "gpu", "device_count": 1},
+        "device": {
+            "platform": "gpu",
+            "device_count": 1,
+            "physical_uuid": device_uuid or f"GPU-{label}",
+        },
         "phases": list(PHASES),
         "assistance_scales": list(ASSISTANCE_SCALES),
         "conditions": conditions,
@@ -124,8 +159,11 @@ def test_build_aggregate_classifies_monotonic_threshold_reduction() -> None:
     aggregate = build_aggregate(
         workers,
         expected_checkpoint_sha256={label: label * 8 for label in CHECKPOINT_LABELS},
+        expected_device_uuid={label: f"GPU-{label}" for label in CHECKPOINT_LABELS},
         reference_sha256="reference",
         code_commit="commit",
+        model_sha256="model",
+        controller_sha256="controller",
     )
     assert aggregate["verdict"] == "assistance-requirement-decreases"
     assert [row["label"] for row in aggregate["checkpoints"]] == list(
@@ -136,14 +174,19 @@ def test_build_aggregate_classifies_monotonic_threshold_reduction() -> None:
 def test_build_aggregate_rejects_invalid_worker_record() -> None:
     workers = [_worker(label, (1.0,) * 5) for label in CHECKPOINT_LABELS]
     workers[2]["conditions"][0]["valid"] = False
-    with pytest.raises(ValueError, match="invalid condition"):
+    with pytest.raises(ValueError, match="invalid.*condition"):
         build_aggregate(
             workers,
             expected_checkpoint_sha256={
                 label: label * 8 for label in CHECKPOINT_LABELS
             },
+            expected_device_uuid={
+                label: f"GPU-{label}" for label in CHECKPOINT_LABELS
+            },
             reference_sha256="reference",
             code_commit="commit",
+            model_sha256="model",
+            controller_sha256="controller",
         )
 
 
@@ -156,6 +199,52 @@ def test_build_aggregate_rejects_worker_threshold_inconsistent_with_conditions()
             expected_checkpoint_sha256={
                 label: label * 8 for label in CHECKPOINT_LABELS
             },
+            expected_device_uuid={
+                label: f"GPU-{label}" for label in CHECKPOINT_LABELS
+            },
             reference_sha256="reference",
             code_commit="commit",
+            model_sha256="model",
+            controller_sha256="controller",
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda worker: worker.update(device={"platform": "cpu", "device_count": 99}), "device"),
+        (
+            lambda worker: worker["provenance"]["runtime_assets"].update(
+                model_sha256="bogus"
+            ),
+            "model",
+        ),
+        (
+            lambda worker: worker["provenance"].update(solver_iterations=3),
+            "solver",
+        ),
+        (
+            lambda worker: worker["conditions"][0].pop("wrench"),
+            "raw condition",
+        ),
+    ],
+)
+def test_build_aggregate_recomputes_provenance_and_rollout_validity(
+    mutation, message: str
+) -> None:
+    workers = [_worker(label, (1.0,) * 5) for label in CHECKPOINT_LABELS]
+    mutation(workers[0])
+    with pytest.raises(ValueError, match=message):
+        build_aggregate(
+            workers,
+            expected_checkpoint_sha256={
+                label: label * 8 for label in CHECKPOINT_LABELS
+            },
+            expected_device_uuid={
+                label: f"GPU-{label}" for label in CHECKPOINT_LABELS
+            },
+            reference_sha256="reference",
+            code_commit="commit",
+            model_sha256="model",
+            controller_sha256="controller",
         )
