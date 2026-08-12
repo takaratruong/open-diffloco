@@ -208,10 +208,19 @@ def _h12_records(
     return records
 
 
-def capture_trajectories(env, checkpoint_state: Any, *, seed: int) -> dict[int, dict]:
+def capture_trajectories(
+    env,
+    checkpoint_state: Any,
+    *,
+    seed: int,
+    phases: tuple[int, ...] | None = None,
+) -> dict[int, dict]:
     """Capture every frozen split trajectory in one vmapped MJX execution."""
-    splits = phase_splits()
-    phases = tuple((*splits["fit"], *splits["validation"], *splits["test"]))
+    if phases is None:
+        splits = phase_splits()
+        phases = tuple((*splits["fit"], *splits["validation"], *splits["test"]))
+    if not phases or len(set(phases)) != len(phases):
+        raise ValueError("capture phases must be nonempty and unique")
     phase_array = jnp.asarray(phases, dtype=jnp.int32)
     keys = jax.random.split(jax.random.PRNGKey(seed), len(phases))
     states = jax.jit(jax.vmap(env.reset_at_phase))(

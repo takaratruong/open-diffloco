@@ -11,6 +11,10 @@ from tools.refit_g1_carried_return_critic import (
     replace_critic_state,
     trajectory_rows,
 )
+from tools.consolidate_g1_carried_return_critic import (
+    CONFIRMATION_PHASES,
+    load_frozen_dataset,
+)
 
 
 def test_phase_splits_are_disjoint_and_immutable():
@@ -93,3 +97,25 @@ def test_replace_critic_state_preserves_every_noncritic_leaf_exactly():
     np.testing.assert_array_equal(candidate.critic_params["w"], [8.0])
     np.testing.assert_array_equal(candidate.target_critic_params["w"], [8.0])
     np.testing.assert_array_equal(candidate.critic_opt["m"], [9.0])
+
+
+def test_confirmation_phases_are_unseen_and_dataset_loader_is_exact(tmp_path):
+    assert CONFIRMATION_PHASES == (5, 105, 205, 305, 405)
+    assert set(CONFIRMATION_PHASES).isdisjoint(
+        set().union(*map(set, phase_splits().values()))
+    )
+    payload = {}
+    expected_phases = tuple(
+        (*phase_splits()["fit"], *phase_splits()["validation"], *phase_splits()["test"])
+    )
+    for phase in expected_phases:
+        payload[f"phase_{phase}_critic_observations"] = np.full((2, 3), phase)
+        payload[f"phase_{phase}_rewards"] = np.ones(2)
+        payload[f"phase_{phase}_returns"] = np.array([1.5, 1.0])
+    path = tmp_path / "dataset.npz"
+    np.savez_compressed(path, **payload)
+    loaded = load_frozen_dataset(path)
+    assert tuple(loaded) == expected_phases
+    np.testing.assert_array_equal(
+        loaded[110]["critic_observations"], np.full((2, 3), 110)
+    )
