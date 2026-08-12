@@ -435,6 +435,26 @@ def _validate_arm_artifacts(
     if arm == "rmr-noisy" and exact_zero:
         raise ValueError("RMR noisy arm unexpectedly has exact-zero action noise")
     true_terminal = bool(np.any(values[:, 4] > 0.5))
+    if require_media and rows < PAIR_REMAINING_TRANSITIONS:
+        terminal_rows = values[:, 4] > 0.5
+        done_rows = values[:, 3] > 0.5
+        termination_errors = values[-1, 12:16]
+        exceeds_limit = bool(
+            termination_errors[0] > 0.25
+            or termination_errors[1] > 1.3
+            or termination_errors[2] > 0.8
+            or termination_errors[3] > 0.4
+        )
+        if (
+            not terminal_rows[-1]
+            or not done_rows[-1]
+            or terminal_rows[:-1].any()
+            or done_rows[:-1].any()
+            or not exceeds_limit
+        ):
+            raise ValueError(
+                f"{arm} short rollout lacks corroborated terminal telemetry"
+            )
     expected_summary = {
         "steps": rows,
         "terminal": true_terminal,

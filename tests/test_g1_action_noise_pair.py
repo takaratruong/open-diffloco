@@ -36,6 +36,8 @@ def _write_arm(
     values[:, 11] = np.arange(1, rows + 1)
     if terminal:
         values[-1, 4] = 1.0
+        values[-1, 3] = 1.0
+        values[-1, 12] = 0.251
     np.savez_compressed(
         directory / "evaluation.npz",
         columns=np.asarray(RECORD_COLUMNS),
@@ -67,7 +69,7 @@ def _write_arm(
         "checkpoint_sha256": "c" * 64,
         "reference_sha256": "d" * 64,
         "mean_reward": 0.0,
-        "max_anchor_z_error": 0.0,
+        "max_anchor_z_error": 0.251 if terminal else 0.0,
         "max_anchor_xy_error": 0.0,
         "max_gravity_z_error": 0.0,
         "max_distal_z_error": 0.0,
@@ -162,7 +164,7 @@ def test_manifest_rejects_hidden_truncation_and_cochanged_constants(
         ),
         "rmr-noisy": _write_arm(tmp_path, "rmr-noisy", zero=False, terminal=False),
     }
-    with pytest.raises(ValueError, match="complete"):
+    with pytest.raises(ValueError, match="terminal telemetry"):
         build_pair_manifest(output_dir=tmp_path, provenance=_provenance(), arms=arms)
     bad = _provenance()
     bad.update(phase=1, expected_remaining_reference_transitions=498)
@@ -187,6 +189,26 @@ def test_manifest_rejects_self_consistent_wrong_wrench_body_count(
         arrays["xfrc_body_count"] = np.asarray(1)
         np.savez_compressed(path, **arrays)
     with pytest.raises(ValueError, match="wrench"):
+        build_pair_manifest(output_dir=tmp_path, provenance=_provenance(), arms=arms)
+
+
+def test_manifest_rejects_fabricated_short_terminal_without_done_or_threshold(
+    tmp_path: Path,
+) -> None:
+    from tools.evaluate_g1_action_noise_pair import build_pair_manifest
+
+    arms = {
+        "deterministic": _write_arm(tmp_path, "deterministic", zero=True),
+        "rmr-noisy": _write_arm(tmp_path, "rmr-noisy", zero=False),
+    }
+    for arm in arms:
+        path = tmp_path / arm / "evaluation.npz"
+        with np.load(path) as source:
+            arrays = {key: source[key] for key in source.files}
+        arrays["values"][:, 3] = 0.0
+        arrays["values"][:, 12:16] = 0.0
+        np.savez_compressed(path, **arrays)
+    with pytest.raises(ValueError, match="terminal telemetry"):
         build_pair_manifest(output_dir=tmp_path, provenance=_provenance(), arms=arms)
 
 
