@@ -149,7 +149,6 @@ def validate_training_artifacts(run_directory: Path) -> dict[str, Any]:
     hparams = json.loads((run_directory / "hparams.json").read_text())
     expected_hparams = {
         "total_steps": ZERO_BOOTSTRAP_END_STEP,
-        "checkpoint_interval": CHECKPOINT_INTERVAL,
         "actor_bootstrap_scale": 0.0,
         "allow_resume_actor_bootstrap_scale_change": True,
         "torso_wrench_assistance": True,
@@ -278,6 +277,7 @@ def validate_training_artifacts(run_directory: Path) -> dict[str, Any]:
         "valid": True,
         "run_directory": str(run_directory),
         "checkpoint_steps": list(steps),
+        "checkpoint_interval": CHECKPOINT_INTERVAL,
         "hparams": expected_hparams,
     }
 

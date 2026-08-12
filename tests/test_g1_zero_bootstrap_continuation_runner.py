@@ -125,6 +125,10 @@ def test_training_validation_requires_zero_bootstrap_and_dense_grid(tmp_path):
     (run / "checkpoint_phase_metrics.json").write_text(
         json.dumps(rows), encoding="utf-8"
     )
+    # The trainer does not persist checkpoint_interval in hparams; cadence is
+    # proven by the exact archived filenames and checkpoint telemetry steps.
+    hparams.pop("checkpoint_interval")
+    (run / "hparams.json").write_text(json.dumps(hparams), encoding="utf-8")
     assert validate_training_artifacts(run)["valid"] is True
 
     rows[-1]["actor_bootstrap_scale_current"] = 0.1
