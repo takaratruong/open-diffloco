@@ -691,7 +691,7 @@ def compare_pair_selections(
     if len(aware_survival) != 5 or len(blind_survival) != 5:
         raise ValueError("paired selections require five-phase survival vectors")
     aware_phase_floors = tuple(
-        min(blind_value, baseline_value)
+        max(blind_value, baseline_value)
         for blind_value, baseline_value in zip(
             blind_survival, baseline_survival, strict=True
         )

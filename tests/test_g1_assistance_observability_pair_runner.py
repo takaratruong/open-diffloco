@@ -268,7 +268,7 @@ def test_pair_comparison_rejects_aggregate_gain_with_compensating_collapse() -> 
 
     assert result["outcome"] == "scalar-observability-mixed-tradeoff"
     assert result["aware_no_compensating_collapse"] is False
-    assert result["aware_phase_floors"] == [51, 61, 89, 51, 76]
+    assert result["aware_phase_floors"] == [66, 100, 100, 100, 100]
 
 
 def test_pair_comparison_accepts_scalar_edge_without_phase_collapse() -> None:
