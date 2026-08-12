@@ -6,7 +6,6 @@ import argparse
 import json
 import os
 import pickle
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
@@ -353,44 +352,19 @@ def fit_critic(
     original_current_metrics = calibration_metrics(
         _predict(critic, params, validation_obs_jax), validation_returns
     )
-    test_obs, test_returns = _concatenate_trajectories(
-        normalized_trajectories, splits["test"]
-    )
-    current_test_predictions = _predict(
-        critic, params, jnp.asarray(test_obs, dtype=jnp.float32)
-    )
-    current_test_metrics = calibration_metrics(
-        current_test_predictions, test_returns
-    )
-    current_test_predictions_by_phase = {}
-    offset = 0
-    for phase in splits["test"]:
-        count = normalized_trajectories[phase]["returns"].size
-        current_test_predictions_by_phase[phase] = current_test_predictions[
-            offset : offset + count
-        ]
-        offset += count
-    current_h12 = _h12_records(
-        normalized_trajectories,
-        splits["test"],
-        current_test_predictions_by_phase,
-    )
-    current_clears_validation_gate = (
-        original_current_metrics["rank_correlation"] >= 0.8
-        and original_current_metrics["nrmse"] <= 0.25
-    )
-    if current_clears_validation_gate:
-        return params, opt_state, {
-            "original_target_validation": original_target_metrics,
-            "original_current_validation": original_current_metrics,
-            "original_current_test": current_test_metrics,
-            "original_current_test_h12": current_h12,
-            "candidates": [],
-            "selected": {"step": 0, **original_current_metrics},
-            "selected_source": "existing-current-critic",
+    candidates = [
+        {
+            "step": 0,
+            "fit_loss": None,
+            **original_current_metrics,
         }
-    candidates = []
-    best = None
+    ]
+    best = (
+        calibration_candidate_key(original_current_metrics, step=0),
+        params,
+        opt_state,
+        candidates[0],
+    )
     for step in range(EVAL_INTERVAL, FIT_STEPS + 1, EVAL_INTERVAL):
         loss = None
         for _ in range(EVAL_INTERVAL):
@@ -400,17 +374,18 @@ def fit_critic(
         row = {"step": step, "fit_loss": float(loss), **metrics}
         candidates.append(row)
         key = calibration_candidate_key(metrics, step=step)
-        if best is None or key > best[0]:
+        if key > best[0]:
             best = (key, params, opt_state, row)
-    assert best is not None
     return best[1], best[2], {
         "original_target_validation": original_target_metrics,
         "original_current_validation": original_current_metrics,
-        "original_current_test": current_test_metrics,
-        "original_current_test_h12": current_h12,
         "candidates": candidates,
         "selected": best[3],
-        "selected_source": "critic-adam-refit",
+        "selected_source": (
+            "existing-current-critic"
+            if best[3]["step"] == 0
+            else "critic-adam-refit"
+        ),
     }
 
 
@@ -531,8 +506,55 @@ def main() -> None:
             count = normalized[phase]["returns"].size
             split_predictions[split][phase] = predictions[offset : offset + count]
             offset += count
+    test_obs, test_returns = _concatenate_trajectories(
+        normalized, splits["test"]
+    )
+    original_test_predictions = {
+        "target": _predict(
+            critic,
+            checkpoint_state.target_critic_params,
+            jnp.asarray(test_obs),
+        ),
+        "current": _predict(
+            critic,
+            checkpoint_state.critic_params,
+            jnp.asarray(test_obs),
+        ),
+    }
+    original_test_metrics = {
+        name: calibration_metrics(predictions, test_returns)
+        for name, predictions in original_test_predictions.items()
+    }
+    original_target_predictions_by_phase = {}
+    offset = 0
+    for phase in splits["test"]:
+        count = normalized[phase]["returns"].size
+        original_target_predictions_by_phase[phase] = (
+            original_test_predictions["target"][offset : offset + count]
+        )
+        offset += count
+    original_target_h12 = _h12_records(
+        normalized,
+        splits["test"],
+        original_target_predictions_by_phase,
+    )
     h12 = _h12_records(
         normalized, splits["test"], split_predictions["test"]
+    )
+    original_target_validation = fit_report["original_target_validation"]
+    improves_parent = (
+        split_metrics["validation"]["rank_correlation"]
+        > original_target_validation["rank_correlation"]
+        and split_metrics["validation"]["nrmse"]
+        < original_target_validation["nrmse"]
+        and split_metrics["test"]["rank_correlation"]
+        > original_test_metrics["target"]["rank_correlation"]
+        and split_metrics["test"]["nrmse"]
+        < original_test_metrics["target"]["nrmse"]
+        and all(
+            selected["relative_error"] < original["relative_error"]
+            for selected, original in zip(h12, original_target_h12)
+        )
     )
     success = (
         split_metrics["validation"]["rank_correlation"] >= 0.8
@@ -540,6 +562,7 @@ def main() -> None:
         and split_metrics["test"]["rank_correlation"] >= 0.8
         and split_metrics["test"]["nrmse"] <= 0.25
         and all(row["relative_error"] <= 0.25 for row in h12)
+        and improves_parent
     )
     candidate_state = replace_critic_state(
         checkpoint_state,
@@ -567,7 +590,34 @@ def main() -> None:
         _atomic_pickle(checkpoint_output, candidate_state)
         hparams_output = output / "hparams.json"
         hparams_temporary = output / ".hparams.json.tmp"
-        shutil.copy2(source_hparams, hparams_temporary)
+        source_hparams_payload = json.loads(
+            source_hparams.read_text(encoding="utf-8")
+        )
+        source_hparams_payload.update(
+            {
+                "carried_return_critic_refit": True,
+                "carried_return_critic_refit_source_checkpoint_sha256": (
+                    _sha256(checkpoint_path)
+                ),
+                "carried_return_critic_refit_steps": int(
+                    fit_report["selected"]["step"]
+                ),
+                "carried_return_critic_refit_lr": CRITIC_LR,
+                "carried_return_critic_refit_protocol": (
+                    "g1-carried-return-critic-refit-v1"
+                ),
+            }
+        )
+        hparams_temporary.write_text(
+            json.dumps(
+                source_hparams_payload,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         os.replace(hparams_temporary, hparams_output)
     report = {
         "protocol": "g1-carried-return-critic-refit-v1",
@@ -581,8 +631,11 @@ def main() -> None:
             for p, rows in trajectories.items()
         },
         "fit_report": fit_report,
+        "original_test_metrics": original_test_metrics,
+        "original_target_test_h12_records": original_target_h12,
         "selected_split_metrics": split_metrics,
         "test_h12_records": h12,
+        "improves_original_target": improves_parent,
         "noncritic_state_drift": drift,
         "outcome": "critic-refit-calibrated" if success else "critic-refit-insufficient",
         "dataset_sha256": _sha256(dataset_path),

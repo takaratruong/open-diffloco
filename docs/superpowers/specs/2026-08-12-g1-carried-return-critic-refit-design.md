@@ -22,8 +22,9 @@ For every pre-step state, store the training-identical critic observation and
 the realized gamma-0.99 return through the natural terminal transition. Fit all
 critic parameters by MSE for one fixed 2,000-step continuation using its existing
 Adam state and learning rate `5e-4`; inspect validation every 20 steps and select
-the checkpoint with minimum validation NRMSE, breaking ties by higher rank
-correlation and then earlier step. The test split cannot select a checkpoint.
+passing calibration before failing calibration, then minimum validation NRMSE,
+higher rank correlation, and earlier step. The test split cannot select a
+checkpoint.
 
 Set both `critic_params` and `target_critic_params` to the selected critic and
 retain its continued optimizer state. Every non-critic TrainState leaf must be
