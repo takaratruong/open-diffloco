@@ -168,7 +168,9 @@ def save_periodic_checkpoint(state, save_dir: str | Path, step: int) -> Path:
     return step_path
 
 
-def persist_run_hparams(save_dir: str | Path, hparams: dict[str, object]) -> Path:
+def persist_run_hparams(
+    save_dir: str | Path, hparams: dict[str, object]
+) -> Path:
     """Atomically persist resume metadata before a checkpoint references it."""
     path = Path(save_dir) / "hparams.json"
     temp_path = path.with_name(f".{path.name}.tmp")
@@ -278,7 +280,9 @@ def build_checkpoint_cagrad_telemetry(metrics) -> dict[str, object]:
         "actor_cagrad_bin_losses": np.asarray(
             metrics["actor_cagrad_bin_losses"]
         ).tolist(),
-        "actor_cagrad_weights": np.asarray(metrics["actor_cagrad_weights"]).tolist(),
+        "actor_cagrad_weights": np.asarray(
+            metrics["actor_cagrad_weights"]
+        ).tolist(),
         "actor_cagrad_gram_matrix": np.asarray(
             metrics["actor_cagrad_gram_matrix"]
         ).tolist(),
@@ -290,7 +294,9 @@ def build_checkpoint_cagrad_telemetry(metrics) -> dict[str, object]:
         "actor_cagrad_uniform_combined_cosine": float(
             metrics["actor_cagrad_uniform_combined_cosine"]
         ),
-        "actor_cagrad_combined_norm": float(metrics["actor_cagrad_combined_norm"]),
+        "actor_cagrad_combined_norm": float(
+            metrics["actor_cagrad_combined_norm"]
+        ),
         "actor_cagrad_valid": bool(metrics["actor_cagrad_valid"]),
     }
 
@@ -372,7 +378,9 @@ def resolve_adaptive_phase_resume_settings(
     return (
         bool(resumed_hparams.get("adaptive_phase_sampling", False)),
         float(
-            resumed_hparams.get("adaptive_phase_uniform_ratio", requested_uniform_ratio)
+            resumed_hparams.get(
+                "adaptive_phase_uniform_ratio", requested_uniform_ratio
+            )
         ),
         float(resumed_hparams.get("adaptive_phase_alpha", requested_alpha)),
     )
@@ -413,7 +421,9 @@ def resolve_action_noise_schedule_steps(
 ) -> int:
     """Keep a resumed run on its schedule unless an authorized endpoint is set."""
     if total_steps < resumed_step:
-        raise ValueError("total_steps must be at least the resumed checkpoint step")
+        raise ValueError(
+            "total_steps must be at least the resumed checkpoint step"
+        )
     if requested_schedule_steps is not None and (
         isinstance(requested_schedule_steps, bool)
         or not isinstance(requested_schedule_steps, int)
@@ -464,7 +474,9 @@ def resolve_future_reference_resume_settings(
         raise ValueError("future reference upgrade authority must be boolean")
     if resumed_hparams is None:
         return requested_steps, False
-    saved_steps = tuple(resumed_hparams.get("actor_reference_lookahead_steps", ()))
+    saved_steps = tuple(
+        resumed_hparams.get("actor_reference_lookahead_steps", ())
+    )
     if saved_steps == requested_steps:
         return requested_steps, False
     if not saved_steps and requested_steps:
@@ -473,7 +485,9 @@ def resolve_future_reference_resume_settings(
                 "future reference resume requires explicit upgrade authority"
             )
         return requested_steps, True
-    raise ValueError("future reference lookahead steps must match the checkpoint")
+    raise ValueError(
+        "future reference lookahead steps must match the checkpoint"
+    )
 
 
 def resolve_future_reference_preview_mode(
@@ -488,16 +502,24 @@ def resolve_future_reference_preview_mode(
         raise ValueError("future reference preview mode is invalid")
     if resumed_hparams is None:
         return requested_mode
-    saved_steps = tuple(resumed_hparams.get("actor_reference_lookahead_steps", ()))
+    saved_steps = tuple(
+        resumed_hparams.get("actor_reference_lookahead_steps", ())
+    )
     if not saved_steps:
         if requested_mode == "delta" and not future_reference_upgrade:
-            raise ValueError("delta preview requires explicit upgrade authority")
+            raise ValueError(
+                "delta preview requires explicit upgrade authority"
+            )
         return requested_mode
-    saved_mode = resumed_hparams.get("actor_reference_preview_mode", "absolute")
+    saved_mode = resumed_hparams.get(
+        "actor_reference_preview_mode", "absolute"
+    )
     if saved_mode not in valid_modes:
         raise ValueError("saved future reference preview mode is invalid")
     if saved_mode != requested_mode:
-        raise ValueError("future reference preview mode must match the checkpoint")
+        raise ValueError(
+            "future reference preview mode must match the checkpoint"
+        )
     return saved_mode
 
 
@@ -536,7 +558,10 @@ def resolve_residual_preview_adapter_resume_setting(
         raise ValueError("actor_residual_preview_hidden must be a positive integer")
     if requested_optimizer not in {"adam", "muon"}:
         raise ValueError("actor residual preview optimizer is invalid")
-    if not resumed_hparams or "actor_residual_preview_adapter" not in resumed_hparams:
+    if (
+        not resumed_hparams
+        or "actor_residual_preview_adapter" not in resumed_hparams
+    ):
         if requested and not future_reference_upgrade:
             raise ValueError(
                 "residual preview treatment requires a future-reference upgrade"
@@ -550,7 +575,9 @@ def resolve_residual_preview_adapter_resume_setting(
     saved_hidden = resumed_hparams.get(
         "actor_residual_preview_hidden", requested_hidden
     )
-    saved_optimizer = resumed_hparams.get("actor_residual_preview_optimizer", "adam")
+    saved_optimizer = resumed_hparams.get(
+        "actor_residual_preview_optimizer", "adam"
+    )
     if saved_optimizer not in {"adam", "muon"}:
         raise ValueError("saved actor residual preview optimizer is invalid")
     if (
@@ -558,7 +585,9 @@ def resolve_residual_preview_adapter_resume_setting(
         or (saved and saved_hidden != requested_hidden)
         or saved_optimizer != requested_optimizer
     ):
-        raise ValueError("actor residual preview settings must match the checkpoint")
+        raise ValueError(
+            "actor residual preview settings must match the checkpoint"
+        )
     return saved, int(saved_hidden), saved_optimizer
 
 
@@ -638,7 +667,9 @@ def adaptive_phase_diagnostics(
     transition_phases = jp.asarray(transition_phases, dtype=jp.int32)
     terminals = jp.asarray(terminals, dtype=jp.float32)
     if transition_phases.shape != terminals.shape:
-        raise ValueError("transition_phases and terminals must have identical shapes")
+        raise ValueError(
+            "transition_phases and terminals must have identical shapes"
+        )
     bin_count = failed_count.shape[0]
     bins = jp.clip(
         transition_phases * bin_count // reference_length,
@@ -683,7 +714,9 @@ def reduce_cagrad_shard_accumulators(
     accumulator = jax.tree_util.tree_map(
         lambda leaf: jp.sum(leaf, axis=0), sharded_accumulators
     )
-    task_gradients, bin_counts, bins_valid = finalize_phase_gradients(accumulator)
+    task_gradients, bin_counts, bins_valid = finalize_phase_gradients(
+        accumulator
+    )
     result = combine_cagrad(
         task_gradients,
         alpha=alpha,
@@ -730,10 +763,8 @@ def cagrad_phase_loss_diagnostics(
     )
     bin_counts = jp.zeros((bin_count,), dtype=jp.int32).at[bins].add(1)
     finite_losses = jp.isfinite(losses)
-    sums = (
-        jp.zeros((bin_count,), dtype=losses.dtype)
-        .at[bins]
-        .add(jp.where(finite_losses, losses, 0.0))
+    sums = jp.zeros((bin_count,), dtype=losses.dtype).at[bins].add(
+        jp.where(finite_losses, losses, 0.0)
     )
     bin_losses = jp.where(
         bin_counts > 0,
@@ -741,7 +772,9 @@ def cagrad_phase_loss_diagnostics(
         jp.nan,
     )
     valid = (
-        jp.all(bin_counts > 0) & jp.all(finite_losses) & jp.all(jp.isfinite(bin_losses))
+        jp.all(bin_counts > 0)
+        & jp.all(finite_losses)
+        & jp.all(jp.isfinite(bin_losses))
     )
     return {
         "bin_counts": bin_counts,
@@ -789,7 +822,9 @@ def resolve_actor_bootstrap_resume_scale(
 ) -> float:
     """Restore actor bootstrap scale or admit one explicit objective change."""
     if not isinstance(allow_change, bool):
-        raise ValueError("allow_resume_actor_bootstrap_scale_change must be boolean")
+        raise ValueError(
+            "allow_resume_actor_bootstrap_scale_change must be boolean"
+        )
     if (
         isinstance(requested_scale, bool)
         or not math.isfinite(requested_scale)
@@ -857,7 +892,9 @@ def validate_termination_margin_resume(
 ) -> None:
     """Require an explicit treatment flag before changing a resumed objective."""
     if not isinstance(allow_change, bool):
-        raise ValueError("allow_resume_termination_margin_change must be boolean")
+        raise ValueError(
+            "allow_resume_termination_margin_change must be boolean"
+        )
     resumed_weight = (
         0.0
         if not resumed_hparams
@@ -880,7 +917,9 @@ def resolve_carried_reset_resume_settings(
 ) -> tuple[str | None, float, int]:
     """Restore carried resets or admit one explicit distribution treatment."""
     if not isinstance(allow_change, bool):
-        raise ValueError("allow_resume_carried_reset_change must be boolean")
+        raise ValueError(
+            "allow_resume_carried_reset_change must be boolean"
+        )
     requested = (
         requested_bank_path,
         requested_probability,
@@ -1007,21 +1046,31 @@ def validate_actor_cagrad_configuration(
         or not math.isfinite(alpha)
         or alpha < 0.0
     ):
-        raise ValueError("actor_cagrad_alpha must be non-negative and finite")
+        raise ValueError(
+            "actor_cagrad_alpha must be non-negative and finite"
+        )
     if (
         isinstance(iterations, bool)
         or not isinstance(iterations, int)
         or iterations < 1
     ):
-        raise ValueError("actor_cagrad_iterations must be a positive integer")
+        raise ValueError(
+            "actor_cagrad_iterations must be a positive integer"
+        )
     if actor_cagrad and adaptive_phase_sampling:
-        raise ValueError("actor CAGrad cannot combine with adaptive phase sampling")
+        raise ValueError(
+            "actor CAGrad cannot combine with adaptive phase sampling"
+        )
     if actor_cagrad and actor_phase_robust_weighting:
-        raise ValueError("actor CAGrad cannot combine with phase-robust weighting")
+        raise ValueError(
+            "actor CAGrad cannot combine with phase-robust weighting"
+        )
     if actor_cagrad and not env_variant.startswith("g1_tracking"):
         raise ValueError("actor CAGrad requires G1 reference phases")
     if actor_cagrad and actor_per_env_grad_clip is not None:
-        raise ValueError("actor CAGrad cannot combine with per-env clipping")
+        raise ValueError(
+            "actor CAGrad cannot combine with per-env clipping"
+        )
     if actor_cagrad and gradient_accumulation_steps != 2:
         raise ValueError("actor CAGrad requires exactly two population shards")
     if actor_cagrad and actor_phase_bin_count != 5:
@@ -1044,13 +1093,17 @@ def validate_preview_adapter_configuration(
     if not enabled:
         return
     if not actor_reference_lookahead_steps or not actor_cagrad:
-        raise ValueError("actor preview adapter requires future-reference CAGrad")
+        raise ValueError(
+            "actor preview adapter requires future-reference CAGrad"
+        )
     if source_actor_policy is not None:
         raise ValueError("actor preview adapter requires a plain Flax actor")
     if initial_full_actor_policy is None and history_len != 10:
         raise ValueError("actor preview adapter requires ten-frame history")
     if initial_full_actor_policy is not None and history_len != 1:
-        raise ValueError("full RMR actor preview adapter requires one-frame history")
+        raise ValueError(
+            "full RMR actor preview adapter requires one-frame history"
+        )
     if not env_variant.startswith("g1_tracking"):
         raise ValueError("actor preview adapter requires G1 tracking")
 
@@ -1085,9 +1138,13 @@ def validate_residual_preview_adapter_configuration(
     if not enabled:
         return
     if linear_preview_enabled:
-        raise ValueError("linear and residual preview adapters are mutually exclusive")
+        raise ValueError(
+            "linear and residual preview adapters are mutually exclusive"
+        )
     if not actor_reference_lookahead_steps or not actor_cagrad:
-        raise ValueError("residual preview adapter requires future-reference CAGrad")
+        raise ValueError(
+            "residual preview adapter requires future-reference CAGrad"
+        )
     if actor_reference_preview_mode != "delta":
         raise ValueError("residual preview adapter requires delta preview")
     if history_len != 10:
@@ -1290,9 +1347,13 @@ def train(
     Returns:
         Tuple of (final_state, save_directory)
     """
-    if source_actor_policy is not None and initial_full_actor_policy is not None:
+    if (
+        source_actor_policy is not None
+        and initial_full_actor_policy is not None
+    ):
         raise ValueError(
-            "source_actor_policy and initial_full_actor_policy are mutually exclusive"
+            "source_actor_policy and initial_full_actor_policy are "
+            "mutually exclusive"
         )
     if initial_full_actor_policy is not None and residual_action_scale != 0.0:
         raise ValueError(
@@ -1304,7 +1365,9 @@ def train(
         or not isinstance(gradient_accumulation_steps, int)
         or gradient_accumulation_steps < 1
     ):
-        raise ValueError("gradient_accumulation_steps must be a positive integer")
+        raise ValueError(
+            "gradient_accumulation_steps must be a positive integer"
+        )
     if not isinstance(actor_phase_robust_weighting, bool):
         raise ValueError("actor_phase_robust_weighting must be boolean")
     if (
@@ -1320,11 +1383,19 @@ def train(
     ):
         raise ValueError("actor_phase_robust_fraction must be in [0, 1]")
     if actor_phase_robust_weighting and gradient_accumulation_steps != 1:
-        raise ValueError("phase-robust weighting requires one population shard")
+        raise ValueError(
+            "phase-robust weighting requires one population shard"
+        )
     if actor_phase_robust_weighting and actor_per_env_grad_clip is not None:
-        raise ValueError("phase-robust weighting cannot combine with per-env clipping")
-    if actor_phase_robust_weighting and not env_variant.startswith("g1_tracking"):
-        raise ValueError("phase-robust weighting requires G1 reference phases")
+        raise ValueError(
+            "phase-robust weighting cannot combine with per-env clipping"
+        )
+    if actor_phase_robust_weighting and not env_variant.startswith(
+        "g1_tracking"
+    ):
+        raise ValueError(
+            "phase-robust weighting requires G1 reference phases"
+        )
     validate_actor_cagrad_configuration(
         actor_cagrad=actor_cagrad,
         alpha=actor_cagrad_alpha,
@@ -1365,7 +1436,9 @@ def train(
         or not math.isfinite(adaptive_phase_uniform_ratio)
         or not 0.0 <= adaptive_phase_uniform_ratio <= 1.0
     ):
-        raise ValueError("adaptive_phase_uniform_ratio must be finite and in [0, 1]")
+        raise ValueError(
+            "adaptive_phase_uniform_ratio must be finite and in [0, 1]"
+        )
     if (
         isinstance(adaptive_phase_alpha, bool)
         or not math.isfinite(adaptive_phase_alpha)
@@ -1373,45 +1446,65 @@ def train(
     ):
         raise ValueError("adaptive_phase_alpha must be finite and in (0, 1]")
     if adaptive_phase_sampling and not env_variant.startswith("g1_tracking"):
-        raise ValueError("adaptive phase sampling requires G1 reference phases")
+        raise ValueError(
+            "adaptive phase sampling requires G1 reference phases"
+        )
     if (
         isinstance(actor_bootstrap_scale, bool)
         or not math.isfinite(actor_bootstrap_scale)
         or actor_bootstrap_scale < 0.0
     ):
-        raise ValueError("actor_bootstrap_scale must be finite and non-negative")
+        raise ValueError(
+            "actor_bootstrap_scale must be finite and non-negative"
+        )
     if not isinstance(allow_resume_actor_bootstrap_scale_change, bool):
-        raise ValueError("allow_resume_actor_bootstrap_scale_change must be boolean")
+        raise ValueError(
+            "allow_resume_actor_bootstrap_scale_change must be boolean"
+        )
     if (
         isinstance(actor_bootstrap_delay_steps, bool)
         or not isinstance(actor_bootstrap_delay_steps, int)
         or actor_bootstrap_delay_steps < 0
     ):
-        raise ValueError("actor_bootstrap_delay_steps must be a non-negative integer")
+        raise ValueError(
+            "actor_bootstrap_delay_steps must be a non-negative integer"
+        )
     if (
         isinstance(termination_margin_weight, bool)
         or not math.isfinite(termination_margin_weight)
         or termination_margin_weight < 0.0
     ):
-        raise ValueError("termination_margin_weight must be non-negative and finite")
+        raise ValueError(
+            "termination_margin_weight must be non-negative and finite"
+        )
     if not isinstance(allow_resume_termination_margin_change, bool):
-        raise ValueError("allow_resume_termination_margin_change must be boolean")
+        raise ValueError(
+            "allow_resume_termination_margin_change must be boolean"
+        )
     if not isinstance(allow_resume_carried_reset_change, bool):
-        raise ValueError("allow_resume_carried_reset_change must be boolean")
+        raise ValueError(
+            "allow_resume_carried_reset_change must be boolean"
+        )
     if not isinstance(allow_resume_reference_root_reset_noise_change, bool):
         raise ValueError(
             "allow_resume_reference_root_reset_noise_change must be boolean"
         )
     if not isinstance(allow_resume_torso_wrench_assistance_change, bool):
-        raise ValueError("allow_resume_torso_wrench_assistance_change must be boolean")
+        raise ValueError(
+            "allow_resume_torso_wrench_assistance_change must be boolean"
+        )
     if not isinstance(allow_resume_assistance_conditioning_change, bool):
-        raise ValueError("allow_resume_assistance_conditioning_change must be boolean")
+        raise ValueError(
+            "allow_resume_assistance_conditioning_change must be boolean"
+        )
     if (
         isinstance(reference_reset_noise_scale, bool)
         or not math.isfinite(reference_reset_noise_scale)
         or reference_reset_noise_scale < 0.0
     ):
-        raise ValueError("reference_reset_noise_scale must be non-negative and finite")
+        raise ValueError(
+            "reference_reset_noise_scale must be non-negative and finite"
+        )
     if (
         isinstance(reference_root_reset_noise_multiplier, bool)
         or not math.isfinite(reference_root_reset_noise_multiplier)
@@ -1433,13 +1526,17 @@ def train(
         or not math.isfinite(carried_reset_probability)
         or not 0.0 <= carried_reset_probability <= 1.0
     ):
-        raise ValueError("carried_reset_probability must be finite and in [0, 1]")
+        raise ValueError(
+            "carried_reset_probability must be finite and in [0, 1]"
+        )
     if (
         isinstance(carried_reset_bank_start, bool)
         or not isinstance(carried_reset_bank_start, int)
         or carried_reset_bank_start < 0
     ):
-        raise ValueError("carried_reset_bank_start must be a non-negative integer")
+        raise ValueError(
+            "carried_reset_bank_start must be a non-negative integer"
+        )
     if carried_reset_probability > 0.0 and carried_reset_bank_path is None:
         raise ValueError(
             "carried_reset_bank_path is required when "
@@ -1457,12 +1554,21 @@ def train(
     ):
         raise ValueError("reference_stride must be a positive integer")
     if not isinstance(actor_reference_lookahead_steps, tuple):
-        raise ValueError("actor_reference_lookahead_steps must be a tuple")
+        raise ValueError(
+            "actor_reference_lookahead_steps must be a tuple"
+        )
     if actor_reference_preview_mode not in {"absolute", "delta"}:
         raise ValueError("actor_reference_preview_mode is invalid")
-    if actor_reference_preview_mode == "delta" and not actor_reference_lookahead_steps:
-        raise ValueError("delta actor_reference_preview_mode requires lookahead steps")
-    if not isinstance(allow_resume_actor_reference_lookahead_upgrade, bool):
+    if (
+        actor_reference_preview_mode == "delta"
+        and not actor_reference_lookahead_steps
+    ):
+        raise ValueError(
+            "delta actor_reference_preview_mode requires lookahead steps"
+        )
+    if not isinstance(
+        allow_resume_actor_reference_lookahead_upgrade, bool
+    ):
         raise ValueError(
             "allow_resume_actor_reference_lookahead_upgrade must be boolean"
         )
@@ -1470,7 +1576,11 @@ def train(
         ("solver_iterations", solver_iterations),
         ("solver_ls_iterations", solver_ls_iterations),
     ):
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 1
+        ):
             raise ValueError(f"{name} must be a positive integer")
     effective_num_envs = num_envs * gradient_accumulation_steps
     steps_per_actor_update = effective_num_envs * unroll_length
@@ -1494,12 +1604,16 @@ def train(
         ) = resolve_future_reference_resume_settings(
             resumed_hparams if resumed_hparams is not None else {},
             requested_steps=actor_reference_lookahead_steps,
-            allow_upgrade=(allow_resume_actor_reference_lookahead_upgrade),
+            allow_upgrade=(
+                allow_resume_actor_reference_lookahead_upgrade
+            ),
         )
-        actor_reference_preview_mode = resolve_future_reference_preview_mode(
-            resumed_hparams,
-            requested_mode=actor_reference_preview_mode,
-            future_reference_upgrade=future_reference_upgrade,
+        actor_reference_preview_mode = (
+            resolve_future_reference_preview_mode(
+                resumed_hparams,
+                requested_mode=actor_reference_preview_mode,
+                future_reference_upgrade=future_reference_upgrade,
+            )
         )
         actor_preview_adapter = resolve_preview_adapter_resume_setting(
             resumed_hparams,
@@ -1610,15 +1724,21 @@ def train(
             action_scale = resumed_hparams.get("action_scale", action_scale)
             xml_path = resumed_hparams.get("xml_path", xml_path)
             env_variant = resumed_hparams.get("env_variant", env_variant)
-            reference_path = resumed_hparams.get("reference_path", reference_path)
-            reference_stride = resumed_hparams.get("reference_stride", reference_stride)
+            reference_path = resumed_hparams.get(
+                "reference_path", reference_path
+            )
+            reference_stride = resumed_hparams.get(
+                "reference_stride", reference_stride
+            )
             reference_reset_noise_scale = resumed_hparams.get(
                 "reference_reset_noise_scale", reference_reset_noise_scale
             )
             domain_randomization = resumed_hparams.get(
                 "domain_randomization", domain_randomization
             )
-            solver_profile = resumed_hparams.get("solver_profile", solver_profile)
+            solver_profile = resumed_hparams.get(
+                "solver_profile", solver_profile
+            )
             solver_iterations = resumed_hparams.get(
                 "solver_iterations", solver_iterations
             )
@@ -1658,11 +1778,17 @@ def train(
             if "actor_history_len" in resumed_hparams:
                 actor_history_len = resumed_hparams["actor_history_len"]
             if "actor_observation_noise" in resumed_hparams:
-                actor_observation_noise = resumed_hparams["actor_observation_noise"]
+                actor_observation_noise = resumed_hparams[
+                    "actor_observation_noise"
+                ]
             if "actor_per_env_grad_clip" in resumed_hparams:
-                actor_per_env_grad_clip = resumed_hparams["actor_per_env_grad_clip"]
+                actor_per_env_grad_clip = resumed_hparams[
+                    "actor_per_env_grad_clip"
+                ]
             if "critic_per_env_grad_clip" in resumed_hparams:
-                critic_per_env_grad_clip = resumed_hparams["critic_per_env_grad_clip"]
+                critic_per_env_grad_clip = resumed_hparams[
+                    "critic_per_env_grad_clip"
+                ]
         validate_actor_cagrad_configuration(
             actor_cagrad=actor_cagrad,
             alpha=actor_cagrad_alpha,
@@ -1688,7 +1814,9 @@ def train(
             hidden_dim=actor_residual_preview_hidden,
             optimizer_name=actor_residual_preview_optimizer,
             linear_preview_enabled=actor_preview_adapter,
-            actor_reference_lookahead_steps=(actor_reference_lookahead_steps),
+            actor_reference_lookahead_steps=(
+                actor_reference_lookahead_steps
+            ),
             actor_reference_preview_mode=actor_reference_preview_mode,
             actor_cagrad=actor_cagrad,
             history_len=actor_history_len,
@@ -1712,8 +1840,12 @@ def train(
         residual_adapter_enabled=actor_residual_preview_adapter,
     )
 
-    if actor_reference_lookahead_steps and not env_variant.startswith("g1_tracking"):
-        raise ValueError("future reference observations require a G1 tracking task")
+    if actor_reference_lookahead_steps and not env_variant.startswith(
+        "g1_tracking"
+    ):
+        raise ValueError(
+            "future reference observations require a G1 tracking task"
+        )
 
     action_noise_schedule_steps = resolve_action_noise_schedule_steps(
         total_steps=total_steps,
@@ -1751,15 +1883,21 @@ def train(
                 "reference_residual_scale": reference_residual_scale,
                 "domain_randomization": domain_randomization,
                 "actor_observation_noise": actor_observation_noise,
-                "actor_reference_lookahead_steps": (actor_reference_lookahead_steps),
-                "actor_reference_preview_mode": (actor_reference_preview_mode),
+                "actor_reference_lookahead_steps": (
+                    actor_reference_lookahead_steps
+                ),
+                "actor_reference_preview_mode": (
+                    actor_reference_preview_mode
+                ),
                 "solver_iterations": solver_iterations,
                 "solver_ls_iterations": solver_ls_iterations,
                 "carried_reset_bank_path": carried_reset_bank_path,
                 "carried_reset_probability": carried_reset_probability,
                 "carried_reset_bank_start": carried_reset_bank_start,
                 "adaptive_phase_sampling": adaptive_phase_sampling,
-                "adaptive_phase_uniform_ratio": (adaptive_phase_uniform_ratio),
+                "adaptive_phase_uniform_ratio": (
+                    adaptive_phase_uniform_ratio
+                ),
             }
         )
         if reference_path is not None:
@@ -1787,14 +1925,16 @@ def train(
         actor_history_len=actor_history_len,
         **g1_environment_kwargs,
     )
-    action_noise_std_start, action_noise_std_end = resolve_action_noise_resume_settings(
-        resumed_hparams,
-        is_resume=resume_from is not None,
-        requested_start=action_noise_std_start,
-        requested_end=action_noise_std_end,
-        allow_change=allow_resume_action_noise_change,
-        action_dim=env.action_dim,
-        actor_joint_names=getattr(env, "actor_joint_names", ()),
+    action_noise_std_start, action_noise_std_end = (
+        resolve_action_noise_resume_settings(
+            resumed_hparams,
+            is_resume=resume_from is not None,
+            requested_start=action_noise_std_start,
+            requested_end=action_noise_std_end,
+            allow_change=allow_resume_action_noise_change,
+            action_dim=env.action_dim,
+            actor_joint_names=getattr(env, "actor_joint_names", ()),
+        )
     )
     reference_hparams = {}
     if env_variant.startswith("g1_tracking"):
@@ -1875,7 +2015,8 @@ def train(
         actor_preview_adapter or actor_residual_preview_adapter
     )
     residual_muon_treatment = bool(
-        actor_residual_preview_adapter and actor_residual_preview_optimizer == "muon"
+        actor_residual_preview_adapter
+        and actor_residual_preview_optimizer == "muon"
     )
     if actor_preview_adapter:
         preview_legacy_frame_dim = (
@@ -1883,9 +2024,15 @@ def train(
         )
         if initial_full_actor_policy is not None:
             if not isinstance(actor_params, RmrPolicy):
-                raise ValueError("full actor preview adapter requires an RmrPolicy")
-            reference_phases = jp.arange(env.reference_length, dtype=jp.int32)
-            preview_table = jax.vmap(env._future_reference_command)(reference_phases)
+                raise ValueError(
+                    "full actor preview adapter requires an RmrPolicy"
+                )
+            reference_phases = jp.arange(
+                env.reference_length, dtype=jp.int32
+            )
+            preview_table = jax.vmap(env._future_reference_command)(
+                reference_phases
+            )
             preview_mean = jp.mean(preview_table, axis=0).astype(
                 actor_params.mean.dtype
             )
@@ -1907,7 +2054,8 @@ def train(
                 treatment_obs_dim=env.actor_frame_obs_dim,
             )
             expected_preview_parameters = (
-                env.actor_future_reference_dim * actor_params.weights[0].shape[0]
+                env.actor_future_reference_dim
+                * actor_params.weights[0].shape[0]
             )
         else:
             preview_adapter_mask = build_current_preview_mask(
@@ -1964,8 +2112,8 @@ def train(
     residual_muon_opt = None
     residual_adam_opt = None
     if actor_residual_preview_optimizer == "muon":
-        residual_muon_opt, residual_adam_opt = build_residual_muon_optimizers(
-            actor_schedule
+        residual_muon_opt, residual_adam_opt = (
+            build_residual_muon_optimizers(actor_schedule)
         )
     critic_opt = optax.chain(
         optax.clip_by_global_norm(1.0), optax.adam(critic_schedule)
@@ -1976,7 +2124,9 @@ def train(
 
     # Initialize environments at difficulty=0 (flat ground)
     env_keys = jax.random.split(k3, effective_num_envs)
-    env_state = jax.vmap(env.reset)(env_keys, jp.zeros(effective_num_envs))
+    env_state = jax.vmap(env.reset)(
+        env_keys, jp.zeros(effective_num_envs)
+    )
     actor_normalizer = canonicalize_normalizer_dtype(
         actor_normalizer, env_state.obs.dtype
     )
@@ -2050,7 +2200,9 @@ def train(
                     torso_body_id=torso_body_id,
                     world_wrench=torso_wrench,
                 )
-                state = state.replace(data=state.data.replace(xfrc_applied=xfrc))
+                state = state.replace(
+                    data=state.data.replace(xfrc_applied=xfrc)
+                )
 
             # Actor sees noisy observations; critic/training targets keep raw obs.
             obs_rng, env_rng = jax.random.split(state.info["rng"])
@@ -2063,20 +2215,22 @@ def train(
             ).astype(jp.float32)
             residual_logits = None
             if actor_residual_preview_adapter:
-                action, parent_action, _residual_action = apply_frozen_preview_residual(
-                    actor,
-                    residual_preview_actor,
-                    actor_params,
-                    obs_norm,
-                    history_len=actor_history_len,
-                    treatment_frame_dim=env.actor_frame_obs_dim,
-                    assistance_scale=(
-                        assistance_scale
-                        if actor_observe_torso_wrench_assistance
-                        else jp.zeros_like(assistance_scale)
+                action, parent_action, _residual_action = (
+                    apply_frozen_preview_residual(
+                        actor,
+                        residual_preview_actor,
+                        actor_params,
+                        obs_norm,
+                        history_len=actor_history_len,
+                        treatment_frame_dim=env.actor_frame_obs_dim,
+                        assistance_scale=(
+                            assistance_scale
+                            if actor_observe_torso_wrench_assistance
+                            else jp.zeros_like(assistance_scale)
+                        )
+                        if actor_torso_wrench_assistance_conditioning
+                        else None,
                     )
-                    if actor_torso_wrench_assistance_conditioning
-                    else None,
                 )
                 action = action.astype(jp.float64)
                 parent_action = parent_action.astype(jp.float64)
@@ -2099,15 +2253,15 @@ def train(
                         legacy_frame_dim=preview_legacy_frame_dim,
                         treatment_frame_dim=env.actor_frame_obs_dim,
                     )
-                    parent_action = actor.apply(actor_params, parent_obs).astype(
-                        jp.float64
-                    )
+                    parent_action = actor.apply(
+                        actor_params, parent_obs
+                    ).astype(jp.float64)
             if actor_residual_preview_adapter:
                 pass
             elif initial_full_actor_policy is not None:
-                action = apply_trainable_rmr_policy(actor_params, actor_obs).astype(
-                    jp.float64
-                )
+                action = apply_trainable_rmr_policy(
+                    actor_params, actor_obs
+                ).astype(jp.float64)
             elif source_actor_policy is None:
                 action = residual_logits.astype(jp.float64)
             else:
@@ -2116,7 +2270,9 @@ def train(
                     actor_obs,
                     residual_logits,
                     action_scale=residual_action_scale,
-                    differentiate_source_feedback=(differentiate_source_feedback),
+                    differentiate_source_feedback=(
+                        differentiate_source_feedback
+                    ),
                 ).astype(jp.float64)
 
             # Reparameterized action noise
@@ -2214,7 +2370,9 @@ def train(
             critic_norm_state,
             env._get_critic_obs(final_state.data, final_state.info),
         ).astype(jp.float32)
-        final_v = squeeze_value_head(critic.apply(target_critic_params, final_obs))
+        final_v = squeeze_value_head(
+            critic.apply(target_critic_params, final_obs)
+        )
         final_bootstrap = jp.where(
             traj["done"][-1],
             0.0,
@@ -2256,7 +2414,9 @@ def train(
         )
 
         # Predicted values V(s_t)
-        values = squeeze_value_head(critic.apply(critic_params, flat_obs_norm))  # (H,)
+        values = squeeze_value_head(
+            critic.apply(critic_params, flat_obs_norm)
+        )  # (H,)
 
         next_v = squeeze_value_head(
             critic.apply(target_critic_params, flat_bootstrap_obs_norm)
@@ -2292,7 +2452,9 @@ def train(
     def aggregate_env_gradients(per_env_grads, max_norm):
         """Aggregates one equal-sized environment shard."""
         if max_norm is not None:
-            return aggregate_per_env_gradients(per_env_grads, max_norm=max_norm)
+            return aggregate_per_env_gradients(
+                per_env_grads, max_norm=max_norm
+            )
 
         grads = jax.tree_util.tree_map(
             lambda grad: jp.nanmean(grad, axis=0), per_env_grads
@@ -2338,7 +2500,9 @@ def train(
             info={**state.env_state.info, "difficulty": per_env_difficulty}
         )
         if actor_phase_robust_weighting or actor_cagrad:
-            actor_start_phases = jax.lax.stop_gradient(updated_env_state.info["phase"])
+            actor_start_phases = jax.lax.stop_gradient(
+                updated_env_state.info["phase"]
+            )
 
         # Pre-sample all stochastic inputs (reparameterization)
         all_action_noise = jax.random.normal(
@@ -2354,20 +2518,26 @@ def train(
             bump_key, (effective_num_envs, unroll_length, 4, 3)
         )
         if torso_wrench_assistance:
-            current_torso_wrench_assistance_scale = assistance_scale_at_step(
-                state.step,
-                start_step=torso_wrench_assistance_start_step,
-                end_step=torso_wrench_assistance_end_step,
+            current_torso_wrench_assistance_scale = (
+                assistance_scale_at_step(
+                    state.step,
+                    start_step=torso_wrench_assistance_start_step,
+                    end_step=torso_wrench_assistance_end_step,
+                )
             )
-            all_torso_wrench_assistance_scales = sample_assistance_scales(
-                assistance_mask_key,
-                num_envs=effective_num_envs,
-                scheduled_scale=current_torso_wrench_assistance_scale,
-                zero_fraction=torso_wrench_assistance_zero_fraction,
-                continuous=torso_wrench_assistance_continuous,
+            all_torso_wrench_assistance_scales = (
+                sample_assistance_scales(
+                    assistance_mask_key,
+                    num_envs=effective_num_envs,
+                    scheduled_scale=current_torso_wrench_assistance_scale,
+                    zero_fraction=torso_wrench_assistance_zero_fraction,
+                    continuous=torso_wrench_assistance_continuous,
+                )
             )
         else:
-            current_torso_wrench_assistance_scale = jp.asarray(0.0, dtype=jp.float32)
+            current_torso_wrench_assistance_scale = jp.asarray(
+                0.0, dtype=jp.float32
+            )
             all_torso_wrench_assistance_scales = jp.zeros(
                 (effective_num_envs,), dtype=jp.float32
             )
@@ -2379,7 +2549,9 @@ def train(
         )
 
         # Preserve the checkpoint's original schedule on exact continuation.
-        progress = jp.clip(state.step / action_noise_schedule_steps, 0.0, 1.0)
+        progress = jp.clip(
+            state.step / action_noise_schedule_steps, 0.0, 1.0
+        )
         current_noise_std = action_noise_std_start + progress * (
             action_noise_std_end - action_noise_std_start
         )
@@ -2416,7 +2588,9 @@ def train(
                 grads = aggregate_phase_weighted_gradients(
                     per_env_grads, phase_weighting.env_weights
                 )
-                actor_grad_stats = per_env_gradient_statistics(per_env_grads)
+                actor_grad_stats = per_env_gradient_statistics(
+                    per_env_grads
+                )
             else:
                 grads, actor_grad_stats = aggregate_env_gradients(
                     per_env_grads, actor_per_env_grad_clip
@@ -2452,12 +2626,9 @@ def train(
             def actor_microbatch_step(_, inputs):
                 shard_env_state, shard_randomization = inputs[:2]
                 (
-                    (
-                        shard_losses,
-                        (shard_trajs, shard_final_states),
-                    ),
-                    shard_per_env_grads,
-                ) = jax.vmap(
+                    shard_losses,
+                    (shard_trajs, shard_final_states),
+                ), shard_per_env_grads = jax.vmap(
                     actor_grad_fn,
                     in_axes=(None, None, None, None, 0, 0, None, None),
                 )(
@@ -2471,7 +2642,9 @@ def train(
                     current_actor_bootstrap_scale,
                 )
                 if actor_cagrad:
-                    shard_grad_stats = per_env_gradient_statistics(shard_per_env_grads)
+                    shard_grad_stats = per_env_gradient_statistics(
+                        shard_per_env_grads
+                    )
                     shard_reduction = accumulate_phase_gradients(
                         shard_per_env_grads,
                         inputs[2],
@@ -2479,8 +2652,10 @@ def train(
                         bin_count=actor_phase_bin_count,
                     )
                 else:
-                    shard_reduction, shard_grad_stats = aggregate_env_gradients(
-                        shard_per_env_grads, actor_per_env_grad_clip
+                    shard_reduction, shard_grad_stats = (
+                        aggregate_env_gradients(
+                            shard_per_env_grads, actor_per_env_grad_clip
+                        )
                     )
                 return None, (
                     shard_losses,
@@ -2488,8 +2663,12 @@ def train(
                     shard_final_states,
                     shard_reduction,
                     {
-                        "finite_by_env": shard_grad_stats["finite_by_env"],
-                        "raw_norm_by_env": shard_grad_stats["raw_norm_by_env"],
+                        "finite_by_env": shard_grad_stats[
+                            "finite_by_env"
+                        ],
+                        "raw_norm_by_env": shard_grad_stats[
+                            "raw_norm_by_env"
+                        ],
                     },
                 )
 
@@ -2535,16 +2714,22 @@ def train(
                 bin_count=actor_phase_bin_count,
             )
         if torso_wrench_assistance:
-            torso_wrench_diagnostics = torso_wrench_assistance_diagnostics(
-                trajs["torso_wrench"],
-                assistance_scales=(all_torso_wrench_assistance_scales),
-                force_cap=torso_wrench_parameters.force_cap,
-                torque_cap=torso_wrench_parameters.torque_cap,
+            torso_wrench_diagnostics = (
+                torso_wrench_assistance_diagnostics(
+                    trajs["torso_wrench"],
+                    assistance_scales=(
+                        all_torso_wrench_assistance_scales
+                    ),
+                    force_cap=torso_wrench_parameters.force_cap,
+                    torque_cap=torso_wrench_parameters.torque_cap,
+                )
             )
 
         if adaptive_phase_sampling:
             completed_failed_count = update_adaptive_phase_state(
-                failed_count=updated_env_state.info["phase_sampler_failed_count"][0],
+                failed_count=updated_env_state.info[
+                    "phase_sampler_failed_count"
+                ][0],
                 transition_phases=trajs["transition_phase"],
                 terminals=trajs["terminal"],
                 reference_length=env.reference_length,
@@ -2589,7 +2774,9 @@ def train(
                 )
             )
         else:
-            updates, new_actor_opt = actor_opt.update(grads, state.actor_opt)
+            updates, new_actor_opt = actor_opt.update(
+                grads, state.actor_opt
+            )
         actor_update_norm = compute_grad_norm(updates)
         new_actor_params = optax.apply_updates(state.actor_params, updates)
 
@@ -2629,7 +2816,9 @@ def train(
         def critic_update_step(carry, _):
             c_params, c_opt_state = carry
 
-            critic_grad_fn = jax.value_and_grad(single_env_critic_loss, argnums=0)
+            critic_grad_fn = jax.value_and_grad(
+                single_env_critic_loss, argnums=0
+            )
             if gradient_accumulation_steps == 1:
                 c_losses, c_per_env_grads = jax.vmap(
                     critic_grad_fn,
@@ -2685,16 +2874,22 @@ def train(
                         shard_bootstrap_obs,
                         shard_final_obs,
                     )
-                    shard_grads, shard_grad_stats = aggregate_env_gradients(
-                        shard_per_env_grads,
-                        critic_per_env_grad_clip,
+                    shard_grads, shard_grad_stats = (
+                        aggregate_env_gradients(
+                            shard_per_env_grads,
+                            critic_per_env_grad_clip,
+                        )
                     )
                     return None, (
                         shard_losses,
                         shard_grads,
                         {
-                            "finite_by_env": shard_grad_stats["finite_by_env"],
-                            "raw_norm_by_env": shard_grad_stats["raw_norm_by_env"],
+                            "finite_by_env": shard_grad_stats[
+                                "finite_by_env"
+                            ],
+                            "raw_norm_by_env": shard_grad_stats[
+                                "raw_norm_by_env"
+                            ],
                         },
                     )
 
@@ -2710,7 +2905,9 @@ def train(
                 ) = critic_shard_outputs
                 c_losses = flatten_population(shard_c_losses)
                 c_grads = mean_shard_trees(shard_c_grads)
-                critic_grad_stats = summarize_shard_stats(shard_critic_grad_stats)
+                critic_grad_stats = summarize_shard_stats(
+                    shard_critic_grad_stats
+                )
 
             c_updates, new_c_opt = critic_opt.update(c_grads, c_opt_state)
             new_c_params = optax.apply_updates(c_params, c_updates)
@@ -2741,13 +2938,17 @@ def train(
                 0.0, dtype=state.normalizer.mean.dtype
             )
         else:
-            flat_actor_obs = trajs["actor_obs"].reshape(-1, env.actor_frame_obs_dim)
+            flat_actor_obs = trajs["actor_obs"].reshape(
+                -1, env.actor_frame_obs_dim
+            )
             safe_actor_obs = jp.where(
                 jp.isfinite(flat_actor_obs),
                 flat_actor_obs,
                 state.normalizer.mean,
             )
-            new_actor_norm = actor_norm.update(state.normalizer, safe_actor_obs)
+            new_actor_norm = actor_norm.update(
+                state.normalizer, safe_actor_obs
+            )
 
         flat_critic_obs = trajs["critic_obs"].reshape(-1, env.critic_obs_dim)
         safe_critic_obs = jp.where(
@@ -2786,8 +2987,12 @@ def train(
             "actor_grad_raw_median": actor_grad_stats["raw_norm_median"],
             "actor_grad_raw_max": actor_grad_stats["raw_norm_max"],
             "critic_loss": critic_update_metrics["loss"][-1],
-            "critic_grad_finite_fraction": critic_update_metrics["finite_fraction"][-1],
-            "critic_grad_raw_median": critic_update_metrics["raw_norm_median"][-1],
+            "critic_grad_finite_fraction": critic_update_metrics[
+                "finite_fraction"
+            ][-1],
+            "critic_grad_raw_median": critic_update_metrics["raw_norm_median"][
+                -1
+            ],
             "critic_grad_raw_max": critic_update_metrics["raw_norm_max"][-1],
             "actor_loss": jp.mean(losses),
             "actor_bootstrap_scale_current": current_actor_bootstrap_scale,
@@ -2850,15 +3055,20 @@ def train(
         if actor_cagrad:
             cagrad_result = cagrad_reduction["result"]
             cagrad_counts_match = jp.all(
-                cagrad_loss_diagnostics["bin_counts"] == cagrad_reduction["bin_counts"]
+                cagrad_loss_diagnostics["bin_counts"]
+                == cagrad_reduction["bin_counts"]
             )
             metrics.update(
                 {
-                    "actor_cagrad_bin_counts": cagrad_reduction["bin_counts"],
+                    "actor_cagrad_bin_counts": cagrad_reduction[
+                        "bin_counts"
+                    ],
                     "actor_cagrad_bin_gradient_norms": cagrad_reduction[
                         "bin_gradient_norms"
                     ],
-                    "actor_cagrad_bin_losses": cagrad_loss_diagnostics["bin_losses"],
+                    "actor_cagrad_bin_losses": cagrad_loss_diagnostics[
+                        "bin_losses"
+                    ],
                     "actor_cagrad_weights": cagrad_result.weights,
                     "actor_cagrad_gram_matrix": cagrad_result.gram_matrix,
                     "actor_cagrad_cosine_matrix": cagrad_result.cosine_matrix,
@@ -2878,10 +3088,22 @@ def train(
         if frozen_preview_treatment:
             preview_valid = (
                 preview_action_diagnostics["valid"]
-                & jp.isfinite(preview_update_diagnostics["preview_gradient_norm"])
-                & jp.isfinite(preview_update_diagnostics["preview_update_norm"])
-                & (preview_update_diagnostics["frozen_update_max_abs"] == 0.0)
-                & (preview_update_diagnostics["frozen_moment_drift_max_abs"] == 0.0)
+                & jp.isfinite(
+                    preview_update_diagnostics["preview_gradient_norm"]
+                )
+                & jp.isfinite(
+                    preview_update_diagnostics["preview_update_norm"]
+                )
+                & (
+                    preview_update_diagnostics["frozen_update_max_abs"]
+                    == 0.0
+                )
+                & (
+                    preview_update_diagnostics[
+                        "frozen_moment_drift_max_abs"
+                    ]
+                    == 0.0
+                )
                 & (preview_normalizer_drift == 0.0)
             )
             if residual_muon_treatment:
@@ -2901,16 +3123,22 @@ def train(
             metrics.update(
                 {
                     "actor_preview_gradient_norm": (
-                        preview_update_diagnostics["preview_gradient_norm"]
+                        preview_update_diagnostics[
+                            "preview_gradient_norm"
+                        ]
                     ),
                     "actor_preview_update_norm": (
                         preview_update_diagnostics["preview_update_norm"]
                     ),
                     "actor_preview_frozen_parameter_drift_max_abs": (
-                        preview_update_diagnostics["frozen_update_max_abs"]
+                        preview_update_diagnostics[
+                            "frozen_update_max_abs"
+                        ]
                     ),
                     "actor_preview_frozen_moment_drift_max_abs": (
-                        preview_update_diagnostics["frozen_moment_drift_max_abs"]
+                        preview_update_diagnostics[
+                            "frozen_moment_drift_max_abs"
+                        ]
                     ),
                     "actor_preview_normalizer_drift_max_abs": (
                         preview_normalizer_drift
@@ -2931,23 +3159,33 @@ def train(
                 metrics.update(
                     {
                         "actor_muon_kernel_gradient_norm": (
-                            preview_update_diagnostics["muon_kernel_gradient_norm"]
+                            preview_update_diagnostics[
+                                "muon_kernel_gradient_norm"
+                            ]
                         ),
                         "actor_muon_kernel_update_norm": (
-                            preview_update_diagnostics["muon_kernel_update_norm"]
+                            preview_update_diagnostics[
+                                "muon_kernel_update_norm"
+                            ]
                         ),
                         "actor_muon_aux_adam_gradient_norm": (
-                            preview_update_diagnostics["aux_adam_gradient_norm"]
+                            preview_update_diagnostics[
+                                "aux_adam_gradient_norm"
+                            ]
                         ),
                         "actor_muon_aux_adam_update_norm": (
-                            preview_update_diagnostics["aux_adam_update_norm"]
+                            preview_update_diagnostics[
+                                "aux_adam_update_norm"
+                            ]
                         ),
                     }
                 )
         if adaptive_phase_sampling:
             metrics.update(
                 {
-                    "adaptive_phase_failure_ema": adaptive_diagnostics["failure_ema"],
+                    "adaptive_phase_failure_ema": adaptive_diagnostics[
+                        "failure_ema"
+                    ],
                     "adaptive_phase_probabilities": adaptive_diagnostics[
                         "probabilities"
                     ],
@@ -2957,7 +3195,9 @@ def train(
                     "adaptive_phase_min_probability": adaptive_diagnostics[
                         "minimum_probability"
                     ],
-                    "adaptive_phase_sampling_valid": adaptive_diagnostics["valid"],
+                    "adaptive_phase_sampling_valid": adaptive_diagnostics[
+                        "valid"
+                    ],
                 }
             )
 
@@ -2976,7 +3216,9 @@ def train(
         step=canonicalize_step_dtype(0),
     )
     if migration_report is not None:
-        persist_future_reference_migration_report(save_dir, migration_report)
+        persist_future_reference_migration_report(
+            save_dir, migration_report
+        )
     if resumed_state is not None:
         print(
             "Restoring complete training state from step "
@@ -2995,36 +3237,46 @@ def train(
                 legacy_resumed_state,
                 resumed_state,
                 actor,
-                legacy_frame_dim=int(legacy_resumed_state.normalizer.mean.shape[0]),
+                legacy_frame_dim=int(
+                    legacy_resumed_state.normalizer.mean.shape[0]
+                ),
                 treatment_frame_dim=env.actor_frame_obs_dim,
                 history_len=actor_history_len,
             )
-            persist_future_reference_migration_report(save_dir, migration_report)
+            persist_future_reference_migration_report(
+                save_dir, migration_report
+            )
         if actor_residual_preview_adapter:
             if future_reference_upgrade:
                 parent_params = resumed_state.actor_params
                 parent_optimizer_state = resumed_state.actor_opt
                 adapter_params = residual_preview_actor.init(
                     jax.random.fold_in(k1, 0x5250),
-                    jp.zeros((1, env.actor_frame_obs_dim), dtype=jp.float32),
+                    jp.zeros(
+                        (1, env.actor_frame_obs_dim), dtype=jp.float32
+                    ),
                 )
                 composite_params = FrozenPreviewResidualParams(
                     parent=parent_params,
                     adapter=adapter_params,
                 )
-                adapter_audit_optimizer_state = initialize_residual_adapter_optimizer(
-                    actor_opt,
-                    parent_optimizer_state=parent_optimizer_state,
-                    composite_params=composite_params,
+                adapter_audit_optimizer_state = (
+                    initialize_residual_adapter_optimizer(
+                        actor_opt,
+                        parent_optimizer_state=parent_optimizer_state,
+                        composite_params=composite_params,
+                    )
                 )
                 if actor_residual_preview_optimizer == "muon":
                     if residual_muon_opt is None or residual_adam_opt is None:
                         raise ValueError("residual Muon optimizers are unavailable")
-                    composite_optimizer_state = initialize_residual_muon_optimizer(
-                        muon_optimizer=residual_muon_opt,
-                        adam_optimizer=residual_adam_opt,
-                        parent_optimizer_state=parent_optimizer_state,
-                        adapter_params=adapter_params,
+                    composite_optimizer_state = (
+                        initialize_residual_muon_optimizer(
+                            muon_optimizer=residual_muon_opt,
+                            adam_optimizer=residual_adam_opt,
+                            parent_optimizer_state=parent_optimizer_state,
+                            adapter_params=adapter_params,
+                        )
                     )
                     residual_muon_report = residual_muon_migration_report(
                         parent_optimizer_state=parent_optimizer_state,
@@ -3037,16 +3289,20 @@ def train(
                     resumed_state.normalizer,
                     resumed_state.env_state.obs,
                 ).astype(jp.float32)
-                residual_adapter_report = residual_adapter_migration_report(
-                    parent_actor=actor,
-                    residual_actor=residual_preview_actor,
-                    parent_params=parent_params,
-                    parent_optimizer_state=parent_optimizer_state,
-                    candidate_params=composite_params,
-                    candidate_optimizer_state=(adapter_audit_optimizer_state),
-                    normalized_observations=normalized_observations,
-                    history_len=actor_history_len,
-                    treatment_frame_dim=env.actor_frame_obs_dim,
+                residual_adapter_report = (
+                    residual_adapter_migration_report(
+                        parent_actor=actor,
+                        residual_actor=residual_preview_actor,
+                        parent_params=parent_params,
+                        parent_optimizer_state=parent_optimizer_state,
+                        candidate_params=composite_params,
+                        candidate_optimizer_state=(
+                            adapter_audit_optimizer_state
+                        ),
+                        normalized_observations=normalized_observations,
+                        history_len=actor_history_len,
+                        treatment_frame_dim=env.actor_frame_obs_dim,
+                    )
                 )
                 resumed_state = resumed_state.replace(
                     actor_params=composite_params,
@@ -3065,14 +3321,20 @@ def train(
                 raise ValueError(
                     "resumed residual preview actor has invalid parameters"
                 )
-            elif actor_residual_preview_optimizer == "muon" and not isinstance(
-                resumed_state.actor_opt, FrozenPreviewResidualMuonState
+            elif (
+                actor_residual_preview_optimizer == "muon"
+                and not isinstance(
+                    resumed_state.actor_opt, FrozenPreviewResidualMuonState
+                )
             ):
                 raise ValueError(
                     "resumed residual Muon actor has invalid optimizer state"
                 )
-            elif actor_residual_preview_optimizer == "adam" and isinstance(
-                resumed_state.actor_opt, FrozenPreviewResidualMuonState
+            elif (
+                actor_residual_preview_optimizer == "adam"
+                and isinstance(
+                    resumed_state.actor_opt, FrozenPreviewResidualMuonState
+                )
             ):
                 raise ValueError(
                     "resumed residual Adam actor has invalid optimizer state"
@@ -3141,7 +3403,9 @@ def train(
             )
             preview_trainable_parameter_count = sum(
                 int(np.count_nonzero(np.asarray(leaf)))
-                for leaf in jax.tree_util.tree_leaves(preview_adapter_mask)
+                for leaf in jax.tree_util.tree_leaves(
+                    preview_adapter_mask
+                )
             )
             expected_residual_parameters = (
                 (
@@ -3153,7 +3417,10 @@ def train(
                 + actor_residual_preview_hidden * env.action_dim
                 + env.action_dim
             )
-            if preview_trainable_parameter_count != expected_residual_parameters:
+            if (
+                preview_trainable_parameter_count
+                != expected_residual_parameters
+            ):
                 raise ValueError(
                     "residual preview trainable parameter count is invalid"
                 )
@@ -3164,9 +3431,11 @@ def train(
                     reference_length=env.reference_length,
                 )
             )
-    resumed_state, resume_randomness_report = apply_resume_randomness_setting(
-        resumed_state,
-        seed=resume_random_seed,
+    resumed_state, resume_randomness_report = (
+        apply_resume_randomness_setting(
+            resumed_state,
+            seed=resume_random_seed,
+        )
     )
     if resume_randomness_report is not None:
         persist_resume_randomness_audit(
@@ -3279,17 +3548,25 @@ def train(
         "carried_reset_bank_path": carried_reset_bank_path,
         "carried_reset_probability": carried_reset_probability,
         "carried_reset_bank_start": carried_reset_bank_start,
-        "allow_resume_carried_reset_change": (allow_resume_carried_reset_change),
+        "allow_resume_carried_reset_change": (
+            allow_resume_carried_reset_change
+        ),
         "torso_wrench_assistance": torso_wrench_assistance,
-        "torso_wrench_assistance_start_step": (torso_wrench_assistance_start_step),
-        "torso_wrench_assistance_end_step": (torso_wrench_assistance_end_step),
+        "torso_wrench_assistance_start_step": (
+            torso_wrench_assistance_start_step
+        ),
+        "torso_wrench_assistance_end_step": (
+            torso_wrench_assistance_end_step
+        ),
         "torso_wrench_assistance_zero_fraction": (
             torso_wrench_assistance_zero_fraction
         ),
         "allow_resume_torso_wrench_assistance_change": (
             allow_resume_torso_wrench_assistance_change
         ),
-        "torso_wrench_assistance_continuous": (torso_wrench_assistance_continuous),
+        "torso_wrench_assistance_continuous": (
+            torso_wrench_assistance_continuous
+        ),
         "actor_torso_wrench_assistance_conditioning": (
             actor_torso_wrench_assistance_conditioning
         ),
@@ -3327,28 +3604,44 @@ def train(
         "max_episode_length": max_episode_length,
         "actor_history_len": actor_history_len,
         "actor_observation_noise": actor_observation_noise,
-        "actor_reference_lookahead_steps": list(actor_reference_lookahead_steps),
+        "actor_reference_lookahead_steps": list(
+            actor_reference_lookahead_steps
+        ),
         "actor_reference_preview_mode": actor_reference_preview_mode,
         "actor_preview_adapter": actor_preview_adapter,
-        "actor_residual_preview_adapter": (actor_residual_preview_adapter),
-        "actor_residual_preview_hidden": (actor_residual_preview_hidden),
-        "actor_residual_preview_optimizer": (actor_residual_preview_optimizer),
+        "actor_residual_preview_adapter": (
+            actor_residual_preview_adapter
+        ),
+        "actor_residual_preview_hidden": (
+            actor_residual_preview_hidden
+        ),
+        "actor_residual_preview_optimizer": (
+            actor_residual_preview_optimizer
+        ),
         "actor_residual_preview_muon_beta": 0.95,
         "actor_residual_preview_muon_ns_steps": 5,
         "actor_residual_preview_muon_nesterov": True,
         "actor_residual_preview_muon_preconditioning": "frobenius",
         "actor_residual_preview_muon_consistent_rms": 0.2,
         "actor_residual_preview_trainable_parameter_count": (
-            preview_trainable_parameter_count if actor_residual_preview_adapter else 0
+            preview_trainable_parameter_count
+            if actor_residual_preview_adapter
+            else 0
         ),
-        "actor_preview_trainable_parameter_count": (preview_trainable_parameter_count),
+        "actor_preview_trainable_parameter_count": (
+            preview_trainable_parameter_count
+        ),
         "actor_normalizer_frozen": frozen_preview_treatment,
         "checkpoint_phase_metrics_artifact": (
-            "checkpoint_phase_metrics.json" if frozen_preview_treatment else None
+            "checkpoint_phase_metrics.json"
+            if frozen_preview_treatment
+            else None
         ),
         "resume_future_reference_upgrade": future_reference_upgrade,
         "migration_equivalence_artifact": (
-            "migration_equivalence.json" if migration_report is not None else None
+            "migration_equivalence.json"
+            if migration_report is not None
+            else None
         ),
         "residual_adapter_migration_artifact": (
             "residual_adapter_migration.json"
@@ -3356,7 +3649,9 @@ def train(
             else None
         ),
         "residual_muon_migration_artifact": (
-            "residual_muon_migration.json" if residual_muon_report is not None else None
+            "residual_muon_migration.json"
+            if residual_muon_report is not None
+            else None
         ),
         "actor_per_env_grad_clip": actor_per_env_grad_clip,
         "critic_per_env_grad_clip": critic_per_env_grad_clip,
@@ -3490,18 +3785,28 @@ def train(
                     "height": float(metrics["height"]),
                     "tilt": float(metrics["tilt"]),
                     "actor_grad": float(metrics["actor_grad"]),
-                    "actor_update_norm": float(metrics["actor_update_norm"]),
+                    "actor_update_norm": float(
+                        metrics["actor_update_norm"]
+                    ),
                     "actor_bootstrap_scale_current": float(
                         metrics["actor_bootstrap_scale_current"]
                     ),
-                    "actor_grad_raw_median": float(metrics["actor_grad_raw_median"]),
-                    "actor_grad_raw_max": float(metrics["actor_grad_raw_max"]),
+                    "actor_grad_raw_median": float(
+                        metrics["actor_grad_raw_median"]
+                    ),
+                    "actor_grad_raw_max": float(
+                        metrics["actor_grad_raw_max"]
+                    ),
                     "actor_grad_finite_fraction": float(
                         metrics["actor_grad_finite_fraction"]
                     ),
                     "critic_loss": float(metrics["critic_loss"]),
-                    "critic_grad_raw_median": float(metrics["critic_grad_raw_median"]),
-                    "critic_grad_raw_max": float(metrics["critic_grad_raw_max"]),
+                    "critic_grad_raw_median": float(
+                        metrics["critic_grad_raw_median"]
+                    ),
+                    "critic_grad_raw_max": float(
+                        metrics["critic_grad_raw_max"]
+                    ),
                     "critic_grad_finite_fraction": float(
                         metrics["critic_grad_finite_fraction"]
                     ),
@@ -3521,7 +3826,9 @@ def train(
                             "actor_phase_weighting_valid": bool(
                                 metrics["actor_phase_weighting_valid"]
                             ),
-                            "actor_loss_unweighted": float(metrics["actor_loss"]),
+                            "actor_loss_unweighted": float(
+                                metrics["actor_loss"]
+                            ),
                             "actor_loss_weighted": float(
                                 metrics["actor_loss_weighted"]
                             ),
@@ -3555,12 +3862,16 @@ def train(
                                 metrics["actor_cagrad_dual_gap"]
                             ),
                             "actor_cagrad_uniform_combined_cosine": float(
-                                metrics["actor_cagrad_uniform_combined_cosine"]
+                                metrics[
+                                    "actor_cagrad_uniform_combined_cosine"
+                                ]
                             ),
                             "actor_cagrad_combined_norm": float(
                                 metrics["actor_cagrad_combined_norm"]
                             ),
-                            "actor_cagrad_valid": bool(metrics["actor_cagrad_valid"]),
+                            "actor_cagrad_valid": bool(
+                                metrics["actor_cagrad_valid"]
+                            ),
                         }
                     )
                 if frozen_preview_treatment:
@@ -3573,24 +3884,36 @@ def train(
                                 metrics["actor_preview_update_norm"]
                             ),
                             "actor_preview_frozen_parameter_drift_max_abs": float(
-                                metrics["actor_preview_frozen_parameter_drift_max_abs"]
+                                metrics[
+                                    "actor_preview_frozen_parameter_drift_max_abs"
+                                ]
                             ),
                             "actor_preview_frozen_moment_drift_max_abs": float(
-                                metrics["actor_preview_frozen_moment_drift_max_abs"]
+                                metrics[
+                                    "actor_preview_frozen_moment_drift_max_abs"
+                                ]
                             ),
                             "actor_preview_normalizer_drift_max_abs": float(
-                                metrics["actor_preview_normalizer_drift_max_abs"]
+                                metrics[
+                                    "actor_preview_normalizer_drift_max_abs"
+                                ]
                             ),
                             "actor_preview_bin_counts": np.asarray(
                                 metrics["actor_preview_bin_counts"]
                             ).tolist(),
                             "actor_preview_bin_action_deviation_mean_abs": np.asarray(
-                                metrics["actor_preview_bin_action_deviation_mean_abs"]
+                                metrics[
+                                    "actor_preview_bin_action_deviation_mean_abs"
+                                ]
                             ).tolist(),
                             "actor_preview_bin_action_deviation_max_abs": np.asarray(
-                                metrics["actor_preview_bin_action_deviation_max_abs"]
+                                metrics[
+                                    "actor_preview_bin_action_deviation_max_abs"
+                                ]
                             ).tolist(),
-                            "actor_preview_valid": bool(metrics["actor_preview_valid"]),
+                            "actor_preview_valid": bool(
+                                metrics["actor_preview_valid"]
+                            ),
                         }
                     )
                 if residual_muon_treatment:
@@ -3603,7 +3926,9 @@ def train(
                                 metrics["actor_muon_kernel_update_norm"]
                             ),
                             "actor_muon_aux_adam_gradient_norm": float(
-                                metrics["actor_muon_aux_adam_gradient_norm"]
+                                metrics[
+                                    "actor_muon_aux_adam_gradient_norm"
+                                ]
                             ),
                             "actor_muon_aux_adam_update_norm": float(
                                 metrics["actor_muon_aux_adam_update_norm"]
@@ -3614,10 +3939,14 @@ def train(
                     diag_entry.update(
                         {
                             "torso_wrench_assistance_scale_current": float(
-                                metrics["torso_wrench_assistance_scale_current"]
+                                metrics[
+                                    "torso_wrench_assistance_scale_current"
+                                ]
                             ),
                             "torso_wrench_assistance_active_fraction": float(
-                                metrics["torso_wrench_assistance_active_fraction"]
+                                metrics[
+                                    "torso_wrench_assistance_active_fraction"
+                                ]
                             ),
                             "torso_wrench_assistance_rms_force": float(
                                 metrics["torso_wrench_assistance_rms_force"]
@@ -3650,7 +3979,9 @@ def train(
                                 metrics["adaptive_phase_probabilities"]
                             ).tolist(),
                             "adaptive_phase_terminal_bin_counts": np.asarray(
-                                metrics["adaptive_phase_terminal_bin_counts"]
+                                metrics[
+                                    "adaptive_phase_terminal_bin_counts"
+                                ]
                             ).tolist(),
                             "adaptive_phase_min_probability": float(
                                 metrics["adaptive_phase_min_probability"]
@@ -3712,13 +4043,15 @@ def train(
 
         current_step = (i + 1) * steps_per_iter
         hparams["best_reward"] = best_reward
-        last_checkpoint_step, checkpoint_path = archive_periodic_checkpoint_if_due(
-            state,
-            save_dir,
-            last_checkpoint_step,
-            checkpoint_interval,
-            current_step=current_step,
-            hparams=hparams,
+        last_checkpoint_step, checkpoint_path = (
+            archive_periodic_checkpoint_if_due(
+                state,
+                save_dir,
+                last_checkpoint_step,
+                checkpoint_interval,
+                current_step=current_step,
+                hparams=hparams,
+            )
         )
         if checkpoint_path is not None:
             if frozen_preview_treatment:
@@ -3734,46 +4067,72 @@ def train(
                             metrics["actor_preview_update_norm"]
                         ),
                         "actor_preview_frozen_parameter_drift_max_abs": float(
-                            metrics["actor_preview_frozen_parameter_drift_max_abs"]
+                            metrics[
+                                "actor_preview_frozen_parameter_drift_max_abs"
+                            ]
                         ),
                         "actor_preview_frozen_moment_drift_max_abs": float(
-                            metrics["actor_preview_frozen_moment_drift_max_abs"]
+                            metrics[
+                                "actor_preview_frozen_moment_drift_max_abs"
+                            ]
                         ),
                         "actor_preview_normalizer_drift_max_abs": float(
-                            metrics["actor_preview_normalizer_drift_max_abs"]
+                            metrics[
+                                "actor_preview_normalizer_drift_max_abs"
+                            ]
                         ),
                         "actor_preview_bin_counts": np.asarray(
                             metrics["actor_preview_bin_counts"]
                         ).tolist(),
                         "actor_preview_bin_action_deviation_mean_abs": np.asarray(
-                            metrics["actor_preview_bin_action_deviation_mean_abs"]
+                            metrics[
+                                "actor_preview_bin_action_deviation_mean_abs"
+                            ]
                         ).tolist(),
                         "actor_preview_bin_action_deviation_max_abs": np.asarray(
-                            metrics["actor_preview_bin_action_deviation_max_abs"]
+                            metrics[
+                                "actor_preview_bin_action_deviation_max_abs"
+                            ]
                         ).tolist(),
-                        "actor_preview_valid": bool(metrics["actor_preview_valid"]),
+                        "actor_preview_valid": bool(
+                            metrics["actor_preview_valid"]
+                        ),
                         **(
                             {
                                 "torso_wrench_assistance_scale_current": float(
-                                    metrics["torso_wrench_assistance_scale_current"]
+                                    metrics[
+                                        "torso_wrench_assistance_scale_current"
+                                    ]
                                 ),
                                 "torso_wrench_assistance_active_fraction": float(
-                                    metrics["torso_wrench_assistance_active_fraction"]
+                                    metrics[
+                                        "torso_wrench_assistance_active_fraction"
+                                    ]
                                 ),
                                 "torso_wrench_assistance_rms_force": float(
-                                    metrics["torso_wrench_assistance_rms_force"]
+                                    metrics[
+                                        "torso_wrench_assistance_rms_force"
+                                    ]
                                 ),
                                 "torso_wrench_assistance_rms_torque": float(
-                                    metrics["torso_wrench_assistance_rms_torque"]
+                                    metrics[
+                                        "torso_wrench_assistance_rms_torque"
+                                    ]
                                 ),
                                 "torso_wrench_assistance_max_force": float(
-                                    metrics["torso_wrench_assistance_max_force"]
+                                    metrics[
+                                        "torso_wrench_assistance_max_force"
+                                    ]
                                 ),
                                 "torso_wrench_assistance_max_torque": float(
-                                    metrics["torso_wrench_assistance_max_torque"]
+                                    metrics[
+                                        "torso_wrench_assistance_max_torque"
+                                    ]
                                 ),
                                 "torso_wrench_assistance_valid": bool(
-                                    metrics["torso_wrench_assistance_valid"]
+                                    metrics[
+                                        "torso_wrench_assistance_valid"
+                                    ]
                                 ),
                             }
                             if torso_wrench_assistance
@@ -3782,16 +4141,24 @@ def train(
                         **(
                             {
                                 "actor_muon_kernel_gradient_norm": float(
-                                    metrics["actor_muon_kernel_gradient_norm"]
+                                    metrics[
+                                        "actor_muon_kernel_gradient_norm"
+                                    ]
                                 ),
                                 "actor_muon_kernel_update_norm": float(
-                                    metrics["actor_muon_kernel_update_norm"]
+                                    metrics[
+                                        "actor_muon_kernel_update_norm"
+                                    ]
                                 ),
                                 "actor_muon_aux_adam_gradient_norm": float(
-                                    metrics["actor_muon_aux_adam_gradient_norm"]
+                                    metrics[
+                                        "actor_muon_aux_adam_gradient_norm"
+                                    ]
                                 ),
                                 "actor_muon_aux_adam_update_norm": float(
-                                    metrics["actor_muon_aux_adam_update_norm"]
+                                    metrics[
+                                        "actor_muon_aux_adam_update_norm"
+                                    ]
                                 ),
                             }
                             if residual_muon_treatment

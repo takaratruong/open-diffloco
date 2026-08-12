@@ -115,6 +115,8 @@ def action_noise_tape(*, seed: int, steps: int, action_std) -> np.ndarray:
         raise ValueError(
             "action noise standard deviations must be finite and non-negative"
         )
+    if np.array_equal(std, np.zeros_like(std)):
+        return np.zeros((steps, len(std)), dtype=np.float64)
     return epsilon_tape(seed=seed, steps=steps) * std
 
 
@@ -281,13 +283,18 @@ def _read_summary(path: Path) -> dict[str, Any]:
         "artificially_truncated",
         "checkpoint_sha256",
         "reference_sha256",
+        "mean_reward",
+        "max_anchor_z_error",
+        "max_anchor_xy_error",
+        "max_gravity_z_error",
+        "max_distal_z_error",
     }
     if not isinstance(payload, dict) or not required.issubset(payload):
         raise ValueError("summary artifact has incomplete schema")
     return payload
 
 
-def _validate_media(path: Path) -> None:
+def _validate_media(path: Path, *, expected_frames: int | None = None) -> None:
     import imageio.v2 as imageio
 
     if path.stat().st_size == 0:
@@ -295,11 +302,14 @@ def _validate_media(path: Path) -> None:
     try:
         if path.suffix == ".mp4":
             with imageio.get_reader(path) as reader:
-                frame = reader.get_next_data()
+                frames = [frame for frame in reader]
+            frame = frames[0] if frames else np.empty(0)
         else:
             frame = imageio.imread(path)
     except Exception as error:
         raise ValueError(f"undecodable media artifact: {path.name}") from error
+    if path.suffix == ".mp4" and len(frames) != expected_frames:
+        raise ValueError(f"MP4 frame count does not match rollout: {path.name}")
     if np.asarray(frame).size == 0:
         raise ValueError(f"empty decoded media artifact: {path.name}")
 
@@ -310,7 +320,7 @@ def _validate_arm_artifacts(
     arm: str,
     provenance: dict[str, Any],
     require_media: bool,
-) -> tuple[dict[str, Any], dict[str, str]]:
+) -> tuple[dict[str, Any], dict[str, str], np.ndarray]:
     required = REQUIRED_ARTIFACTS if require_media else REQUIRED_ARTIFACTS[:2]
     paths = {name: directory / name for name in required}
     for name, path in paths.items():
@@ -340,6 +350,9 @@ def _validate_arm_artifacts(
                 "action_noise",
                 "action",
                 "joint_names",
+                "xfrc_applied",
+                "remaining_reference_transitions",
+                "requested_step_limit",
             }
             if not required_arrays.issubset(archive.files):
                 raise ValueError(f"{arm} evaluation archive has incomplete schema")
@@ -348,6 +361,9 @@ def _validate_arm_artifacts(
                 archive[key]
                 for key in ("action_mean", "epsilon", "action_noise", "action")
             )
+            xfrc = archive["xfrc_applied"]
+            remaining = int(archive["remaining_reference_transitions"])
+            requested = int(archive["requested_step_limit"])
             joint_names = tuple(map(str, archive["joint_names"]))
     except (OSError, ValueError) as error:
         raise ValueError(f"invalid {arm} evaluation archive") from error
@@ -365,28 +381,68 @@ def _validate_arm_artifacts(
         raise ValueError(f"{arm} evaluation telemetry is nonfinite or has wrong shape")
     if joint_names != RMR_ACTION_STD_JOINT_NAMES:
         raise ValueError(f"{arm} evaluation joint order mismatch")
+    expected_epsilon = epsilon_tape(seed=provenance["seed"], steps=rows)
+    if not np.array_equal(epsilon, expected_epsilon):
+        raise ValueError(f"{arm} epsilon is not the registered seeded tape")
+    if (
+        xfrc.shape[0] != rows
+        or not np.isfinite(xfrc).all()
+        or np.any(xfrc != 0.0)
+        or np.signbit(xfrc).any()
+    ):
+        raise ValueError(f"{arm} applied wrench is not bit-exact positive zero")
     std = (
         np.zeros(29, dtype=np.float64)
         if arm == "deterministic"
         else np.asarray(provenance["rmr_action_std"], dtype=np.float64)
     )
-    if not np.allclose(noise, epsilon * std, rtol=0.0, atol=1e-12):
+    expected_noise = (
+        np.zeros((rows, 29), dtype=np.float64)
+        if arm == "deterministic"
+        else epsilon * std
+    )
+    if not np.array_equal(noise, expected_noise):
         raise ValueError(f"{arm} action noise does not equal epsilon times std")
     if not np.allclose(action, np.clip(mean + noise, -1.0, 1.0), rtol=0.0, atol=1e-12):
         raise ValueError(f"{arm} applied action does not match action mean plus noise")
-    exact_zero = bool(np.array_equal(noise, np.zeros_like(noise)))
+    exact_zero = bool(
+        np.array_equal(noise, np.zeros_like(noise)) and not np.signbit(noise).any()
+    )
     if bool(summary["action_noise_exact_zero"]) != exact_zero:
         raise ValueError(f"{arm} summary noise-zero field disagrees with archive")
     if arm == "deterministic" and not exact_zero:
         raise ValueError("deterministic arm does not have exact-zero action noise")
     if arm == "rmr-noisy" and exact_zero:
         raise ValueError("RMR noisy arm unexpectedly has exact-zero action noise")
-    if summary["steps"] != rows:
-        raise ValueError(f"{arm} summary row count mismatch")
+    true_terminal = bool(np.any(values[:, 4] > 0.5))
+    expected_summary = {
+        "steps": rows,
+        "terminal": true_terminal,
+        "remaining_reference_transitions": remaining,
+        "requested_step_limit": None if requested < 0 else requested,
+        "completed_reference_suffix": rows == remaining and not true_terminal,
+        "intermediate_reset_occurred": true_terminal,
+        "artificially_truncated": requested >= 0 and rows < remaining,
+        "mean_reward": float(np.mean(values[:, 2])),
+        **summarize_stability_errors(
+            {
+                "anchor_z_error": values[:, 12],
+                "anchor_xy_error": values[:, 13],
+                "gravity_z_error": values[:, 14],
+                "distal_z_error": values[:, 15],
+            }
+        ),
+    }
+    for key, expected in expected_summary.items():
+        if summary[key] != expected:
+            raise ValueError(f"{arm} summary {key} disagrees with raw archive")
     for media in ("evaluation.mp4", "contact_sheet.png"):
         if require_media:
-            _validate_media(paths[media])
-    return summary, {name: _sha256(path) for name, path in paths.items()}
+            _validate_media(
+                paths[media],
+                expected_frames=(rows + 1) // 2 if media.endswith("mp4") else None,
+            )
+    return summary, {name: _sha256(path) for name, path in paths.items()}, epsilon
 
 
 def rollout_arm(
@@ -420,6 +476,7 @@ def rollout_arm(
     action_means: list[np.ndarray] = []
     applied_actions: list[np.ndarray] = []
     frames: list[np.ndarray] = []
+    applied_wrenches: list[np.ndarray] = []
     assistance_exact_zero = True
     reset_fingerprint = _state_fingerprint(initial_state)
     actual_renderer = reference_renderer = actual_data = reference_data = None
@@ -443,11 +500,11 @@ def rollout_arm(
                     reference_data,
                 )
             )
+        wrench = np.asarray(state.data.xfrc_applied, dtype=np.float64)
+        applied_wrenches.append(wrench)
         assistance_exact_zero &= bool(
-            np.array_equal(
-                np.asarray(state.data.xfrc_applied),
-                np.zeros_like(np.asarray(state.data.xfrc_applied)),
-            )
+            np.array_equal(wrench, np.zeros_like(wrench))
+            and not np.signbit(wrench).any()
         )
         mean = np.asarray(action_fn(state), dtype=np.float64)
         action = noisy_action(
@@ -467,6 +524,10 @@ def rollout_arm(
     values = np.asarray(records, dtype=np.float64)
     if values.size == 0 or not np.isfinite(values).all():
         raise ValueError("rollout emitted no finite telemetry")
+    exact_zero_noise = bool(
+        np.array_equal(noise[: len(records)], np.zeros_like(noise[: len(records)]))
+        and not np.signbit(noise[: len(records)]).any()
+    )
     _write_npz_atomic(
         output_dir / "evaluation.npz",
         columns=np.asarray(RECORD_COLUMNS),
@@ -476,6 +537,11 @@ def rollout_arm(
         action_noise=noise[: len(records)],
         action=np.asarray(applied_actions),
         joint_names=np.asarray(env.actor_joint_names),
+        xfrc_applied=np.asarray(applied_wrenches),
+        remaining_reference_transitions=np.asarray(remaining, dtype=np.int64),
+        requested_step_limit=np.asarray(
+            -1 if max_steps is None else max_steps, dtype=np.int64
+        ),
     )
     if render:
         if not frames:
@@ -502,9 +568,7 @@ def rollout_arm(
         "completed_reference_suffix": len(records) == remaining and not true_terminal,
         "intermediate_reset_occurred": true_terminal,
         "paired_reset_state_sha256": reset_fingerprint,
-        "action_noise_exact_zero": bool(
-            np.array_equal(noise[: len(records)], np.zeros_like(noise[: len(records)]))
-        ),
+        "action_noise_exact_zero": exact_zero_noise,
         "assistance_exact_zero": assistance_exact_zero,
         "noise_seed": seed,
         "noise_joint_names": list(env.actor_joint_names),
@@ -526,10 +590,20 @@ def build_pair_manifest(
     """Reopen, validate, and cryptographically bind the complete pair evidence."""
     if set(arms) != {"deterministic", "rmr-noisy"}:
         raise ValueError("pair requires deterministic and rmr-noisy arms")
+    pinned = np.asarray(RMR_ACTION_STD, dtype=np.float32)
+    received = np.asarray(provenance.get("rmr_action_std"), dtype=np.float32)
+    if received.shape != pinned.shape or not np.array_equal(received, pinned):
+        raise ValueError("provenance RMR action std is not the pinned float32 vector")
+    if (
+        tuple(provenance.get("action_noise_joint_names", ()))
+        != RMR_ACTION_STD_JOINT_NAMES
+    ):
+        raise ValueError("provenance RMR action joint order is not pinned")
     reopened: dict[str, dict[str, Any]] = {}
     hashes: dict[str, dict[str, str]] = {}
+    epsilons: dict[str, np.ndarray] = {}
     for arm in ("deterministic", "rmr-noisy"):
-        summary, arm_hashes = _validate_arm_artifacts(
+        summary, arm_hashes, epsilon = _validate_arm_artifacts(
             output_dir / arm,
             arm=arm,
             provenance=provenance,
@@ -537,10 +611,12 @@ def build_pair_manifest(
         )
         if arms[arm] != summary:
             raise ValueError(f"{arm} supplied arm summary is stale or mismatched")
-        reopened[arm], hashes[arm] = summary, arm_hashes
+        reopened[arm], hashes[arm], epsilons[arm] = summary, arm_hashes, epsilon
     deterministic, noisy = reopened["deterministic"], reopened["rmr-noisy"]
     if deterministic["paired_reset_state_sha256"] != noisy["paired_reset_state_sha256"]:
         raise ValueError("arms do not share an identical reset state")
+    if not np.array_equal(epsilons["deterministic"], epsilons["rmr-noisy"]):
+        raise ValueError("arms do not share the identical seeded epsilon tape")
     return {
         "protocol": "g1-rmr-action-noise-matched-pair-v1",
         "valid": bool(require_media),
