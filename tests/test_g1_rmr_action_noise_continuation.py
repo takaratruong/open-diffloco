@@ -260,3 +260,17 @@ def test_training_validation_requires_32_updates_fixed_noise_and_finite_cagrad(
     (run / f"checkpoint_step_{extra_step}.pkl").write_bytes(b"checkpoint")
     with pytest.raises(ValueError, match="exactly four"):
         validate_training_artifacts(run)
+
+    (run / f"checkpoint_step_{extra_step}.pkl").unlink()
+    first_checkpoint = run / f"checkpoint_step_{expected_checkpoint_steps()[0]}.pkl"
+    first_checkpoint.unlink()
+    first_checkpoint.mkdir()
+    with pytest.raises(ValueError, match="regular files"):
+        validate_training_artifacts(run)
+
+    first_checkpoint.rmdir()
+    first_checkpoint.symlink_to(
+        run / f"checkpoint_step_{expected_checkpoint_steps()[1]}.pkl"
+    )
+    with pytest.raises(ValueError, match="regular files"):
+        validate_training_artifacts(run)

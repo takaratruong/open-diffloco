@@ -270,13 +270,14 @@ def validate_training_artifacts(run_directory: Path) -> dict[str, Any]:
         raise ValueError("training update count does not match 32")
     steps = expected_checkpoint_steps()
     checkpoint_names = {f"checkpoint_step_{step}.pkl" for step in steps}
-    archived_checkpoint_names = {
-        path.name for path in run_directory.glob("checkpoint_step_*.pkl")
-    }
+    archived_checkpoints = tuple(run_directory.glob("checkpoint_step_*.pkl"))
+    archived_checkpoint_names = {path.name for path in archived_checkpoints}
     if archived_checkpoint_names != checkpoint_names:
         raise ValueError(
             "dense checkpoint cadence must contain exactly four checkpoints"
         )
+    if any(path.is_symlink() or not path.is_file() for path in archived_checkpoints):
+        raise ValueError("dense checkpoint artifacts must be regular files")
     rows = json.loads((run_directory / "checkpoint_phase_metrics.json").read_text())
     if (
         not isinstance(rows, list)
