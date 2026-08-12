@@ -20,7 +20,7 @@ contracts. Change only both action-noise endpoints to scalar
 resume authority already required for that treatment change.
 
 The scalar must be derived once from the pinned float32 RMR vector as
-`sqrt(mean(vector ** 2))` in float64 and then frozen as a named constant. It is
+`sqrt(mean(float64(vector) ** 2))` and then frozen as a named constant. It is
 not a tunable argument.
 
 ## Outcomes

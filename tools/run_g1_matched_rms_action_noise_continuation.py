@@ -33,6 +33,7 @@ MATCHED_RMS_ACTION_NOISE_STD = float(
         )
     )
 )
+MATCHED_RMS_FORMULA = "sqrt(mean(float64(rmr_float32_vector) ** 2))"
 
 
 def build_matched_rms_action_noise_kwargs(
@@ -85,7 +86,7 @@ def validate_preflight(
         protocol="g1-matched-rms-action-noise-continuation-preflight-v1",
         treatment="fixed-scalar-rmr-rms",
         matched_rms_action_noise_std=MATCHED_RMS_ACTION_NOISE_STD,
-        matched_rms_formula="sqrt(mean(float64(rmr_float32_vector ** 2)))",
+        matched_rms_formula=MATCHED_RMS_FORMULA,
     )
     return payload
 

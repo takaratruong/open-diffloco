@@ -40,6 +40,7 @@ def test_matched_scalar_is_exact_rmr_vector_rms():
     from src.core.rmr_action_noise import RMR_ACTION_STD
     from tools.run_g1_matched_rms_action_noise_continuation import (
         MATCHED_RMS_ACTION_NOISE_STD,
+        MATCHED_RMS_FORMULA,
     )
 
     expected = float(
@@ -55,6 +56,9 @@ def test_matched_scalar_is_exact_rmr_vector_rms():
     )
     assert MATCHED_RMS_ACTION_NOISE_STD == expected
     assert MATCHED_RMS_ACTION_NOISE_STD == 0.25027265203867416
+    assert MATCHED_RMS_FORMULA == (
+        "sqrt(mean(float64(rmr_float32_vector) ** 2))"
+    )
 
 
 def test_matched_scalar_changes_only_registered_continuation_fields(tmp_path):
