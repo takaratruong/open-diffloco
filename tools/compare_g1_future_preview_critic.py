@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 import pickle
 import subprocess
 from pathlib import Path
@@ -284,6 +285,45 @@ def validate_initial_equivalence(
     return drift
 
 
+def write_confirmation_artifact(
+    path: Path,
+    confirmation,
+    *,
+    phases: tuple[int, ...],
+) -> None:
+    """Atomically retain the complete shared raw confirmation trajectories."""
+    if not phases or len(set(phases)) != len(phases):
+        raise ValueError("confirmation artifact phases must be nonempty and unique")
+    payload = {}
+    for phase in phases:
+        try:
+            rows = confirmation[phase]
+            observations = np.asarray(rows["critic_observations"])
+            rewards = np.asarray(rows["rewards"])
+            returns = np.asarray(rows["returns"])
+        except KeyError as error:
+            raise ValueError("confirmation artifact is missing required rows") from error
+        if (
+            observations.ndim != 2
+            or rewards.shape != (observations.shape[0],)
+            or returns.shape != (observations.shape[0],)
+            or not np.all(np.isfinite(observations))
+            or not np.all(np.isfinite(rewards))
+            or not np.all(np.isfinite(returns))
+        ):
+            raise ValueError("confirmation artifact rows are malformed or nonfinite")
+        payload[f"phase_{phase}_critic_observations"] = observations
+        payload[f"phase_{phase}_rewards"] = rewards
+        payload[f"phase_{phase}_returns"] = returns
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    with temporary.open("wb") as stream:
+        np.savez_compressed(stream, **payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
+
 def future_preview_advances(
     original_metrics: dict[str, float],
     baseline_metrics: dict[str, float],
@@ -555,6 +595,13 @@ def main() -> None:
 
     output = args.output_directory.resolve()
     output.mkdir(parents=True, exist_ok=False)
+    confirmation_path = output / "confirmation_trajectories.npz"
+    write_confirmation_artifact(
+        confirmation_path,
+        confirmation,
+        phases=CONFIRMATION_PHASES,
+    )
+    confirmation_sha256 = _sha256(confirmation_path)
     artifact_path = output / "future_preview_critic.pkl"
     artifact_sha256 = None
     if success:
@@ -610,6 +657,10 @@ def main() -> None:
         "confirmation_survival": {
             str(phase): int(confirmation[phase]["returns"].size)
             for phase in CONFIRMATION_PHASES
+        },
+        "confirmation_artifact": {
+            "path": confirmation_path.name,
+            "sha256": confirmation_sha256,
         },
         "original_metrics": original_metrics,
         "baseline_metrics": baseline_metrics,

@@ -18,6 +18,7 @@ from tools.compare_g1_future_preview_critic import (
     migrate_critic_input,
     row_phases,
     validate_initial_equivalence,
+    write_confirmation_artifact,
 )
 
 
@@ -225,4 +226,36 @@ def test_initial_equivalence_fails_closed_above_tolerance():
             np.array([1.0, 2.0]),
             np.array([1.0, 2.0 + 2e-6]),
             tolerance=1e-6,
+        )
+
+
+def test_confirmation_artifact_atomically_retains_every_shared_raw_row(tmp_path):
+    confirmation = {
+        15: {
+            "critic_observations": np.arange(6, dtype=np.float32).reshape(2, 3),
+            "rewards": np.array([1.0, 0.5]),
+            "returns": np.array([1.5, 0.5]),
+        },
+        115: {
+            "critic_observations": np.arange(3, dtype=np.float32).reshape(1, 3),
+            "rewards": np.array([0.25]),
+            "returns": np.array([0.25]),
+        },
+    }
+    path = tmp_path / "confirmation.npz"
+    write_confirmation_artifact(path, confirmation, phases=(15, 115))
+    assert path.is_file()
+    assert not (tmp_path / ".confirmation.npz.tmp").exists()
+    with np.load(path, allow_pickle=False) as archive:
+        assert set(archive.files) == {
+            "phase_15_critic_observations",
+            "phase_15_rewards",
+            "phase_15_returns",
+            "phase_115_critic_observations",
+            "phase_115_rewards",
+            "phase_115_returns",
+        }
+        np.testing.assert_array_equal(
+            archive["phase_15_critic_observations"],
+            confirmation[15]["critic_observations"],
         )
