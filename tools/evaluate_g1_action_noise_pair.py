@@ -6,9 +6,9 @@ import argparse
 from contextlib import nullcontext
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
+import shutil
 from typing import Any, Callable
 
 import numpy as np
@@ -27,7 +27,6 @@ from tools.evaluate_g1_tracking import (
     remaining_reference_transitions,
     summarize_stability_errors,
 )
-from tools.prepare_g1_rmr_reference import sha256_file
 
 
 E008_SELECTED_CHECKPOINT_SHA256 = (
@@ -39,9 +38,7 @@ E008_SELECTED_HPARAMS_SHA256 = (
 E008_REFERENCE_SHA256 = (
     "bf8c8b407062d1b309440f4c1787c345b04d79501ea75f615e5b41c0c5ebb6db"
 )
-E008_MODEL_SHA256 = (
-    "5d76cf92f00dd49d6eb9fae38d7d38e46886848b602ac691051e886c3bcccfb1"
-)
+E008_MODEL_SHA256 = "5d76cf92f00dd49d6eb9fae38d7d38e46886848b602ac691051e886c3bcccfb1"
 E008_CONTROLLER_SHA256 = (
     "f832285356d8fc10b226b6bbf557520d5323c7c9022ae6dbd00c683b06e5b7ee"
 )
@@ -115,7 +112,9 @@ def action_noise_tape(*, seed: int, steps: int, action_std) -> np.ndarray:
     if steps < 1 or std.shape != (len(RMR_ACTION_STD_JOINT_NAMES),):
         raise ValueError("action noise tape requires positive steps and shape (29,)")
     if not np.isfinite(std).all() or (std < 0.0).any():
-        raise ValueError("action noise standard deviations must be finite and non-negative")
+        raise ValueError(
+            "action noise standard deviations must be finite and non-negative"
+        )
     return epsilon_tape(seed=seed, steps=steps) * std
 
 
@@ -128,9 +127,7 @@ def epsilon_tape(*, seed: int, steps: int) -> np.ndarray:
     )
 
 
-def noisy_action(
-    action_mean, epsilon, action_std, *, actor_joint_names
-) -> np.ndarray:
+def noisy_action(action_mean, epsilon, action_std, *, actor_joint_names) -> np.ndarray:
     """Apply the validated, source-order perturbation directly before stepping."""
     std = validate_action_noise_std(
         action_std,
@@ -141,7 +138,9 @@ def noisy_action(
     sample = np.asarray(epsilon, dtype=np.float64)
     std = np.asarray(std, dtype=np.float64)
     if mean.shape != std.shape or sample.shape != std.shape:
-        raise ValueError("action mean, epsilon, and standard deviation must all have shape (29,)")
+        raise ValueError(
+            "action mean, epsilon, and standard deviation must all have shape (29,)"
+        )
     return np.clip(mean + sample * std, -1.0, 1.0)
 
 
@@ -169,7 +168,9 @@ def build_provenance(
     """Hash every causal input before the first rollout is allowed to begin."""
     paths = (checkpoint, reference, model_path, controller_path)
     if any(not path.is_file() for path in paths):
-        raise ValueError("checkpoint, reference, model, and controller must be readable files")
+        raise ValueError(
+            "checkpoint, reference, model, and controller must be readable files"
+        )
     profile = get_solver_profile(solver_profile)
     return {
         "protocol": "g1-rmr-action-noise-matched-pair-v1",
@@ -206,20 +207,27 @@ def validate_selected_e008(provenance: dict[str, Any]) -> None:
     if actual != expected:
         raise ValueError(f"selected E-20260812-008 provenance mismatch: {actual}")
     assets = provenance["runtime_assets"]
-    if assets["model_sha256"] != E008_MODEL_SHA256 or assets["controller_sha256"] != E008_CONTROLLER_SHA256:
+    if (
+        assets["model_sha256"] != E008_MODEL_SHA256
+        or assets["controller_sha256"] != E008_CONTROLLER_SHA256
+    ):
         raise ValueError("selected E-20260812-008 runtime asset provenance mismatch")
 
 
 def _record(state: Any, *, step: int, phase: int, next_phase: int) -> tuple[float, ...]:
     return (
-        float(step), float(phase), float(state.reward), float(state.done),
+        float(step),
+        float(phase),
+        float(state.reward),
+        float(state.done),
         float(state.info["terminal"]),
         float(state.metrics["anchor_position_error"]),
         float(state.metrics["anchor_orientation_error"]),
         float(state.metrics["body_position_error"]),
         float(state.metrics["body_orientation_error"]),
         float(state.metrics["body_linear_velocity_error"]),
-        float(state.metrics["body_angular_velocity_error"]), float(next_phase),
+        float(state.metrics["body_angular_velocity_error"]),
+        float(next_phase),
         float(state.metrics["termination_anchor_z_error"]),
         float(state.metrics["termination_anchor_xy_error"]),
         float(state.metrics["termination_gravity_z_error"]),
@@ -241,6 +249,144 @@ def _write_contact_sheet_atomic(path: Path, frames: list[np.ndarray]) -> None:
     temporary = path.with_name(f".{path.stem}.tmp{path.suffix}")
     make_contact_sheet(frames, temporary)
     os.replace(temporary, path)
+
+
+def prepare_output_staging(output_dir: Path) -> Path:
+    """Reserve a fresh publication target and return its private staging dir."""
+    if output_dir.exists():
+        raise FileExistsError(f"output directory already exists: {output_dir}")
+    staging = output_dir.parent / f".{output_dir.name}.staging"
+    if staging.exists():
+        raise FileExistsError(f"stale output staging directory exists: {staging}")
+    staging.mkdir(parents=True)
+    return staging
+
+
+def _read_summary(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid summary artifact: {path}") from error
+    required = {
+        "steps",
+        "terminal",
+        "evaluation_start_phase",
+        "remaining_reference_transitions",
+        "paired_reset_state_sha256",
+        "action_noise_exact_zero",
+        "assistance_exact_zero",
+        "noise_seed",
+        "noise_joint_names",
+        "requested_step_limit",
+        "artificially_truncated",
+        "checkpoint_sha256",
+        "reference_sha256",
+    }
+    if not isinstance(payload, dict) or not required.issubset(payload):
+        raise ValueError("summary artifact has incomplete schema")
+    return payload
+
+
+def _validate_media(path: Path) -> None:
+    import imageio.v2 as imageio
+
+    if path.stat().st_size == 0:
+        raise ValueError(f"empty media artifact: {path.name}")
+    try:
+        if path.suffix == ".mp4":
+            with imageio.get_reader(path) as reader:
+                frame = reader.get_next_data()
+        else:
+            frame = imageio.imread(path)
+    except Exception as error:
+        raise ValueError(f"undecodable media artifact: {path.name}") from error
+    if np.asarray(frame).size == 0:
+        raise ValueError(f"empty decoded media artifact: {path.name}")
+
+
+def _validate_arm_artifacts(
+    directory: Path,
+    *,
+    arm: str,
+    provenance: dict[str, Any],
+    require_media: bool,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    required = REQUIRED_ARTIFACTS if require_media else REQUIRED_ARTIFACTS[:2]
+    paths = {name: directory / name for name in required}
+    for name, path in paths.items():
+        if not path.is_file():
+            raise ValueError(f"{arm} missing required artifact: {name}")
+    summary = _read_summary(paths["summary.json"])
+    if (
+        summary["checkpoint_sha256"] != provenance["checkpoint_sha256"]
+        or summary["reference_sha256"] != provenance["reference_sha256"]
+    ):
+        raise ValueError(f"{arm} summary checkpoint/reference provenance mismatch")
+    if summary["noise_seed"] != provenance["seed"]:
+        raise ValueError(f"{arm} summary noise seed mismatch")
+    if tuple(summary["noise_joint_names"]) != RMR_ACTION_STD_JOINT_NAMES:
+        raise ValueError(f"{arm} summary joint order mismatch")
+    if summary["assistance_exact_zero"] is not True:
+        raise ValueError(f"{arm} assistance is not exact zero")
+    if require_media and summary["artificially_truncated"]:
+        raise ValueError(f"{arm} rollout was artificially truncated")
+    try:
+        with np.load(paths["evaluation.npz"], allow_pickle=False) as archive:
+            required_arrays = {
+                "columns",
+                "values",
+                "action_mean",
+                "epsilon",
+                "action_noise",
+                "action",
+                "joint_names",
+            }
+            if not required_arrays.issubset(archive.files):
+                raise ValueError(f"{arm} evaluation archive has incomplete schema")
+            columns, values = archive["columns"], archive["values"]
+            mean, epsilon, noise, action = (
+                archive[key]
+                for key in ("action_mean", "epsilon", "action_noise", "action")
+            )
+            joint_names = tuple(map(str, archive["joint_names"]))
+    except (OSError, ValueError) as error:
+        raise ValueError(f"invalid {arm} evaluation archive") from error
+    rows = int(values.shape[0]) if values.ndim == 2 else -1
+    if (
+        tuple(map(str, columns)) != RECORD_COLUMNS
+        or rows < 1
+        or values.shape[1] != len(RECORD_COLUMNS)
+    ):
+        raise ValueError(f"{arm} evaluation row schema mismatch")
+    if not np.isfinite(values).all() or not all(
+        array.shape == (rows, 29) and np.isfinite(array).all()
+        for array in (mean, epsilon, noise, action)
+    ):
+        raise ValueError(f"{arm} evaluation telemetry is nonfinite or has wrong shape")
+    if joint_names != RMR_ACTION_STD_JOINT_NAMES:
+        raise ValueError(f"{arm} evaluation joint order mismatch")
+    std = (
+        np.zeros(29, dtype=np.float64)
+        if arm == "deterministic"
+        else np.asarray(provenance["rmr_action_std"], dtype=np.float64)
+    )
+    if not np.allclose(noise, epsilon * std, rtol=0.0, atol=1e-12):
+        raise ValueError(f"{arm} action noise does not equal epsilon times std")
+    if not np.allclose(action, np.clip(mean + noise, -1.0, 1.0), rtol=0.0, atol=1e-12):
+        raise ValueError(f"{arm} applied action does not match action mean plus noise")
+    exact_zero = bool(np.array_equal(noise, np.zeros_like(noise)))
+    if bool(summary["action_noise_exact_zero"]) != exact_zero:
+        raise ValueError(f"{arm} summary noise-zero field disagrees with archive")
+    if arm == "deterministic" and not exact_zero:
+        raise ValueError("deterministic arm does not have exact-zero action noise")
+    if arm == "rmr-noisy" and exact_zero:
+        raise ValueError("RMR noisy arm unexpectedly has exact-zero action noise")
+    if summary["steps"] != rows:
+        raise ValueError(f"{arm} summary row count mismatch")
+    for media in ("evaluation.mp4", "contact_sheet.png"):
+        if require_media:
+            _validate_media(paths[media])
+    return summary, {name: _sha256(path) for name, path in paths.items()}
 
 
 def rollout_arm(
@@ -285,8 +431,24 @@ def rollout_arm(
     for step in range(step_limit):
         current_phase = int(state.info["phase"])
         if render and step % 2 == 0:
-            frames.append(_render_pair(env, np.asarray(state.data.qpos), np.asarray(state.data.qvel), current_phase, actual_renderer, reference_renderer, actual_data, reference_data))
-        assistance_exact_zero &= bool(np.array_equal(np.asarray(state.data.xfrc_applied), np.zeros_like(np.asarray(state.data.xfrc_applied))))
+            frames.append(
+                _render_pair(
+                    env,
+                    np.asarray(state.data.qpos),
+                    np.asarray(state.data.qvel),
+                    current_phase,
+                    actual_renderer,
+                    reference_renderer,
+                    actual_data,
+                    reference_data,
+                )
+            )
+        assistance_exact_zero &= bool(
+            np.array_equal(
+                np.asarray(state.data.xfrc_applied),
+                np.zeros_like(np.asarray(state.data.xfrc_applied)),
+            )
+        )
         mean = np.asarray(action_fn(state), dtype=np.float64)
         action = noisy_action(
             mean, epsilon[step], std, actor_joint_names=env.actor_joint_names
@@ -295,7 +457,9 @@ def rollout_arm(
         with solver_context(profile) if profile is not None else nullcontext():
             state = env.step(state, jnp.asarray(action, dtype=jnp.float64))
         next_phase = min(current_phase + env.reference_stride, env.reference_length - 1)
-        records.append(_record(state, step=step, phase=current_phase, next_phase=next_phase))
+        records.append(
+            _record(state, step=step, phase=current_phase, next_phase=next_phase)
+        )
         action_means.append(mean)
         applied_actions.append(action)
         if float(state.done) > 0.5:
@@ -303,51 +467,90 @@ def rollout_arm(
     values = np.asarray(records, dtype=np.float64)
     if values.size == 0 or not np.isfinite(values).all():
         raise ValueError("rollout emitted no finite telemetry")
-    _write_npz_atomic(output_dir / "evaluation.npz", columns=np.asarray(RECORD_COLUMNS), values=values, action_mean=np.asarray(action_means), epsilon=epsilon[:len(records)], action_noise=noise[:len(records)], action=np.asarray(applied_actions), joint_names=np.asarray(env.actor_joint_names))
+    _write_npz_atomic(
+        output_dir / "evaluation.npz",
+        columns=np.asarray(RECORD_COLUMNS),
+        values=values,
+        action_mean=np.asarray(action_means),
+        epsilon=epsilon[: len(records)],
+        action_noise=noise[: len(records)],
+        action=np.asarray(applied_actions),
+        joint_names=np.asarray(env.actor_joint_names),
+    )
     if render:
         if not frames:
             raise ValueError("rendered rollout emitted no frames")
-        _write_media_atomic(output_dir / "evaluation.mp4", frames, fps=round(1.0 / (env.dt * 2)))
+        _write_media_atomic(
+            output_dir / "evaluation.mp4", frames, fps=round(1.0 / (env.dt * 2))
+        )
         _write_contact_sheet_atomic(output_dir / "contact_sheet.png", frames)
-    stability = summarize_stability_errors({"anchor_z_error": values[:, 12], "anchor_xy_error": values[:, 13], "gravity_z_error": values[:, 14], "distal_z_error": values[:, 15]})
+    stability = summarize_stability_errors(
+        {
+            "anchor_z_error": values[:, 12],
+            "anchor_xy_error": values[:, 13],
+            "gravity_z_error": values[:, 14],
+            "distal_z_error": values[:, 15],
+        }
+    )
     true_terminal = bool(np.any(values[:, 4] > 0.5))
     summary = {
-        "steps": len(records), "terminal": bool(values[-1, 4] > 0.5),
-        "mean_reward": float(np.mean(values[:, 2])), "evaluation_start_phase": phase,
+        "steps": len(records),
+        "terminal": bool(values[-1, 4] > 0.5),
+        "mean_reward": float(np.mean(values[:, 2])),
+        "evaluation_start_phase": phase,
         "remaining_reference_transitions": remaining,
         "completed_reference_suffix": len(records) == remaining and not true_terminal,
         "intermediate_reset_occurred": true_terminal,
         "paired_reset_state_sha256": reset_fingerprint,
-        "action_noise_exact_zero": bool(np.array_equal(noise[:len(records)], np.zeros_like(noise[:len(records)]))),
+        "action_noise_exact_zero": bool(
+            np.array_equal(noise[: len(records)], np.zeros_like(noise[: len(records)]))
+        ),
         "assistance_exact_zero": assistance_exact_zero,
         "noise_seed": seed,
         "noise_joint_names": list(env.actor_joint_names),
+        "requested_step_limit": max_steps,
+        "artificially_truncated": max_steps is not None and len(records) < remaining,
         **stability,
     }
     _write_json_atomic(output_dir / "summary.json", summary)
     return summary
 
 
-def build_pair_manifest(*, output_dir: Path, provenance: dict[str, Any], arms: dict[str, dict[str, Any]], require_media: bool = True) -> dict[str, Any]:
-    """Fail closed unless both arms have complete, matching evidence."""
+def build_pair_manifest(
+    *,
+    output_dir: Path,
+    provenance: dict[str, Any],
+    arms: dict[str, dict[str, Any]],
+    require_media: bool = True,
+) -> dict[str, Any]:
+    """Reopen, validate, and cryptographically bind the complete pair evidence."""
     if set(arms) != {"deterministic", "rmr-noisy"}:
         raise ValueError("pair requires deterministic and rmr-noisy arms")
-    required = REQUIRED_ARTIFACTS if require_media else REQUIRED_ARTIFACTS[:2]
-    for arm in arms:
-        for name in required:
-            if not (output_dir / arm / name).is_file():
-                raise ValueError(f"{arm} missing required artifact: {name}")
-    deterministic, noisy = arms["deterministic"], arms["rmr-noisy"]
-    if not deterministic.get("action_noise_exact_zero", False):
-        raise ValueError("deterministic arm does not have exact-zero action noise")
-    if noisy.get("action_noise_exact_zero", True):
-        raise ValueError("RMR noisy arm unexpectedly has exact-zero action noise")
-    if deterministic.get("paired_reset_state_sha256") != noisy.get("paired_reset_state_sha256") and "paired_reset_state_sha256" in deterministic:
+    reopened: dict[str, dict[str, Any]] = {}
+    hashes: dict[str, dict[str, str]] = {}
+    for arm in ("deterministic", "rmr-noisy"):
+        summary, arm_hashes = _validate_arm_artifacts(
+            output_dir / arm,
+            arm=arm,
+            provenance=provenance,
+            require_media=require_media,
+        )
+        if arms[arm] != summary:
+            raise ValueError(f"{arm} supplied arm summary is stale or mismatched")
+        reopened[arm], hashes[arm] = summary, arm_hashes
+    deterministic, noisy = reopened["deterministic"], reopened["rmr-noisy"]
+    if deterministic["paired_reset_state_sha256"] != noisy["paired_reset_state_sha256"]:
         raise ValueError("arms do not share an identical reset state")
     return {
-        "protocol": "g1-rmr-action-noise-matched-pair-v1", "valid": bool(require_media),
-        "publication_complete": bool(require_media), "provenance": provenance,
-        "arms": arms, "artifact_requirements": list(required),
+        "protocol": "g1-rmr-action-noise-matched-pair-v1",
+        "valid": bool(require_media),
+        "publication_complete": bool(require_media),
+        "provenance": provenance,
+        "arms": reopened,
+        "artifact_requirements": list(
+            REQUIRED_ARTIFACTS if require_media else REQUIRED_ARTIFACTS[:2]
+        ),
+        "artifact_sha256": hashes,
     }
 
 
@@ -359,7 +562,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phase", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int)
-    parser.add_argument("--no-render", action="store_true", help="CPU smoke only; produces a non-publishable manifest")
+    parser.add_argument(
+        "--no-render",
+        action="store_true",
+        help="CPU smoke only; produces a non-publishable manifest",
+    )
     return parser
 
 
@@ -370,25 +577,94 @@ def main() -> None:
         raise ValueError("the registered pair fixes phase and noise seed to zero")
     if args.max_steps is not None and args.max_steps < 1:
         raise ValueError("--max-steps must be positive")
-    profile = get_solver_profile("g1-4x5")
-    env = make_evaluation_env("g1_tracking_rmr_50hz_source_step", solver_iterations=profile.iterations, solver_ls_iterations=profile.ls_iterations, reference_path=args.reference_path, reference_stride=1, actor_history_len=10, actor_reference_lookahead_steps=(4, 8, 12), actor_reference_preview_mode="delta", reference_residual_control=True, reference_residual_scale=0.5)
-    provenance = build_provenance(checkpoint=args.checkpoint.resolve(), reference=args.reference_path.resolve(), model_path=Path(env.xml_path), controller_path=Path(env.controller_path), seed=args.seed, solver_profile="g1-4x5")
-    validate_selected_e008(provenance)
-    actor, actor_params, normalizer_state = _load_policy(env, args.checkpoint.resolve(), args.seed)
-    from src.core.data_structures import Normalizer
-
-    normalizer = Normalizer(env.actor_frame_obs_dim)
-    def action_fn(state):
-        normalized = env.normalize_actor_obs(normalizer, normalizer_state, state.obs).astype(np.float32)
-        return actor.apply(actor_params, normalized).astype(np.float64)
-    deterministic_initial, noisy_initial = paired_reset(env, phase=args.phase, seed=args.seed)
+    if args.max_steps is not None and not args.no_render:
+        raise ValueError("--max-steps is only available with --no-render")
     output_dir = args.output_dir.resolve()
-    arms = {
-        "deterministic": rollout_arm(env, initial_state=deterministic_initial, action_fn=action_fn, action_std=np.zeros(env.action_dim, dtype=np.float32), phase=args.phase, seed=args.seed, max_steps=args.max_steps, profile=profile, output_dir=output_dir / "deterministic", render=not args.no_render),
-        "rmr-noisy": rollout_arm(env, initial_state=noisy_initial, action_fn=action_fn, action_std=RMR_ACTION_STD, phase=args.phase, seed=args.seed, max_steps=args.max_steps, profile=profile, output_dir=output_dir / "rmr-noisy", render=not args.no_render),
-    }
-    manifest = build_pair_manifest(output_dir=output_dir, provenance=provenance, arms=arms, require_media=not args.no_render)
-    _write_json_atomic(output_dir / "action_noise_pair.json", manifest)
+    staging = prepare_output_staging(output_dir)
+    try:
+        profile = get_solver_profile("g1-4x5")
+        env = make_evaluation_env(
+            "g1_tracking_rmr_50hz_source_step",
+            solver_iterations=profile.iterations,
+            solver_ls_iterations=profile.ls_iterations,
+            reference_path=args.reference_path,
+            reference_stride=1,
+            actor_history_len=10,
+            actor_reference_lookahead_steps=(4, 8, 12),
+            actor_reference_preview_mode="delta",
+            reference_residual_control=True,
+            reference_residual_scale=0.5,
+        )
+        provenance = build_provenance(
+            checkpoint=args.checkpoint.resolve(),
+            reference=args.reference_path.resolve(),
+            model_path=Path(env.xml_path),
+            controller_path=Path(env.controller_path),
+            seed=args.seed,
+            solver_profile="g1-4x5",
+        )
+        validate_selected_e008(provenance)
+        actor, actor_params, normalizer_state = _load_policy(
+            env, args.checkpoint.resolve(), args.seed
+        )
+        from src.core.data_structures import Normalizer
+
+        normalizer = Normalizer(env.actor_frame_obs_dim)
+
+        def action_fn(state):
+            normalized = env.normalize_actor_obs(
+                normalizer, normalizer_state, state.obs
+            ).astype(np.float32)
+            return actor.apply(actor_params, normalized).astype(np.float64)
+
+        deterministic_initial, noisy_initial = paired_reset(
+            env, phase=args.phase, seed=args.seed
+        )
+        arms = {
+            "deterministic": rollout_arm(
+                env,
+                initial_state=deterministic_initial,
+                action_fn=action_fn,
+                action_std=np.zeros(env.action_dim, dtype=np.float32),
+                phase=args.phase,
+                seed=args.seed,
+                max_steps=args.max_steps,
+                profile=profile,
+                output_dir=staging / "deterministic",
+                render=not args.no_render,
+            ),
+            "rmr-noisy": rollout_arm(
+                env,
+                initial_state=noisy_initial,
+                action_fn=action_fn,
+                action_std=RMR_ACTION_STD,
+                phase=args.phase,
+                seed=args.seed,
+                max_steps=args.max_steps,
+                profile=profile,
+                output_dir=staging / "rmr-noisy",
+                render=not args.no_render,
+            ),
+        }
+        for summary in arms.values():
+            summary.update(
+                checkpoint_sha256=provenance["checkpoint_sha256"],
+                reference_sha256=provenance["reference_sha256"],
+            )
+        # Rewrite the two sidecars after adding their provenance binding.
+        for arm, summary in arms.items():
+            _write_json_atomic(staging / arm / "summary.json", summary)
+        manifest = build_pair_manifest(
+            output_dir=staging,
+            provenance=provenance,
+            arms=arms,
+            require_media=not args.no_render,
+        )
+        _write_json_atomic(staging / "action_noise_pair.json", manifest)
+        os.replace(staging, output_dir)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     print(json.dumps(manifest, indent=2, sort_keys=True))
 
 

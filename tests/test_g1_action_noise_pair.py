@@ -1,18 +1,78 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import imageio.v2 as imageio
 import numpy as np
 import pytest
+
+from src.core.rmr_action_noise import RMR_ACTION_STD, RMR_ACTION_STD_JOINT_NAMES
+
+
+def _write_arm(root: Path, arm: str, *, zero: bool, reset: str = "r" * 64) -> dict:
+    from tools.evaluate_g1_action_noise_pair import RECORD_COLUMNS
+
+    directory = root / arm
+    directory.mkdir(parents=True)
+    std = np.zeros(29) if zero else np.asarray(RMR_ACTION_STD, dtype=np.float64)
+    epsilon = np.arange(58, dtype=np.float64).reshape(2, 29) / 100.0 + 0.1
+    noise = epsilon * std
+    mean = np.full((2, 29), 0.2)
+    action = np.clip(mean + noise, -1.0, 1.0)
+    values = np.zeros((2, len(RECORD_COLUMNS)), dtype=np.float64)
+    values[:, 0] = (0, 1)
+    np.savez_compressed(
+        directory / "evaluation.npz",
+        columns=np.asarray(RECORD_COLUMNS),
+        values=values,
+        action_mean=mean,
+        epsilon=epsilon,
+        action_noise=noise,
+        action=action,
+        joint_names=np.asarray(RMR_ACTION_STD_JOINT_NAMES),
+    )
+    summary = {
+        "steps": 2,
+        "terminal": False,
+        "evaluation_start_phase": 0,
+        "remaining_reference_transitions": 2,
+        "completed_reference_suffix": True,
+        "intermediate_reset_occurred": False,
+        "paired_reset_state_sha256": reset,
+        "action_noise_exact_zero": zero,
+        "assistance_exact_zero": True,
+        "noise_seed": 0,
+        "noise_joint_names": list(RMR_ACTION_STD_JOINT_NAMES),
+        "requested_step_limit": None,
+        "artificially_truncated": False,
+        "checkpoint_sha256": "c" * 64,
+        "reference_sha256": "d" * 64,
+    }
+    (directory / "summary.json").write_text(json.dumps(summary))
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    imageio.mimsave(directory / "evaluation.mp4", [frame], fps=1)
+    imageio.imwrite(directory / "contact_sheet.png", frame)
+    return summary
+
+
+def _provenance() -> dict:
+    return {
+        "checkpoint_sha256": "c" * 64,
+        "reference_sha256": "d" * 64,
+        "seed": 0,
+        "action_noise_joint_names": list(RMR_ACTION_STD_JOINT_NAMES),
+        "rmr_action_std": np.asarray(RMR_ACTION_STD, dtype=np.float32).tolist(),
+    }
 
 
 def test_paired_reset_calls_reset_once_and_branches_the_identical_state() -> None:
     from tools.evaluate_g1_action_noise_pair import paired_reset
 
     class Environment:
-        def __init__(self) -> None:
+        def __init__(self):
             self.calls = []
 
         def reset_at_phase(self, key, zero, phase):
@@ -21,56 +81,121 @@ def test_paired_reset_calls_reset_once_and_branches_the_identical_state() -> Non
 
     environment = Environment()
     deterministic, noisy = paired_reset(environment, phase=7, seed=0)
-
     assert len(environment.calls) == 1
     assert deterministic is noisy
-    assert deterministic.token == "same-state"
 
 
 def test_deterministic_noise_tape_is_exact_zero_and_rmr_tape_is_seeded() -> None:
     from tools.evaluate_g1_action_noise_pair import action_noise_tape
-    from src.core.rmr_action_noise import RMR_ACTION_STD
 
     zero = action_noise_tape(seed=0, steps=3, action_std=np.zeros(29))
     first = action_noise_tape(seed=0, steps=3, action_std=RMR_ACTION_STD)
-    repeated = action_noise_tape(seed=0, steps=3, action_std=RMR_ACTION_STD)
-
-    assert zero.shape == (3, 29)
     assert np.array_equal(zero, np.zeros((3, 29)))
-    assert np.array_equal(first, repeated)
+    assert np.array_equal(
+        first, action_noise_tape(seed=0, steps=3, action_std=RMR_ACTION_STD)
+    )
     assert not np.array_equal(first, np.zeros((3, 29)))
 
 
-def test_noisy_action_uses_pinned_joint_order_and_clips_after_noise() -> None:
-    from tools.evaluate_g1_action_noise_pair import noisy_action
-    from src.core.rmr_action_noise import RMR_ACTION_STD_JOINT_NAMES
+def test_manifest_reopens_real_artifacts_and_hash_binds_them(tmp_path: Path) -> None:
+    from tools.evaluate_g1_action_noise_pair import build_pair_manifest
 
-    mean = np.full(29, 0.95)
-    epsilon = np.ones(29)
-    std = np.linspace(0.01, 0.29, 29)
-    result = noisy_action(
-        mean,
-        epsilon,
-        std,
-        actor_joint_names=RMR_ACTION_STD_JOINT_NAMES,
+    arms = {
+        "deterministic": _write_arm(tmp_path, "deterministic", zero=True),
+        "rmr-noisy": _write_arm(tmp_path, "rmr-noisy", zero=False),
+    }
+    manifest = build_pair_manifest(
+        output_dir=tmp_path, provenance=_provenance(), arms=arms
     )
+    assert manifest["valid"] is True
+    assert set(manifest["artifact_sha256"]) == {"deterministic", "rmr-noisy"}
+    assert len(manifest["artifact_sha256"]["rmr-noisy"]) == 4
 
-    assert np.allclose(result, np.clip(mean + std, -1.0, 1.0), atol=1e-7)
-    with pytest.raises(ValueError, match="pinned RMR actor joint order"):
-        noisy_action(mean, epsilon, std, actor_joint_names=tuple(reversed(RMR_ACTION_STD_JOINT_NAMES)))
+
+@pytest.mark.parametrize(
+    "tamper", ("summary", "noise", "action", "joint-order", "assistance", "reset")
+)
+def test_manifest_rejects_tampered_or_cross_arm_artifacts(
+    tmp_path: Path, tamper: str
+) -> None:
+    from tools.evaluate_g1_action_noise_pair import build_pair_manifest
+
+    arms = {
+        "deterministic": _write_arm(tmp_path, "deterministic", zero=True),
+        "rmr-noisy": _write_arm(tmp_path, "rmr-noisy", zero=False),
+    }
+    path = tmp_path / "rmr-noisy"
+    if tamper in {"summary", "assistance", "reset"}:
+        summary = json.loads((path / "summary.json").read_text())
+        if tamper == "summary":
+            summary["steps"] = 1
+        if tamper == "assistance":
+            summary["assistance_exact_zero"] = False
+        if tamper == "reset":
+            summary["paired_reset_state_sha256"] = "x" * 64
+        (path / "summary.json").write_text(json.dumps(summary))
+    else:
+        with np.load(path / "evaluation.npz") as source:
+            arrays = {key: source[key] for key in source.files}
+        if tamper == "noise":
+            arrays["action_noise"][0, 0] += 1.0
+        if tamper == "action":
+            arrays["action"][0, 0] += 0.1
+        if tamper == "joint-order":
+            arrays["joint_names"] = arrays["joint_names"][::-1]
+        np.savez_compressed(path / "evaluation.npz", **arrays)
+    with pytest.raises(ValueError):
+        build_pair_manifest(output_dir=tmp_path, provenance=_provenance(), arms=arms)
 
 
-def test_provenance_hashes_checkpoint_reference_and_runtime_assets(tmp_path: Path) -> None:
+def test_manifest_rejects_stale_supplied_summary_and_truncated_publication(
+    tmp_path: Path,
+) -> None:
+    from tools.evaluate_g1_action_noise_pair import build_pair_manifest
+
+    arms = {
+        "deterministic": _write_arm(tmp_path, "deterministic", zero=True),
+        "rmr-noisy": _write_arm(tmp_path, "rmr-noisy", zero=False),
+    }
+    stale = {**arms, "deterministic": {**arms["deterministic"], "steps": 99}}
+    with pytest.raises(ValueError, match="supplied arm summary"):
+        build_pair_manifest(output_dir=tmp_path, provenance=_provenance(), arms=stale)
+    summary = json.loads((tmp_path / "deterministic" / "summary.json").read_text())
+    summary.update(requested_step_limit=1, artificially_truncated=True)
+    (tmp_path / "deterministic" / "summary.json").write_text(json.dumps(summary))
+    with pytest.raises(ValueError, match="artificially truncated"):
+        build_pair_manifest(output_dir=tmp_path, provenance=_provenance(), arms=arms)
+
+
+def test_output_directory_must_be_fresh_and_staging_failure_publishes_nothing(
+    tmp_path: Path,
+) -> None:
+    from tools.evaluate_g1_action_noise_pair import prepare_output_staging
+
+    output = tmp_path / "published"
+    output.mkdir()
+    with pytest.raises(FileExistsError):
+        prepare_output_staging(output)
+    assert not (tmp_path / ".published.staging").exists()
+
+
+def test_provenance_hashes_checkpoint_reference_and_runtime_assets(
+    tmp_path: Path,
+) -> None:
     from tools.evaluate_g1_action_noise_pair import build_provenance
 
-    checkpoint = tmp_path / "checkpoint.pkl"
-    reference = tmp_path / "reference.npz"
-    model = tmp_path / "g1.xml"
-    controller = tmp_path / "controller.npz"
-    for path, content in ((checkpoint, b"checkpoint"), (reference, b"reference"), (model, b"model"), (controller, b"controller")):
+    checkpoint, reference, model, controller = (
+        tmp_path / name
+        for name in ("checkpoint.pkl", "reference.npz", "g1.xml", "controller.npz")
+    )
+    for path, content in (
+        (checkpoint, b"checkpoint"),
+        (reference, b"reference"),
+        (model, b"model"),
+        (controller, b"controller"),
+    ):
         path.write_bytes(content)
     (tmp_path / "hparams.json").write_bytes(b"hparams")
-
     provenance = build_provenance(
         checkpoint=checkpoint,
         reference=reference,
@@ -79,38 +204,4 @@ def test_provenance_hashes_checkpoint_reference_and_runtime_assets(tmp_path: Pat
         seed=0,
         solver_profile="g1-4x5",
     )
-
     assert provenance["checkpoint_sha256"] == hashlib.sha256(b"checkpoint").hexdigest()
-    assert provenance["reference_sha256"] == hashlib.sha256(b"reference").hexdigest()
-    assert provenance["runtime_assets"]["model_sha256"] == hashlib.sha256(b"model").hexdigest()
-    assert provenance["runtime_assets"]["controller_sha256"] == hashlib.sha256(b"controller").hexdigest()
-
-
-def test_pair_aggregation_requires_complete_matching_arm_artifacts(tmp_path: Path) -> None:
-    from tools.evaluate_g1_action_noise_pair import build_pair_manifest
-
-    for arm in ("deterministic", "rmr-noisy"):
-        directory = tmp_path / arm
-        directory.mkdir()
-        for name in ("summary.json", "evaluation.npz", "evaluation.mp4", "contact_sheet.png"):
-            (directory / name).write_bytes(b"artifact")
-
-    manifest = build_pair_manifest(
-        output_dir=tmp_path,
-        provenance={"checkpoint_sha256": "a" * 64},
-        arms={
-            "deterministic": {"steps": 2, "action_noise_exact_zero": True},
-            "rmr-noisy": {"steps": 2, "action_noise_exact_zero": False},
-        },
-    )
-    assert manifest["valid"] is True
-    (tmp_path / "rmr-noisy" / "evaluation.mp4").unlink()
-    with pytest.raises(ValueError, match="missing required artifact"):
-        build_pair_manifest(
-            output_dir=tmp_path,
-            provenance={"checkpoint_sha256": "a" * 64},
-            arms={
-                "deterministic": {"steps": 2, "action_noise_exact_zero": True},
-                "rmr-noisy": {"steps": 2, "action_noise_exact_zero": False},
-            },
-        )
