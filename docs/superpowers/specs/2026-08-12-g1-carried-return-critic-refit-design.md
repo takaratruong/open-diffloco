@@ -37,9 +37,9 @@ The refit advances only if validation and final-test rank correlation are at
 least `0.8`, NRMSE is at most `0.25`, all five final-test H12 relative errors are
 at most `0.25`, and the original actor/actor optimizer/normalizer/environment
 state remain exact. Also report the original current critic and lagged target
-critic on identical captured observations; if merely synchronizing the current
-critic already clears the gates, do not optimize and select that smaller
-treatment.
+critic on identical captured observations. Treat the current critic as the
+immutable step-zero validation candidate, but always execute the fixed 2,000
+updates so it competes causally against every preregistered refit checkpoint.
 
 Every rollout must naturally terminate with finite state, observations, action,
 reward, and return and exact-zero external wrench. Code, checkpoint, reference,
