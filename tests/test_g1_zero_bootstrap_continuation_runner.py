@@ -142,6 +142,14 @@ def test_training_validation_requires_zero_bootstrap_and_dense_grid(tmp_path):
     with pytest.raises(ValueError, match="invalid CAGrad telemetry"):
         validate_training_artifacts(run)
 
+    rows[-1]["actor_cagrad_valid"] = True
+    rows[-1]["actor_cagrad_bin_counts"] = [float("nan"), 1, 1, 1, 1]
+    (run / "checkpoint_phase_metrics.json").write_text(
+        json.dumps(rows), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="invalid CAGrad coverage"):
+        validate_training_artifacts(run)
+
 
 def test_checkpoint_telemetry_builder_persists_bootstrap_and_cagrad_contract():
     import numpy as np

@@ -209,7 +209,10 @@ def validate_training_artifacts(run_directory: Path) -> dict[str, Any]:
         if (
             not isinstance(counts, list)
             or len(counts) != 5
-            or any(count <= 0 for count in counts)
+            or any(
+                not math.isfinite(float(count)) or float(count) <= 0.0
+                for count in counts
+            )
         ):
             raise ValueError(f"checkpoint {step} has invalid CAGrad coverage")
         vector_fields = (
