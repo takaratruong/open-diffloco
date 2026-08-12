@@ -838,6 +838,37 @@ def resolve_carried_reset_resume_settings(
     return requested
 
 
+def resolve_root_reset_noise_resume_settings(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested_multiplier: float,
+    requested_probability: float,
+    allow_change: bool,
+) -> tuple[float, float]:
+    """Restore root-reset settings or admit one explicit distribution change."""
+    if not isinstance(allow_change, bool):
+        raise ValueError(
+            "allow_resume_reference_root_reset_noise_change must be boolean"
+        )
+    requested = (requested_multiplier, requested_probability)
+    resumed = (
+        1.0
+        if not resumed_hparams
+        else resumed_hparams.get("reference_root_reset_noise_multiplier", 1.0),
+        0.0
+        if not resumed_hparams
+        else resumed_hparams.get("reference_root_reset_noise_probability", 0.0),
+    )
+    if requested == (1.0, 0.0) and not allow_change:
+        return resumed
+    if requested != resumed and not allow_change:
+        raise ValueError(
+            "root reset noise settings must match the checkpoint unless "
+            "allow_resume_reference_root_reset_noise_change is enabled"
+        )
+    return requested
+
+
 def resolve_cagrad_resume_settings(
     resumed_hparams: dict[str, object] | None,
     *,
@@ -1105,6 +1136,9 @@ def train(
     termination_margin_weight: float = 0.0,
     allow_resume_termination_margin_change: bool = False,
     reference_reset_noise_scale: float = 0.0,
+    reference_root_reset_noise_multiplier: float = 1.0,
+    reference_root_reset_noise_probability: float = 0.0,
+    allow_resume_reference_root_reset_noise_change: bool = False,
     reference_residual_control: bool = False,
     reference_residual_scale: float = 0.5,
     carried_reset_bank_path: str | None = None,
@@ -1154,6 +1188,12 @@ def train(
                                                  objective-treatment change.
         reference_reset_noise_scale: Scale of upstream RMR reference-reset
                                      perturbations; zero preserves exact RSI.
+        reference_root_reset_noise_multiplier: Multiplier applied only to root
+                                               reset pose and velocity limits.
+        reference_root_reset_noise_probability: Per-reset probability of the
+                                                root-focused recovery cohort.
+        allow_resume_reference_root_reset_noise_change: Explicitly permit a
+                                                        resumed reset treatment.
         carried_reset_bank_path: Optional NPZ containing rollout qpos/qvel/phase.
         carried_reset_probability: Fraction of resets sampled from that bank.
         carried_reset_bank_start: Leading bank rows excluded from sampling.
@@ -1324,6 +1364,10 @@ def train(
         raise ValueError(
             "allow_resume_carried_reset_change must be boolean"
         )
+    if not isinstance(allow_resume_reference_root_reset_noise_change, bool):
+        raise ValueError(
+            "allow_resume_reference_root_reset_noise_change must be boolean"
+        )
     if not isinstance(allow_resume_torso_wrench_assistance_change, bool):
         raise ValueError(
             "allow_resume_torso_wrench_assistance_change must be boolean"
@@ -1339,6 +1383,22 @@ def train(
     ):
         raise ValueError(
             "reference_reset_noise_scale must be non-negative and finite"
+        )
+    if (
+        isinstance(reference_root_reset_noise_multiplier, bool)
+        or not math.isfinite(reference_root_reset_noise_multiplier)
+        or reference_root_reset_noise_multiplier < 1.0
+    ):
+        raise ValueError(
+            "reference_root_reset_noise_multiplier must be finite and at least one"
+        )
+    if (
+        isinstance(reference_root_reset_noise_probability, bool)
+        or not math.isfinite(reference_root_reset_noise_probability)
+        or not 0.0 <= reference_root_reset_noise_probability <= 1.0
+    ):
+        raise ValueError(
+            "reference_root_reset_noise_probability must be finite and in [0, 1]"
         )
     if (
         isinstance(carried_reset_probability, bool)
@@ -1477,6 +1537,15 @@ def train(
             requested_probability=carried_reset_probability,
             requested_start=carried_reset_bank_start,
             allow_change=allow_resume_carried_reset_change,
+        )
+        (
+            reference_root_reset_noise_multiplier,
+            reference_root_reset_noise_probability,
+        ) = resolve_root_reset_noise_resume_settings(
+            resumed_hparams,
+            requested_multiplier=reference_root_reset_noise_multiplier,
+            requested_probability=reference_root_reset_noise_probability,
+            allow_change=allow_resume_reference_root_reset_noise_change,
         )
         (
             torso_wrench_assistance,
@@ -1685,6 +1754,12 @@ def train(
                 "effort_limit_scale": effort_limit_scale,
                 "termination_margin_weight": termination_margin_weight,
                 "reference_reset_noise_scale": reference_reset_noise_scale,
+                "reference_root_reset_noise_multiplier": (
+                    reference_root_reset_noise_multiplier
+                ),
+                "reference_root_reset_noise_probability": (
+                    reference_root_reset_noise_probability
+                ),
                 "reference_residual_control": reference_residual_control,
                 "reference_residual_scale": reference_residual_scale,
                 "domain_randomization": domain_randomization,
@@ -3328,6 +3403,15 @@ def train(
             allow_resume_termination_margin_change
         ),
         "reference_reset_noise_scale": reference_reset_noise_scale,
+        "reference_root_reset_noise_multiplier": (
+            reference_root_reset_noise_multiplier
+        ),
+        "reference_root_reset_noise_probability": (
+            reference_root_reset_noise_probability
+        ),
+        "allow_resume_reference_root_reset_noise_change": (
+            allow_resume_reference_root_reset_noise_change
+        ),
         "reference_residual_control": reference_residual_control,
         "reference_residual_scale": reference_residual_scale,
         "carried_reset_bank_path": carried_reset_bank_path,
