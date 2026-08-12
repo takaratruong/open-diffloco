@@ -138,6 +138,7 @@ def test_train_exposes_and_persists_opt_in_resume_randomness() -> None:
         (True, "non-negative integer"),
         (-1, "non-negative integer"),
         (1.5, "non-negative integer"),
+        (2**32, "32-bit"),
     ],
 )
 def test_resume_rekey_rejects_invalid_seed(seed: object, message: str) -> None:

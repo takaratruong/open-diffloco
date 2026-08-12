@@ -33,6 +33,8 @@ def _validated_environment_rng(state: Any) -> jax.Array:
 def _validate_seed(seed: int) -> int:
     if isinstance(seed, bool) or not isinstance(seed, Integral) or seed < 0:
         raise ValueError("resume random seed must be a non-negative integer")
+    if seed > np.iinfo(np.uint32).max:
+        raise ValueError("resume random seed must fit in the 32-bit PRNG domain")
     return int(seed)
 
 
