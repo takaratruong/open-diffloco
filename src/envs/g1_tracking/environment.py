@@ -146,6 +146,8 @@ class G1TrackingEnv:
         effort_limit_scale: float = 1.0,
         termination_margin_weight: float = 0.0,
         reference_reset_noise_scale: float = 0.0,
+        reference_root_reset_noise_multiplier: float = 1.0,
+        reference_root_reset_noise_probability: float = 0.0,
         reference_residual_control: bool = False,
         reference_residual_scale: float = 0.5,
         carried_reset_bank_path: str | None = None,
@@ -230,6 +232,28 @@ class G1TrackingEnv:
                 "reference_reset_noise_scale must be non-negative and finite"
             )
         self.reference_reset_noise_scale = float(reference_reset_noise_scale)
+        if (
+            isinstance(reference_root_reset_noise_multiplier, bool)
+            or not np.isfinite(reference_root_reset_noise_multiplier)
+            or reference_root_reset_noise_multiplier < 1.0
+        ):
+            raise ValueError(
+                "reference root reset noise multiplier must be finite and at least one"
+            )
+        if (
+            isinstance(reference_root_reset_noise_probability, bool)
+            or not np.isfinite(reference_root_reset_noise_probability)
+            or not 0.0 <= reference_root_reset_noise_probability <= 1.0
+        ):
+            raise ValueError(
+                "reference root reset noise probability must be finite and in [0, 1]"
+            )
+        self.reference_root_reset_noise_multiplier = float(
+            reference_root_reset_noise_multiplier
+        )
+        self.reference_root_reset_noise_probability = float(
+            reference_root_reset_noise_probability
+        )
         if not isinstance(reference_residual_control, bool):
             raise ValueError("reference_residual_control must be boolean")
         if (
@@ -1010,13 +1034,14 @@ class G1TrackingEnv:
         pose_key: jax.Array,
         velocity_key: jax.Array,
         joint_key: jax.Array,
+        root_multiplier: jax.Array | float = 1.0,
     ) -> tuple[jax.Array, jax.Array]:
         """Perturb one reference state using the registered reset contract."""
         scale = self.reference_reset_noise_scale
-        pose_limit = scale * jp.array(
+        pose_limit = scale * root_multiplier * jp.array(
             [0.02, 0.02, 0.005, 0.1, 0.1, 0.1]
         )
-        velocity_limit = scale * jp.array(
+        velocity_limit = scale * root_multiplier * jp.array(
             [0.25, 0.25, 0.1, 0.26, 0.26, 0.39]
         )
         pose_delta = jax.random.uniform(
@@ -1056,7 +1081,12 @@ class G1TrackingEnv:
     ) -> EnvState:
         if self.carried_reset_bank_path is not None:
             noisy_fallback = self.reference_reset_noise_scale > 0.0
+            root_treatment = (
+                noisy_fallback
+                and self.reference_root_reset_noise_probability > 0.0
+            )
             if self.domain_randomization and noisy_fallback:
+                keys = jax.random.split(rng, 9 if root_treatment else 8)
                 (
                     rng,
                     phase_key,
@@ -1066,7 +1096,8 @@ class G1TrackingEnv:
                     velocity_key,
                     joint_key,
                     randomization_key,
-                ) = jax.random.split(rng, 8)
+                ) = keys[:8]
+                root_cohort_key = keys[8] if root_treatment else None
                 randomization = self._sample_randomization(
                     randomization_key, difficulty
                 )
@@ -1078,6 +1109,7 @@ class G1TrackingEnv:
                     randomization_key, difficulty
                 )
             elif noisy_fallback:
+                keys = jax.random.split(rng, 8 if root_treatment else 7)
                 (
                     rng,
                     phase_key,
@@ -1086,7 +1118,8 @@ class G1TrackingEnv:
                     pose_key,
                     velocity_key,
                     joint_key,
-                ) = jax.random.split(rng, 7)
+                ) = keys[:7]
+                root_cohort_key = keys[7] if root_treatment else None
                 randomization = self._nominal_randomization()
             else:
                 rng, phase_key, bank_key, choice_key = jax.random.split(
@@ -1107,11 +1140,24 @@ class G1TrackingEnv:
                 choice_key, self.carried_reset_probability
             )
             if noisy_fallback:
+                root_multiplier = (
+                    jp.where(
+                        jax.random.bernoulli(
+                            root_cohort_key,
+                            self.reference_root_reset_noise_probability,
+                        ),
+                        self.reference_root_reset_noise_multiplier,
+                        1.0,
+                    )
+                    if root_treatment
+                    else 1.0
+                )
                 reference_qpos, reference_qvel = self._noisy_reference_state(
                     reference_phase,
                     pose_key,
                     velocity_key,
                     joint_key,
+                    root_multiplier=root_multiplier,
                 )
             else:
                 reference_qpos = self.qpos_reference[reference_phase]
@@ -1209,7 +1255,9 @@ class G1TrackingEnv:
                 phase_sampler_failed_count=phase_sampler_failed_count,
             )
 
+        root_treatment = self.reference_root_reset_noise_probability > 0.0
         if self.domain_randomization:
+            keys = jax.random.split(rng, 7 if root_treatment else 6)
             (
                 rng,
                 phase_key,
@@ -1217,20 +1265,37 @@ class G1TrackingEnv:
                 velocity_key,
                 joint_key,
                 randomization_key,
-            ) = jax.random.split(rng, 6)
+            ) = keys[:6]
+            root_cohort_key = keys[6] if root_treatment else None
             randomization = self._sample_randomization(
                 randomization_key, difficulty
             )
         else:
-            rng, phase_key, pose_key, velocity_key, joint_key = (
-                jax.random.split(rng, 5)
-            )
+            keys = jax.random.split(rng, 6 if root_treatment else 5)
+            rng, phase_key, pose_key, velocity_key, joint_key = keys[:5]
+            root_cohort_key = keys[5] if root_treatment else None
             randomization = self._nominal_randomization()
         phase = self._sample_reset_phase(
             phase_key, phase_sampler_failed_count
         )
+        root_multiplier = (
+            jp.where(
+                jax.random.bernoulli(
+                    root_cohort_key,
+                    self.reference_root_reset_noise_probability,
+                ),
+                self.reference_root_reset_noise_multiplier,
+                1.0,
+            )
+            if root_treatment
+            else 1.0
+        )
         qpos, qvel = self._noisy_reference_state(
-            phase, pose_key, velocity_key, joint_key
+            phase,
+            pose_key,
+            velocity_key,
+            joint_key,
+            root_multiplier=root_multiplier,
         )
 
         data = self._data_from_state(

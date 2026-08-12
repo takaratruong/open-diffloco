@@ -346,6 +346,100 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
             )
         )
 
+    def test_root_reset_noise_treatment_is_default_off_and_validated(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        explicit_default = G1TrackingEnv(
+            reference_reset_noise_scale=1.0,
+            reference_root_reset_noise_multiplier=1.0,
+            reference_root_reset_noise_probability=0.0,
+        )
+        implicit_default = G1TrackingEnv(reference_reset_noise_scale=1.0)
+        key = jax.random.PRNGKey(31)
+
+        explicit_state = explicit_default.reset(key, jnp.array(0.0))
+        implicit_state = implicit_default.reset(key, jnp.array(0.0))
+
+        np.testing.assert_array_equal(
+            explicit_state.data.qpos, implicit_state.data.qpos
+        )
+        np.testing.assert_array_equal(
+            explicit_state.data.qvel, implicit_state.data.qvel
+        )
+        for kwargs in (
+            {"reference_root_reset_noise_multiplier": 0.99},
+            {"reference_root_reset_noise_multiplier": float("nan")},
+            {"reference_root_reset_noise_multiplier": True},
+            {"reference_root_reset_noise_probability": -0.1},
+            {"reference_root_reset_noise_probability": 1.1},
+            {"reference_root_reset_noise_probability": float("nan")},
+            {"reference_root_reset_noise_probability": True},
+        ):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaisesRegex(ValueError, "root reset noise"):
+                    G1TrackingEnv(**kwargs)
+
+    def test_root_reset_noise_multiplier_changes_only_root_envelope(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        env = G1TrackingEnv(reference_reset_noise_scale=1.0)
+        phase = jnp.array(17, dtype=jnp.int32)
+        pose_key, velocity_key, joint_key = jax.random.split(
+            jax.random.PRNGKey(32), 3
+        )
+        baseline_qpos, baseline_qvel = env._noisy_reference_state(
+            phase, pose_key, velocity_key, joint_key, root_multiplier=1.0
+        )
+        recovery_qpos, recovery_qvel = env._noisy_reference_state(
+            phase, pose_key, velocity_key, joint_key, root_multiplier=2.0
+        )
+        reference_qpos = env.qpos_reference[phase]
+        reference_qvel = env.qvel_reference[phase]
+
+        np.testing.assert_array_equal(
+            recovery_qpos[7:] - reference_qpos[7:],
+            baseline_qpos[7:] - reference_qpos[7:],
+        )
+        np.testing.assert_array_equal(
+            recovery_qvel[6:], baseline_qvel[6:]
+        )
+        np.testing.assert_allclose(
+            recovery_qpos[:3] - reference_qpos[:3],
+            2.0 * (baseline_qpos[:3] - reference_qpos[:3]),
+            rtol=0.0,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            recovery_qvel[:6] - reference_qvel[:6],
+            2.0 * (baseline_qvel[:6] - reference_qvel[:6]),
+            rtol=0.0,
+            atol=1e-7,
+        )
+
+    def test_root_reset_noise_probability_one_uses_registered_bounds(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        env = G1TrackingEnv(
+            reference_reset_noise_scale=1.0,
+            reference_root_reset_noise_multiplier=2.0,
+            reference_root_reset_noise_probability=1.0,
+        )
+        state = env.reset(jax.random.PRNGKey(33), jnp.array(0.0))
+        phase = int(state.info["phase"])
+        qpos_delta = np.asarray(state.data.qpos - env.qpos_reference[phase])
+        qvel_delta = np.asarray(state.data.qvel - env.qvel_reference[phase])
+
+        np.testing.assert_array_less(
+            np.abs(qpos_delta[:3]), [0.040001, 0.040001, 0.010001]
+        )
+        np.testing.assert_array_less(np.abs(qpos_delta[7:]), 0.050001)
+        np.testing.assert_array_less(
+            np.abs(qvel_delta[:3]), [0.500001, 0.500001, 0.200001]
+        )
+        np.testing.assert_array_less(
+            np.abs(qvel_delta[3:6]), [0.520001, 0.520001, 0.780001]
+        )
+
     def test_adaptive_resets_bias_phases_without_invalidating_reset_state(self):
         from src.envs.g1_tracking.environment import G1TrackingEnv
         from src.envs.g1_tracking.training_distribution import (
