@@ -250,3 +250,40 @@ def test_zero_tail_selector_rejects_nonzero_conditioning() -> None:
     }
     with pytest.raises(ValueError, match="exact-zero assistance conditioning"):
         select_zero_tail_checkpoint({2_310_144: payload})
+
+
+def test_pair_comparison_rejects_aggregate_gain_with_compensating_collapse() -> None:
+    from tools.run_g1_assistance_observability_pair import compare_pair_selections
+
+    aware = {
+        "selected_key": [52, 52.0, 52.0],
+        "selected_survival": [52, 52, 52, 52, 52],
+    }
+    blind = {
+        "selected_key": [51, 100.0, 90.2],
+        "selected_survival": [51, 100, 100, 100, 100],
+    }
+
+    result = compare_pair_selections(aware, blind)
+
+    assert result["outcome"] == "scalar-observability-mixed-tradeoff"
+    assert result["aware_no_compensating_collapse"] is False
+    assert result["aware_phase_floors"] == [51, 61, 89, 51, 76]
+
+
+def test_pair_comparison_accepts_scalar_edge_without_phase_collapse() -> None:
+    from tools.run_g1_assistance_observability_pair import compare_pair_selections
+
+    aware = {
+        "selected_key": [70, 80.0, 90.0],
+        "selected_survival": [70, 80, 100, 90, 110],
+    }
+    blind = {
+        "selected_key": [60, 70.0, 80.0],
+        "selected_survival": [60, 70, 90, 80, 100],
+    }
+
+    result = compare_pair_selections(aware, blind)
+
+    assert result["outcome"] == "scalar-observability-advances"
+    assert result["aware_no_compensating_collapse"] is True

@@ -685,8 +685,31 @@ def compare_pair_selections(
     aware_key = tuple(aware["selected_key"])
     blind_key = tuple(blind["selected_key"])
     baseline_key = (51, 66.0, 68.6)
-    if aware_key > blind_key and aware_key > baseline_key:
+    baseline_survival = (66, 61, 89, 51, 76)
+    aware_survival = tuple(aware["selected_survival"])
+    blind_survival = tuple(blind["selected_survival"])
+    if len(aware_survival) != 5 or len(blind_survival) != 5:
+        raise ValueError("paired selections require five-phase survival vectors")
+    aware_phase_floors = tuple(
+        min(blind_value, baseline_value)
+        for blind_value, baseline_value in zip(
+            blind_survival, baseline_survival, strict=True
+        )
+    )
+    no_compensating_collapse = all(
+        aware_value >= floor
+        for aware_value, floor in zip(
+            aware_survival, aware_phase_floors, strict=True
+        )
+    )
+    if (
+        aware_key > blind_key
+        and aware_key > baseline_key
+        and no_compensating_collapse
+    ):
         outcome = "scalar-observability-advances"
+    elif aware_key > blind_key and aware_key > baseline_key:
+        outcome = "scalar-observability-mixed-tradeoff"
     elif max(aware_key, blind_key) > baseline_key:
         outcome = "curriculum-advances-without-observability-edge"
     else:
@@ -696,6 +719,9 @@ def compare_pair_selections(
         "aware": aware,
         "blind": blind,
         "e012_key": list(baseline_key),
+        "e012_survival": list(baseline_survival),
+        "aware_phase_floors": list(aware_phase_floors),
+        "aware_no_compensating_collapse": no_compensating_collapse,
         "outcome": outcome,
     }
 
