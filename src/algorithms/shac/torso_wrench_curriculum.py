@@ -9,6 +9,7 @@ import jax.numpy as jp
 
 
 DISABLED_ASSISTANCE_SETTINGS = (False, 0, 1, 0.0)
+DISABLED_CONDITIONING_SETTINGS = (False, False, False)
 
 
 def assistance_scale_at_step(
@@ -112,6 +113,64 @@ def validate_torso_wrench_assistance_configuration(
         raise ValueError("zero_fraction must be finite and in [0, 1]")
     if enabled and not env_variant.startswith("g1_tracking"):
         raise ValueError("torso wrench assistance requires a G1 tracking environment")
+
+
+def validate_assistance_conditioning_configuration(
+    *,
+    assistance_enabled: bool,
+    continuous: bool,
+    conditioning: bool,
+    observed: bool,
+    residual_adapter_enabled: bool,
+) -> None:
+    """Validate the scalar-only assistance observation boundary."""
+    for name, value in (
+        ("torso_wrench_assistance_continuous", continuous),
+        ("actor_torso_wrench_assistance_conditioning", conditioning),
+        ("actor_observe_torso_wrench_assistance", observed),
+    ):
+        if not isinstance(value, bool):
+            raise ValueError(f"{name} must be boolean")
+    if observed and not conditioning:
+        raise ValueError("observed assistance requires scalar conditioning")
+    if conditioning and not assistance_enabled:
+        raise ValueError("assistance conditioning requires torso wrench assistance")
+    if conditioning and not residual_adapter_enabled:
+        raise ValueError("assistance conditioning requires residual preview adapter")
+
+
+def resolve_assistance_conditioning_resume_settings(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested_continuous: bool,
+    requested_conditioning: bool,
+    requested_observed: bool,
+    allow_change: bool,
+) -> tuple[bool, bool, bool]:
+    """Restore scalar-conditioning metadata unless change is authorized."""
+    if not isinstance(allow_change, bool):
+        raise ValueError("allow_resume_assistance_conditioning_change must be boolean")
+    requested = (
+        requested_continuous,
+        requested_conditioning,
+        requested_observed,
+    )
+    resumed_hparams = resumed_hparams or {}
+    resumed = (
+        resumed_hparams.get("torso_wrench_assistance_continuous", False),
+        resumed_hparams.get("actor_torso_wrench_assistance_conditioning", False),
+        resumed_hparams.get("actor_observe_torso_wrench_assistance", False),
+    )
+    if not all(isinstance(value, bool) for value in resumed):
+        raise ValueError("assistance conditioning checkpoint metadata is invalid")
+    if requested == DISABLED_CONDITIONING_SETTINGS and not allow_change:
+        return resumed
+    if requested != resumed and not allow_change:
+        raise ValueError(
+            "assistance conditioning settings must match the checkpoint unless "
+            "allow_resume_assistance_conditioning_change is enabled"
+        )
+    return requested
 
 
 def resolve_torso_wrench_assistance_resume_settings(

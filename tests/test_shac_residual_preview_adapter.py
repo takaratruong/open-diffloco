@@ -309,6 +309,107 @@ def test_optimizer_migration_preserves_parent_state_and_zeros_adapter_moments():
     assert _tree_arrays_equal(candidate_optimizer[1][1], parent_optimizer[1][1])
 
 
+def test_assistance_conditioning_migration_appends_exact_zero_parameter_and_moments():
+    from src.algorithms.shac.residual_preview_adapter import (
+        apply_frozen_preview_residual,
+        migrate_residual_adapter_assistance_conditioning,
+        split_residual_adapter_params,
+    )
+
+    parent_actor, residual_actor, params = _toy_policy()
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0), optax.adam(1e-3)
+    )
+    optimizer_state = optimizer.init(params)
+    gradients = jax.tree_util.tree_map(jnp.ones_like, params)
+    _, optimizer_state = optimizer.update(gradients, optimizer_state, params)
+    observations = jnp.arange(15, dtype=jnp.float32).reshape(1, 15) / 20.0
+    original_action, _, _ = apply_frozen_preview_residual(
+        parent_actor,
+        residual_actor,
+        params,
+        observations,
+        history_len=3,
+        treatment_frame_dim=5,
+    )
+
+    migrated_params, migrated_optimizer, report = (
+        migrate_residual_adapter_assistance_conditioning(
+            params=params,
+            optimizer_state=optimizer_state,
+        )
+    )
+    original_kernel, _ = split_residual_adapter_params(params.adapter)
+    migrated_kernel, _ = split_residual_adapter_params(migrated_params.adapter)
+    original_adam = _adam_state(optimizer_state)
+    migrated_adam = _adam_state(migrated_optimizer)
+    original_mu, _ = split_residual_adapter_params(
+        original_adam.mu.adapter
+    )
+    migrated_mu, _ = split_residual_adapter_params(
+        migrated_adam.mu.adapter
+    )
+    original_nu, _ = split_residual_adapter_params(
+        original_adam.nu.adapter
+    )
+    migrated_nu, _ = split_residual_adapter_params(
+        migrated_adam.nu.adapter
+    )
+    migrated_action, _, _ = apply_frozen_preview_residual(
+        parent_actor,
+        residual_actor,
+        migrated_params,
+        observations,
+        history_len=3,
+        treatment_frame_dim=5,
+        assistance_scale=jnp.array(0.0),
+    )
+
+    assert migrated_kernel.shape == (6, 4)
+    np.testing.assert_array_equal(migrated_kernel[:-1], original_kernel)
+    np.testing.assert_array_equal(migrated_kernel[-1], jnp.zeros(4))
+    np.testing.assert_array_equal(migrated_mu[:-1], original_mu)
+    np.testing.assert_array_equal(migrated_mu[-1], jnp.zeros(4))
+    np.testing.assert_array_equal(migrated_nu[:-1], original_nu)
+    np.testing.assert_array_equal(migrated_nu[-1], jnp.zeros(4))
+    np.testing.assert_array_equal(original_action, migrated_action)
+    assert _tree_arrays_equal(params.parent, migrated_params.parent)
+    assert _tree_arrays_equal(
+        original_adam.mu.parent, migrated_adam.mu.parent
+    )
+    assert _tree_arrays_equal(
+        original_adam.nu.parent, migrated_adam.nu.parent
+    )
+    assert int(original_adam.count) == int(migrated_adam.count)
+    assert report["valid"] is True
+    assert report["conditioning_rows"] == 1
+
+
+def test_assistance_conditioning_migration_rejects_second_expansion():
+    from src.algorithms.shac.residual_preview_adapter import (
+        migrate_residual_adapter_assistance_conditioning,
+    )
+
+    _, _, params = _toy_policy()
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0), optax.adam(1e-3)
+    )
+    optimizer_state = optimizer.init(params)
+    migrated_params, migrated_optimizer, _ = (
+        migrate_residual_adapter_assistance_conditioning(
+            params=params,
+            optimizer_state=optimizer_state,
+        )
+    )
+
+    with pytest.raises(ValueError, match="expected adapter input width"):
+        migrate_residual_adapter_assistance_conditioning(
+            params=migrated_params,
+            optimizer_state=migrated_optimizer,
+            expected_input_dim=5,
+        )
+
+
 def test_migration_report_detects_parent_or_adapter_moment_drift():
     from src.algorithms.shac.residual_preview_adapter import (
         initialize_residual_adapter_optimizer,

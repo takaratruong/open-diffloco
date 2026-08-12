@@ -47,9 +47,11 @@ from src.algorithms.shac.microbatch import (
 )
 from src.algorithms.shac.torso_wrench_curriculum import (
     assistance_scale_at_step,
+    resolve_assistance_conditioning_resume_settings,
     resolve_torso_wrench_assistance_resume_settings,
     sample_assistance_scales,
     torso_wrench_assistance_diagnostics,
+    validate_assistance_conditioning_configuration,
     validate_torso_wrench_assistance_configuration,
 )
 from src.algorithms.shac.initialization import (
@@ -82,8 +84,10 @@ from src.algorithms.shac.residual_preview_adapter import (
     build_residual_muon_optimizers,
     initialize_residual_adapter_optimizer,
     initialize_residual_muon_optimizer,
+    migrate_residual_adapter_assistance_conditioning,
     residual_adapter_migration_report,
     residual_muon_migration_report,
+    split_residual_adapter_params,
 )
 from src.algorithms.shac.resume_randomness import (
     apply_resume_randomness_setting,
@@ -208,6 +212,21 @@ def persist_residual_muon_migration_report(
     if report.get("valid") is not True:
         raise ValueError("residual Muon optimizer migration failed")
     path = Path(save_dir) / "residual_muon_migration.json"
+    temp_path = path.with_name(f".{path.name}.tmp")
+    with temp_path.open("w", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    os.replace(temp_path, path)
+    return path
+
+
+def persist_assistance_conditioning_migration_report(
+    save_dir: str | Path, report: dict[str, object]
+) -> Path:
+    """Atomically publish exact-zero scalar-conditioning migration evidence."""
+    if report.get("valid") is not True:
+        raise ValueError("assistance conditioning migration failed")
+    path = Path(save_dir) / "assistance_conditioning_migration.json"
     temp_path = path.with_name(f".{path.name}.tmp")
     with temp_path.open("w", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2, sort_keys=True)
@@ -1097,6 +1116,10 @@ def train(
     torso_wrench_assistance_end_step: int = 1,
     torso_wrench_assistance_zero_fraction: float = 0.0,
     allow_resume_torso_wrench_assistance_change: bool = False,
+    torso_wrench_assistance_continuous: bool = False,
+    actor_torso_wrench_assistance_conditioning: bool = False,
+    actor_observe_torso_wrench_assistance: bool = False,
+    allow_resume_assistance_conditioning_change: bool = False,
     reference_path: str | None = None,
     reference_stride: int | None = None,
 ):
@@ -1144,6 +1167,14 @@ def train(
                                                exact zero assistance per unroll.
         allow_resume_torso_wrench_assistance_change: Explicitly permit changing
                                                      a resumed assistance treatment.
+        torso_wrench_assistance_continuous: Sample assisted environments
+                                             continuously from zero to the cap.
+        actor_torso_wrench_assistance_conditioning: Add one scalar input only
+                                                     to the residual adapter.
+        actor_observe_torso_wrench_assistance: Route the true assistance scalar;
+                                               false routes exact zero.
+        allow_resume_assistance_conditioning_change: Explicitly authorize a
+                                                      resumed scalar-boundary change.
         kp_range: (lo, hi) absolute range for actuator position gain per episode
         kd_range: (lo, hi) absolute range for actuator velocity gain per episode
         push_velocity_range: Interval root x/y velocity disturbance range.
@@ -1296,6 +1327,10 @@ def train(
     if not isinstance(allow_resume_torso_wrench_assistance_change, bool):
         raise ValueError(
             "allow_resume_torso_wrench_assistance_change must be boolean"
+        )
+    if not isinstance(allow_resume_assistance_conditioning_change, bool):
+        raise ValueError(
+            "allow_resume_assistance_conditioning_change must be boolean"
         )
     if (
         isinstance(reference_reset_noise_scale, bool)
@@ -1456,6 +1491,17 @@ def train(
             requested_zero_fraction=torso_wrench_assistance_zero_fraction,
             allow_change=allow_resume_torso_wrench_assistance_change,
         )
+        (
+            torso_wrench_assistance_continuous,
+            actor_torso_wrench_assistance_conditioning,
+            actor_observe_torso_wrench_assistance,
+        ) = resolve_assistance_conditioning_resume_settings(
+            resumed_hparams,
+            requested_continuous=torso_wrench_assistance_continuous,
+            requested_conditioning=actor_torso_wrench_assistance_conditioning,
+            requested_observed=actor_observe_torso_wrench_assistance,
+            allow_change=allow_resume_assistance_conditioning_change,
+        )
         if resumed_hparams:
             print(f"Resuming from step {resumed_step}")
             resumed_accumulation_steps = resumed_hparams.get(
@@ -1599,6 +1645,13 @@ def train(
         end_step=torso_wrench_assistance_end_step,
         zero_fraction=torso_wrench_assistance_zero_fraction,
         env_variant=env_variant,
+    )
+    validate_assistance_conditioning_configuration(
+        assistance_enabled=torso_wrench_assistance,
+        continuous=torso_wrench_assistance_continuous,
+        conditioning=actor_torso_wrench_assistance_conditioning,
+        observed=actor_observe_torso_wrench_assistance,
+        residual_adapter_enabled=actor_residual_preview_adapter,
     )
 
     if actor_reference_lookahead_steps and not env_variant.startswith(
@@ -1749,6 +1802,7 @@ def train(
     migration_report = None
     residual_adapter_report = None
     residual_muon_report = None
+    conditioning_report = None
     preview_adapter_mask = None
     preview_legacy_frame_dim = 0
     preview_trainable_parameter_count = 0
@@ -1964,6 +2018,13 @@ def train(
                         obs_norm,
                         history_len=actor_history_len,
                         treatment_frame_dim=env.actor_frame_obs_dim,
+                        assistance_scale=(
+                            assistance_scale
+                            if actor_observe_torso_wrench_assistance
+                            else jp.zeros_like(assistance_scale)
+                        )
+                        if actor_torso_wrench_assistance_conditioning
+                        else None,
                     )
                 )
                 action = action.astype(jp.float64)
@@ -2265,6 +2326,7 @@ def train(
                     num_envs=effective_num_envs,
                     scheduled_scale=current_torso_wrench_assistance_scale,
                     zero_fraction=torso_wrench_assistance_zero_fraction,
+                    continuous=torso_wrench_assistance_continuous,
                 )
             )
         else:
@@ -3072,6 +3134,65 @@ def train(
                 raise ValueError(
                     "resumed residual Adam actor has invalid optimizer state"
                 )
+            if actor_torso_wrench_assistance_conditioning:
+                adapter_kernel, _ = split_residual_adapter_params(
+                    resumed_state.actor_params.adapter
+                )
+                if adapter_kernel.shape[0] == env.actor_frame_obs_dim:
+                    legacy_params = resumed_state.actor_params
+                    legacy_optimizer = resumed_state.actor_opt
+                    (
+                        conditioned_params,
+                        conditioned_optimizer,
+                        conditioning_report,
+                    ) = migrate_residual_adapter_assistance_conditioning(
+                        params=legacy_params,
+                        optimizer_state=legacy_optimizer,
+                        expected_input_dim=env.actor_frame_obs_dim,
+                    )
+                    normalized_observations = env.normalize_actor_obs(
+                        actor_norm,
+                        resumed_state.normalizer,
+                        resumed_state.env_state.obs,
+                    ).astype(jp.float32)
+                    legacy_action, _, _ = apply_frozen_preview_residual(
+                        actor,
+                        residual_preview_actor,
+                        legacy_params,
+                        normalized_observations,
+                        history_len=actor_history_len,
+                        treatment_frame_dim=env.actor_frame_obs_dim,
+                    )
+                    conditioned_action, _, _ = apply_frozen_preview_residual(
+                        actor,
+                        residual_preview_actor,
+                        conditioned_params,
+                        normalized_observations,
+                        history_len=actor_history_len,
+                        treatment_frame_dim=env.actor_frame_obs_dim,
+                        assistance_scale=jp.asarray(0.0, dtype=jp.float32),
+                    )
+                    action_exact = bool(
+                        np.array_equal(
+                            np.asarray(legacy_action),
+                            np.asarray(conditioned_action),
+                        )
+                    )
+                    conditioning_report["zero_scale_action_exact"] = action_exact
+                    conditioning_report["valid"] = bool(
+                        conditioning_report["valid"] and action_exact
+                    )
+                    resumed_state = resumed_state.replace(
+                        actor_params=conditioned_params,
+                        actor_opt=conditioned_optimizer,
+                    )
+                    persist_assistance_conditioning_migration_report(
+                        save_dir, conditioning_report
+                    )
+                elif adapter_kernel.shape[0] != env.actor_frame_obs_dim + 1:
+                    raise ValueError(
+                        "conditioned residual adapter input width is invalid"
+                    )
             preview_adapter_mask = build_residual_adapter_mask(
                 resumed_state.actor_params
             )
@@ -3082,7 +3203,11 @@ def train(
                 )
             )
             expected_residual_parameters = (
-                env.actor_frame_obs_dim * actor_residual_preview_hidden
+                (
+                    env.actor_frame_obs_dim
+                    + int(actor_torso_wrench_assistance_conditioning)
+                )
+                * actor_residual_preview_hidden
                 + actor_residual_preview_hidden
                 + actor_residual_preview_hidden * env.action_dim
                 + env.action_dim
@@ -3223,6 +3348,23 @@ def train(
         ),
         "allow_resume_torso_wrench_assistance_change": (
             allow_resume_torso_wrench_assistance_change
+        ),
+        "torso_wrench_assistance_continuous": (
+            torso_wrench_assistance_continuous
+        ),
+        "actor_torso_wrench_assistance_conditioning": (
+            actor_torso_wrench_assistance_conditioning
+        ),
+        "actor_observe_torso_wrench_assistance": (
+            actor_observe_torso_wrench_assistance
+        ),
+        "allow_resume_assistance_conditioning_change": (
+            allow_resume_assistance_conditioning_change
+        ),
+        "assistance_conditioning_migration_artifact": (
+            "assistance_conditioning_migration.json"
+            if conditioning_report is not None
+            else None
         ),
         "kp_range": list(kp_range),
         "kd_range": list(kd_range),

@@ -265,6 +265,10 @@ def test_train_exposes_default_off_assistance_and_wires_rollout_telemetry() -> N
     assert parameters["torso_wrench_assistance_end_step"].default == 1
     assert parameters["torso_wrench_assistance_zero_fraction"].default == 0.0
     assert parameters["allow_resume_torso_wrench_assistance_change"].default is False
+    assert parameters["torso_wrench_assistance_continuous"].default is False
+    assert parameters["actor_torso_wrench_assistance_conditioning"].default is False
+    assert parameters["actor_observe_torso_wrench_assistance"].default is False
+    assert parameters["allow_resume_assistance_conditioning_change"].default is False
 
     source = inspect.getsource(train)
     assert "assistance_mask_key" in source
@@ -274,3 +278,61 @@ def test_train_exposes_default_off_assistance_and_wires_rollout_telemetry() -> N
     assert '"torso_wrench_assistance_scale_current"' in source
     assert '"torso_wrench_assistance_valid"' in source
     assert "and not torso_wrench_assistance" in source
+    assert "continuous=torso_wrench_assistance_continuous" in source
+    assert "if actor_observe_torso_wrench_assistance" in source
+    assert "migrate_residual_adapter_assistance_conditioning(" in source
+    assert '"actor_observe_torso_wrench_assistance"' in source
+
+
+def test_assistance_conditioning_resume_change_requires_explicit_authority() -> None:
+    from src.algorithms.shac.torso_wrench_curriculum import (
+        resolve_assistance_conditioning_resume_settings,
+    )
+
+    requested = {
+        "requested_continuous": True,
+        "requested_conditioning": True,
+        "requested_observed": True,
+    }
+    with pytest.raises(ValueError, match="conditioning settings must match"):
+        resolve_assistance_conditioning_resume_settings(
+            {"total_steps": 10}, allow_change=False, **requested
+        )
+
+    assert resolve_assistance_conditioning_resume_settings(
+        {"total_steps": 10}, allow_change=True, **requested
+    ) == (True, True, True)
+    assert resolve_assistance_conditioning_resume_settings(
+        {
+            "torso_wrench_assistance_continuous": True,
+            "actor_torso_wrench_assistance_conditioning": True,
+            "actor_observe_torso_wrench_assistance": False,
+        },
+        requested_continuous=False,
+        requested_conditioning=False,
+        requested_observed=False,
+        allow_change=False,
+    ) == (True, True, False)
+
+
+def test_assistance_conditioning_configuration_rejects_privilege_without_architecture() -> None:
+    from src.algorithms.shac.torso_wrench_curriculum import (
+        validate_assistance_conditioning_configuration,
+    )
+
+    with pytest.raises(ValueError, match="requires scalar conditioning"):
+        validate_assistance_conditioning_configuration(
+            assistance_enabled=True,
+            continuous=True,
+            conditioning=False,
+            observed=True,
+            residual_adapter_enabled=True,
+        )
+    with pytest.raises(ValueError, match="requires torso wrench assistance"):
+        validate_assistance_conditioning_configuration(
+            assistance_enabled=False,
+            continuous=True,
+            conditioning=True,
+            observed=True,
+            residual_adapter_enabled=True,
+        )

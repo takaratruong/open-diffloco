@@ -218,6 +218,94 @@ def merge_residual_adapter_params(
     return freeze(rebuilt) if isinstance(template, FrozenDict) else rebuilt
 
 
+def _append_zero_input_row(adapter_params: PyTree) -> PyTree:
+    kernel, auxiliary = split_residual_adapter_params(adapter_params)
+    expanded = jp.concatenate(
+        (kernel, jp.zeros((1, kernel.shape[1]), dtype=kernel.dtype)), axis=0
+    )
+    return merge_residual_adapter_params(adapter_params, expanded, auxiliary)
+
+
+def migrate_residual_adapter_assistance_conditioning(
+    *,
+    params: FrozenPreviewResidualParams,
+    optimizer_state: optax.OptState,
+    expected_input_dim: int | None = None,
+) -> tuple[FrozenPreviewResidualParams, optax.OptState, dict[str, object]]:
+    """Append an exact-zero scalar input to residual params and Adam moments."""
+    if not isinstance(params, FrozenPreviewResidualParams):
+        raise ValueError("assistance conditioning requires residual parameters")
+    kernel, _ = split_residual_adapter_params(params.adapter)
+    if expected_input_dim is not None and kernel.shape[0] != expected_input_dim:
+        raise ValueError("expected adapter input width before conditioning")
+    adam = _adam_state(optimizer_state)
+    if not isinstance(adam.mu, FrozenPreviewResidualParams) or not isinstance(
+        adam.nu, FrozenPreviewResidualParams
+    ):
+        raise ValueError("assistance conditioning requires residual Adam moments")
+    mu_kernel, _ = split_residual_adapter_params(adam.mu.adapter)
+    nu_kernel, _ = split_residual_adapter_params(adam.nu.adapter)
+    if mu_kernel.shape != kernel.shape or nu_kernel.shape != kernel.shape:
+        raise ValueError("residual Adam moments do not match adapter parameters")
+
+    candidate_params = params._replace(
+        adapter=_append_zero_input_row(params.adapter)
+    )
+    candidate_adam = adam._replace(
+        mu=adam.mu._replace(
+            adapter=_append_zero_input_row(adam.mu.adapter)
+        ),
+        nu=adam.nu._replace(
+            adapter=_append_zero_input_row(adam.nu.adapter)
+        ),
+    )
+    candidate_optimizer = (
+        optimizer_state[0],
+        (candidate_adam, optimizer_state[1][1]),
+    )
+    candidate_kernel, _ = split_residual_adapter_params(
+        candidate_params.adapter
+    )
+    candidate_mu, _ = split_residual_adapter_params(
+        candidate_adam.mu.adapter
+    )
+    candidate_nu, _ = split_residual_adapter_params(
+        candidate_adam.nu.adapter
+    )
+    prefix_exact = bool(
+        np.array_equal(np.asarray(candidate_kernel[:-1]), np.asarray(kernel))
+        and np.array_equal(np.asarray(candidate_mu[:-1]), np.asarray(mu_kernel))
+        and np.array_equal(np.asarray(candidate_nu[:-1]), np.asarray(nu_kernel))
+    )
+    row_zero = bool(
+        np.all(np.asarray(candidate_kernel[-1]) == 0.0)
+        and np.all(np.asarray(candidate_mu[-1]) == 0.0)
+        and np.all(np.asarray(candidate_nu[-1]) == 0.0)
+    )
+    frozen_exact = bool(
+        _tree_equal(params.parent, candidate_params.parent)
+        and _tree_equal(adam.mu.parent, candidate_adam.mu.parent)
+        and _tree_equal(adam.nu.parent, candidate_adam.nu.parent)
+        and np.array_equal(np.asarray(adam.count), np.asarray(candidate_adam.count))
+        and _tree_equal(optimizer_state[0], candidate_optimizer[0])
+        and _tree_equal(optimizer_state[1][1], candidate_optimizer[1][1])
+    )
+    valid = prefix_exact and row_zero and frozen_exact
+    report = {
+        "protocol": "g1-residual-assistance-conditioning-migration-v1",
+        "conditioning_rows": 1,
+        "original_input_dim": int(kernel.shape[0]),
+        "candidate_input_dim": int(candidate_kernel.shape[0]),
+        "parameter_and_moment_prefix_exact": prefix_exact,
+        "conditioning_parameter_and_moments_zero": row_zero,
+        "frozen_state_exact": frozen_exact,
+        "valid": valid,
+    }
+    if not valid:
+        raise ValueError("assistance conditioning migration audit failed")
+    return candidate_params, candidate_optimizer, report
+
+
 def build_residual_muon_optimizers(
     schedule,
 ) -> tuple[optax.GradientTransformation, optax.GradientTransformation]:
