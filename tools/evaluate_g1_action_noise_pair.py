@@ -52,6 +52,8 @@ REQUIRED_ARTIFACTS = (
     "evaluation.mp4",
     "contact_sheet.png",
 )
+PAIR_PHASE = 0
+PAIR_REMAINING_TRANSITIONS = 499
 RECORD_COLUMNS = (
     "step",
     "phase",
@@ -120,6 +122,11 @@ def action_noise_tape(*, seed: int, steps: int, action_std) -> np.ndarray:
     return epsilon_tape(seed=seed, steps=steps) * std
 
 
+def rollout_noise(*, seed: int, steps: int, action_std) -> np.ndarray:
+    """Return the exact noise matrix persisted by an evaluator rollout."""
+    return action_noise_tape(seed=seed, steps=steps, action_std=action_std)
+
+
 def epsilon_tape(*, seed: int, steps: int) -> np.ndarray:
     """Create the caller-owned, per-step standard-normal sample tape."""
     if steps < 1:
@@ -183,6 +190,8 @@ def build_provenance(
         "reference_path": str(reference.resolve()),
         "reference_sha256": _sha256(reference),
         "seed": int(seed),
+        "phase": PAIR_PHASE,
+        "expected_remaining_reference_transitions": PAIR_REMAINING_TRANSITIONS,
         "solver_profile": solver_profile,
         "solver_iterations": profile.iterations,
         "solver_ls_iterations": profile.ls_iterations,
@@ -351,6 +360,7 @@ def _validate_arm_artifacts(
                 "action",
                 "joint_names",
                 "xfrc_applied",
+                "xfrc_body_count",
                 "remaining_reference_transitions",
                 "requested_step_limit",
             }
@@ -362,6 +372,7 @@ def _validate_arm_artifacts(
                 for key in ("action_mean", "epsilon", "action_noise", "action")
             )
             xfrc = archive["xfrc_applied"]
+            xfrc_body_count = int(archive["xfrc_body_count"])
             remaining = int(archive["remaining_reference_transitions"])
             requested = int(archive["requested_step_limit"])
             joint_names = tuple(map(str, archive["joint_names"]))
@@ -381,11 +392,18 @@ def _validate_arm_artifacts(
         raise ValueError(f"{arm} evaluation telemetry is nonfinite or has wrong shape")
     if joint_names != RMR_ACTION_STD_JOINT_NAMES:
         raise ValueError(f"{arm} evaluation joint order mismatch")
+    if require_media and (
+        remaining != provenance["expected_remaining_reference_transitions"]
+        or requested >= 0
+        or int(values[0, 1]) != provenance["phase"]
+        or summary["evaluation_start_phase"] != provenance["phase"]
+    ):
+        raise ValueError(f"{arm} publication phase/suffix metadata is not pinned")
     expected_epsilon = epsilon_tape(seed=provenance["seed"], steps=rows)
     if not np.array_equal(epsilon, expected_epsilon):
         raise ValueError(f"{arm} epsilon is not the registered seeded tape")
     if (
-        xfrc.shape[0] != rows
+        xfrc.shape != (rows, xfrc_body_count, 6)
         or not np.isfinite(xfrc).all()
         or np.any(xfrc != 0.0)
         or np.signbit(xfrc).any()
@@ -394,7 +412,7 @@ def _validate_arm_artifacts(
     std = (
         np.zeros(29, dtype=np.float64)
         if arm == "deterministic"
-        else np.asarray(provenance["rmr_action_std"], dtype=np.float64)
+        else np.asarray(RMR_ACTION_STD, dtype=np.float64)
     )
     expected_noise = (
         np.zeros((rows, 29), dtype=np.float64)
@@ -470,7 +488,7 @@ def rollout_arm(
         action_std, action_dim=env.action_dim, actor_joint_names=env.actor_joint_names
     )
     epsilon = epsilon_tape(seed=seed, steps=step_limit)
-    noise = epsilon * np.asarray(std, dtype=np.float64)
+    noise = rollout_noise(seed=seed, steps=step_limit, action_std=std)
     state = initial_state
     records: list[tuple[float, ...]] = []
     action_means: list[np.ndarray] = []
@@ -538,6 +556,7 @@ def rollout_arm(
         action=np.asarray(applied_actions),
         joint_names=np.asarray(env.actor_joint_names),
         xfrc_applied=np.asarray(applied_wrenches),
+        xfrc_body_count=np.asarray(applied_wrenches[0].shape[0], dtype=np.int64),
         remaining_reference_transitions=np.asarray(remaining, dtype=np.int64),
         requested_step_limit=np.asarray(
             -1 if max_steps is None else max_steps, dtype=np.int64
@@ -590,8 +609,8 @@ def build_pair_manifest(
     """Reopen, validate, and cryptographically bind the complete pair evidence."""
     if set(arms) != {"deterministic", "rmr-noisy"}:
         raise ValueError("pair requires deterministic and rmr-noisy arms")
-    pinned = np.asarray(RMR_ACTION_STD, dtype=np.float32)
-    received = np.asarray(provenance.get("rmr_action_std"), dtype=np.float32)
+    pinned = np.asarray(RMR_ACTION_STD, dtype=np.float64)
+    received = np.asarray(provenance.get("rmr_action_std"), dtype=np.float64)
     if received.shape != pinned.shape or not np.array_equal(received, pinned):
         raise ValueError("provenance RMR action std is not the pinned float32 vector")
     if (
@@ -615,7 +634,10 @@ def build_pair_manifest(
     deterministic, noisy = reopened["deterministic"], reopened["rmr-noisy"]
     if deterministic["paired_reset_state_sha256"] != noisy["paired_reset_state_sha256"]:
         raise ValueError("arms do not share an identical reset state")
-    if not np.array_equal(epsilons["deterministic"], epsilons["rmr-noisy"]):
+    shared = min(len(epsilons["deterministic"]), len(epsilons["rmr-noisy"]))
+    if not np.array_equal(
+        epsilons["deterministic"][:shared], epsilons["rmr-noisy"][:shared]
+    ):
         raise ValueError("arms do not share the identical seeded epsilon tape")
     return {
         "protocol": "g1-rmr-action-noise-matched-pair-v1",

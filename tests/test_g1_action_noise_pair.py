@@ -12,20 +12,24 @@ import pytest
 from src.core.rmr_action_noise import RMR_ACTION_STD, RMR_ACTION_STD_JOINT_NAMES
 
 
-def _write_arm(root: Path, arm: str, *, zero: bool, reset: str = "r" * 64) -> dict:
+def _write_arm(
+    root: Path, arm: str, *, zero: bool, reset: str = "r" * 64, rows: int = 2
+) -> dict:
     from tools.evaluate_g1_action_noise_pair import RECORD_COLUMNS, epsilon_tape
 
     directory = root / arm
     directory.mkdir(parents=True)
     std = np.zeros(29) if zero else np.asarray(RMR_ACTION_STD, dtype=np.float64)
-    epsilon = epsilon_tape(seed=0, steps=2)
-    noise = np.zeros((2, 29), dtype=np.float64) if zero else epsilon * std
-    mean = np.full((2, 29), 0.2)
+    epsilon = epsilon_tape(seed=0, steps=rows)
+    noise = np.zeros((rows, 29), dtype=np.float64) if zero else epsilon * std
+    mean = np.full((rows, 29), 0.2)
     action = np.clip(mean + noise, -1.0, 1.0)
-    values = np.zeros((2, len(RECORD_COLUMNS)), dtype=np.float64)
-    values[:, 0] = (0, 1)
-    values[:, 1] = (0, 1)
-    values[:, 11] = (1, 2)
+    values = np.zeros((rows, len(RECORD_COLUMNS)), dtype=np.float64)
+    values[:, 0] = np.arange(rows)
+    values[:, 1] = np.arange(rows)
+    values[:, 11] = np.arange(1, rows + 1)
+    if rows < 2:
+        values[-1, 4] = 1.0
     np.savez_compressed(
         directory / "evaluation.npz",
         columns=np.asarray(RECORD_COLUMNS),
@@ -35,17 +39,18 @@ def _write_arm(root: Path, arm: str, *, zero: bool, reset: str = "r" * 64) -> di
         action_noise=noise,
         action=action,
         joint_names=np.asarray(RMR_ACTION_STD_JOINT_NAMES),
-        xfrc_applied=np.zeros((2, 3, 6), dtype=np.float64),
-        remaining_reference_transitions=np.asarray(2, dtype=np.int64),
+        xfrc_applied=np.zeros((rows, 3, 6), dtype=np.float64),
+        xfrc_body_count=np.asarray(3, dtype=np.int64),
+        remaining_reference_transitions=np.asarray(499, dtype=np.int64),
         requested_step_limit=np.asarray(-1, dtype=np.int64),
     )
     summary = {
-        "steps": 2,
-        "terminal": False,
+        "steps": rows,
+        "terminal": rows < 2,
         "evaluation_start_phase": 0,
-        "remaining_reference_transitions": 2,
-        "completed_reference_suffix": True,
-        "intermediate_reset_occurred": False,
+        "remaining_reference_transitions": 499,
+        "completed_reference_suffix": False,
+        "intermediate_reset_occurred": rows < 2,
         "paired_reset_state_sha256": reset,
         "action_noise_exact_zero": zero,
         "assistance_exact_zero": True,
@@ -75,6 +80,8 @@ def _provenance() -> dict:
         "seed": 0,
         "action_noise_joint_names": list(RMR_ACTION_STD_JOINT_NAMES),
         "rmr_action_std": np.asarray(RMR_ACTION_STD, dtype=np.float32).tolist(),
+        "phase": 0,
+        "expected_remaining_reference_transitions": 499,
     }
 
 
@@ -123,6 +130,21 @@ def test_manifest_reopens_real_artifacts_and_hash_binds_them(tmp_path: Path) -> 
     assert len(manifest["artifact_sha256"]["rmr-noisy"]) == 4
 
 
+def test_manifest_accepts_natural_unequal_terminal_lengths_with_shared_prefix(
+    tmp_path: Path,
+) -> None:
+    from tools.evaluate_g1_action_noise_pair import build_pair_manifest
+
+    arms = {
+        "deterministic": _write_arm(tmp_path, "deterministic", zero=True, rows=2),
+        "rmr-noisy": _write_arm(tmp_path, "rmr-noisy", zero=False, rows=1),
+    }
+    manifest = build_pair_manifest(
+        output_dir=tmp_path, provenance=_provenance(), arms=arms
+    )
+    assert manifest["arms"]["rmr-noisy"]["terminal"] is True
+
+
 @pytest.mark.parametrize(
     "tamper",
     (
@@ -135,6 +157,10 @@ def test_manifest_reopens_real_artifacts_and_hash_binds_them(tmp_path: Path) -> 
         "epsilon",
         "negative-zero",
         "xfrc",
+        "phase",
+        "remaining",
+        "sentinel",
+        "xfrc-shape",
     ),
 )
 def test_manifest_rejects_tampered_or_cross_arm_artifacts(
@@ -173,6 +199,14 @@ def test_manifest_rejects_tampered_or_cross_arm_artifacts(
             arrays["action_noise"][0, 0] = -0.0
         if tamper == "xfrc":
             arrays["xfrc_applied"][0, 0, 0] = -0.0
+        if tamper == "phase":
+            arrays["values"][0, 1] = 1
+        if tamper == "remaining":
+            arrays["remaining_reference_transitions"] = np.asarray(498)
+        if tamper == "sentinel":
+            arrays["requested_step_limit"] = np.asarray(1)
+        if tamper == "xfrc-shape":
+            arrays["xfrc_applied"] = np.zeros((2,))
         np.savez_compressed(path / "evaluation.npz", **arrays)
     with pytest.raises(ValueError):
         build_pair_manifest(output_dir=tmp_path, provenance=_provenance(), arms=arms)
@@ -207,13 +241,21 @@ def test_manifest_rejects_unpinned_vector_and_wrong_media_frame_count(
         "rmr-noisy": _write_arm(tmp_path, "rmr-noisy", zero=False),
     }
     bad = _provenance()
-    bad["rmr_action_std"][0] += 0.1
+    bad["rmr_action_std"][0] += 1e-10
     with pytest.raises(ValueError, match="pinned"):
         build_pair_manifest(output_dir=tmp_path, provenance=bad, arms=arms)
     frame = np.zeros((16, 16, 3), dtype=np.uint8)
     imageio.mimsave(tmp_path / "rmr-noisy" / "evaluation.mp4", [frame, frame], fps=1)
     with pytest.raises(ValueError, match="frame count"):
         build_pair_manifest(output_dir=tmp_path, provenance=_provenance(), arms=arms)
+
+
+def test_rollout_noise_uses_exact_positive_zero_tape() -> None:
+    from tools.evaluate_g1_action_noise_pair import rollout_noise
+
+    noise = rollout_noise(seed=0, steps=3, action_std=np.zeros(29))
+    assert np.array_equal(noise, np.zeros((3, 29)))
+    assert not np.signbit(noise).any()
 
 
 def test_output_directory_must_be_fresh_and_staging_failure_publishes_nothing(
