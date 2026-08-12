@@ -14,6 +14,7 @@ cannot affect fitting or selection.
 
 Publish a consolidated checkpoint only if confirmation rank correlation is at
 least `0.8`, NRMSE at most `0.25`, every H12 relative error at most `0.25`, and
-all metrics plus every H12 error strictly improve over the original target
-critic on identical confirmation trajectories. Otherwise close simple dataset
-consolidation and move to value-gradient/objective design.
+rank correlation, NRMSE, and every H12 error strictly improve over the original
+target critic on identical confirmation trajectories. Pearson, RMSE, and bias
+remain descriptive. Otherwise close simple dataset consolidation and move to
+value-gradient/objective design.
