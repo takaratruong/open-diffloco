@@ -1,13 +1,18 @@
 import json
+import pickle
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 
 def _cagrad_row(step: int) -> dict[str, object]:
+    from src.core.rmr_action_noise import RMR_ACTION_STD
+
     return {
         "step": step,
         "actor_bootstrap_scale_current": 0.0,
+        "action_noise_current": np.asarray(RMR_ACTION_STD).tolist(),
         "torso_wrench_assistance_scale_current": 0.0,
         "torso_wrench_assistance_active_fraction": 0.0,
         "torso_wrench_assistance_max_force": 0.0,
@@ -212,7 +217,13 @@ def test_training_validation_requires_32_updates_fixed_noise_and_finite_cagrad(
     (run / "hparams.json").write_text(json.dumps(hparams), encoding="utf-8")
     rows = []
     for step in expected_checkpoint_steps():
-        (run / f"checkpoint_step_{step}.pkl").write_bytes(b"checkpoint")
+        with (run / f"checkpoint_step_{step}.pkl").open("wb") as stream:
+            pickle.dump(
+                SimpleNamespace(
+                    step=np.asarray(step), finite_leaf=np.asarray([1.0])
+                ),
+                stream,
+            )
         rows.append(_cagrad_row(step))
     (run / "checkpoint_phase_metrics.json").write_text(
         json.dumps(rows), encoding="utf-8"

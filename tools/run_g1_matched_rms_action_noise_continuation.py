@@ -25,7 +25,13 @@ from tools.run_g1_tracking_shac import configure_jax
 from tools.run_g1_zero_assistance_consolidation import _write_json_atomically
 
 MATCHED_RMS_ACTION_NOISE_STD = float(
-    np.sqrt(np.mean(np.square(RMR_ACTION_STD.astype(np.float64))))
+    np.sqrt(
+        np.mean(
+            np.square(
+                np.asarray(RMR_ACTION_STD, dtype=np.float32).astype(np.float64)
+            )
+        )
+    )
 )
 
 

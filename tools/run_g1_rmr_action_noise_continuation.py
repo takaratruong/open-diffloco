@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import os
+import pickle
 from pathlib import Path
 from typing import Any
 
@@ -173,7 +174,12 @@ def validate_preflight(
     }
 
 
-def _validate_cagrad_row(row: dict[str, object], step: int) -> None:
+def _validate_cagrad_row(
+    row: dict[str, object],
+    step: int,
+    *,
+    expected_action_noise_std: object,
+) -> None:
     exact_zero_fields = (
         "torso_wrench_assistance_scale_current",
         "torso_wrench_assistance_active_fraction",
@@ -182,6 +188,10 @@ def _validate_cagrad_row(row: dict[str, object], step: int) -> None:
     )
     if row.get("actor_bootstrap_scale_current") != 0.0:
         raise ValueError(f"checkpoint {step} is not zero actor bootstrap")
+    if row.get("action_noise_current") != action_noise_std_hparam(
+        expected_action_noise_std
+    ):
+        raise ValueError(f"checkpoint {step} action_noise_current does not match")
     if any(row.get(key) != 0.0 for key in exact_zero_fields):
         raise ValueError(f"checkpoint {step} is not exact-zero assistance")
     frozen_fields = (
@@ -254,6 +264,28 @@ def _validate_cagrad_row(row: dict[str, object], step: int) -> None:
         raise ValueError(f"checkpoint {step} has invalid CAGrad telemetry")
 
 
+def _validate_checkpoint(path: Path, expected_step: int) -> str:
+    """Reopen one checkpoint and require its saved state to be finite and exact."""
+    import jax
+    import numpy as np
+
+    try:
+        with path.open("rb") as stream:
+            state = pickle.load(stream)
+        if int(np.asarray(state.step)) != expected_step:
+            raise ValueError("saved step does not match filename")
+        leaves = jax.tree_util.tree_leaves(state)
+        if len(leaves) == 1 and leaves[0] is state and hasattr(state, "__dict__"):
+            leaves = jax.tree_util.tree_leaves(vars(state))
+        for leaf in leaves:
+            array = np.asarray(leaf)
+            if array.dtype.kind in "biufc" and not np.isfinite(array).all():
+                raise ValueError("checkpoint contains a nonfinite numeric leaf")
+    except Exception as error:
+        raise ValueError(f"invalid checkpoint {path.name}") from error
+    return sha256_file(path)
+
+
 def validate_action_noise_training_artifacts(
     run_directory: Path,
     *,
@@ -305,6 +337,12 @@ def validate_action_noise_training_artifacts(
         )
     if any(path.is_symlink() or not path.is_file() for path in archived_checkpoints):
         raise ValueError("dense checkpoint artifacts must be regular files")
+    checkpoint_sha256_by_step = {
+        str(step): _validate_checkpoint(
+            run_directory / f"checkpoint_step_{step}.pkl", step
+        )
+        for step in steps
+    }
     rows = json.loads((run_directory / "checkpoint_phase_metrics.json").read_text())
     if (
         not isinstance(rows, list)
@@ -318,13 +356,18 @@ def validate_action_noise_training_artifacts(
             "dense checkpoint telemetry must contain exactly four unique steps"
         )
     for step in steps:
-        _validate_cagrad_row(rows_by_step[step], step)
+        _validate_cagrad_row(
+            rows_by_step[step],
+            step,
+            expected_action_noise_std=expected_action_noise_std,
+        )
     return {
         "protocol": protocol,
         "valid": True,
         "run_directory": str(run_directory),
         "update_count": 32,
         "checkpoint_steps": list(steps),
+        "checkpoint_sha256_by_step": checkpoint_sha256_by_step,
         "checkpoint_interval": CHECKPOINT_INTERVAL,
         "hparams": expected_hparams,
     }

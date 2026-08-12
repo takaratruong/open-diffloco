@@ -4059,6 +4059,9 @@ def train(
                     save_dir,
                     {
                         "step": int(current_step),
+                        "action_noise_current": action_noise_std_hparam(
+                            np.asarray(metrics["action_noise_current"])
+                        ),
                         **build_checkpoint_cagrad_telemetry(metrics),
                         "actor_preview_gradient_norm": float(
                             metrics["actor_preview_gradient_norm"]

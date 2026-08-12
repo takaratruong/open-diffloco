@@ -1,13 +1,16 @@
 import json
+import pickle
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 
-def _cagrad_row(step: int) -> dict[str, object]:
+def _cagrad_row(step: int, action_noise_current: float) -> dict[str, object]:
     return {
         "step": step,
         "actor_bootstrap_scale_current": 0.0,
+        "action_noise_current": action_noise_current,
         "torso_wrench_assistance_scale_current": 0.0,
         "torso_wrench_assistance_active_fraction": 0.0,
         "torso_wrench_assistance_max_force": 0.0,
@@ -40,7 +43,15 @@ def test_matched_scalar_is_exact_rmr_vector_rms():
     )
 
     expected = float(
-        np.sqrt(np.mean(np.square(RMR_ACTION_STD.astype(np.float64))))
+        np.sqrt(
+            np.mean(
+                np.square(
+                    np.asarray(RMR_ACTION_STD, dtype=np.float32).astype(
+                        np.float64
+                    )
+                )
+            )
+        )
     )
     assert MATCHED_RMS_ACTION_NOISE_STD == expected
     assert MATCHED_RMS_ACTION_NOISE_STD == 0.25027265203867416
@@ -140,8 +151,14 @@ def test_matched_scalar_training_validator_requires_exact_scalar(tmp_path):
     (run / "hparams.json").write_text(json.dumps(hparams), encoding="utf-8")
     rows = []
     for step in expected_checkpoint_steps():
-        (run / f"checkpoint_step_{step}.pkl").write_bytes(b"checkpoint")
-        rows.append(_cagrad_row(step))
+        with (run / f"checkpoint_step_{step}.pkl").open("wb") as stream:
+            pickle.dump(
+                SimpleNamespace(
+                    step=np.asarray(step), finite_leaf=np.asarray([1.0])
+                ),
+                stream,
+            )
+        rows.append(_cagrad_row(step, MATCHED_RMS_ACTION_NOISE_STD))
     (run / "checkpoint_phase_metrics.json").write_text(
         json.dumps(rows), encoding="utf-8"
     )
@@ -156,4 +173,44 @@ def test_matched_scalar_training_validator_requires_exact_scalar(tmp_path):
     )
     (run / "hparams.json").write_text(json.dumps(hparams), encoding="utf-8")
     with pytest.raises(ValueError, match="action_noise_std_end"):
+        validate_training_artifacts(run)
+
+    hparams["action_noise_std_end"] = MATCHED_RMS_ACTION_NOISE_STD
+    (run / "hparams.json").write_text(json.dumps(hparams), encoding="utf-8")
+    rows[-1]["action_noise_current"] = 0.32
+    (run / "checkpoint_phase_metrics.json").write_text(
+        json.dumps(rows), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="action_noise_current"):
+        validate_training_artifacts(run)
+
+    rows[-1]["action_noise_current"] = MATCHED_RMS_ACTION_NOISE_STD
+    (run / "checkpoint_phase_metrics.json").write_text(
+        json.dumps(rows), encoding="utf-8"
+    )
+    checkpoint = run / f"checkpoint_step_{expected_checkpoint_steps()[-1]}.pkl"
+    with checkpoint.open("wb") as stream:
+        pickle.dump(
+            SimpleNamespace(
+                step=np.asarray(expected_checkpoint_steps()[-1] - 1),
+                finite_leaf=np.asarray([1.0]),
+            ),
+            stream,
+        )
+    with pytest.raises(ValueError, match="invalid checkpoint"):
+        validate_training_artifacts(run)
+
+    with checkpoint.open("wb") as stream:
+        pickle.dump(
+            SimpleNamespace(
+                step=np.asarray(expected_checkpoint_steps()[-1]),
+                finite_leaf=np.asarray([np.nan]),
+            ),
+            stream,
+        )
+    with pytest.raises(ValueError, match="invalid checkpoint"):
+        validate_training_artifacts(run)
+
+    checkpoint.write_bytes(b"not a pickle")
+    with pytest.raises(ValueError, match="invalid checkpoint"):
         validate_training_artifacts(run)
