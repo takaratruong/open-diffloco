@@ -1899,6 +1899,7 @@ def train(
     action_noise_std_start, action_noise_std_end = (
         resolve_action_noise_resume_settings(
             resumed_hparams,
+            is_resume=resume_from is not None,
             requested_start=action_noise_std_start,
             requested_end=action_noise_std_end,
             allow_change=allow_resume_action_noise_change,

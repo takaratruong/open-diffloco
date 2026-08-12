@@ -1,3 +1,4 @@
+import inspect
 import json
 
 import jax
@@ -123,6 +124,7 @@ def test_scalar_noise_preserves_python_float_schedule_and_hparam_under_x64():
     with jax.experimental.enable_x64():
         start, end = resolve_action_noise_resume_settings(
             None,
+            is_resume=False,
             requested_start=0.5,
             requested_end=0.32,
             allow_change=False,
@@ -189,6 +191,7 @@ def test_resume_noise_change_requires_explicit_authority():
     with pytest.raises(ValueError, match="allow_resume_action_noise_change"):
         resolve_action_noise_resume_settings(
             previous,
+            is_resume=True,
             requested_start=RMR_ACTION_STD,
             requested_end=RMR_ACTION_STD,
             allow_change=False,
@@ -198,6 +201,7 @@ def test_resume_noise_change_requires_explicit_authority():
 
     start, end = resolve_action_noise_resume_settings(
         previous,
+        is_resume=True,
         requested_start=RMR_ACTION_STD,
         requested_end=RMR_ACTION_STD,
         allow_change=True,
@@ -213,6 +217,7 @@ def test_resume_noise_without_a_change_restores_scalar_checkpoint_values():
 
     start, end = resolve_action_noise_resume_settings(
         {"action_noise_std_start": 0.5, "action_noise_std_end": 0.32},
+        is_resume=True,
         requested_start=0.5,
         requested_end=0.32,
         allow_change=False,
@@ -238,9 +243,42 @@ def test_incomplete_resume_noise_metadata_requires_explicit_authority(
     with pytest.raises(ValueError, match="complete action noise metadata"):
         resolve_action_noise_resume_settings(
             resumed_hparams,
+            is_resume=True,
             requested_start=0.5,
             requested_end=0.32,
             allow_change=False,
             action_dim=12,
             actor_joint_names=(),
         )
+
+
+def test_resumed_checkpoint_without_hparams_requires_explicit_authority():
+    from src.algorithms.shac.algorithm import resolve_action_noise_resume_settings
+
+    kwargs = {
+        "requested_start": 0.5,
+        "requested_end": 0.32,
+        "action_dim": 12,
+        "actor_joint_names": (),
+        "is_resume": True,
+    }
+    with pytest.raises(ValueError, match="complete action noise metadata"):
+        resolve_action_noise_resume_settings(
+            None,
+            allow_change=False,
+            **kwargs,
+        )
+
+    start, end = resolve_action_noise_resume_settings(
+        None,
+        allow_change=True,
+        **kwargs,
+    )
+    assert start == 0.5
+    assert end == 0.32
+
+
+def test_train_passes_explicit_resume_context_to_noise_resolver():
+    from src.algorithms.shac.algorithm import train
+
+    assert "is_resume=resume_from is not None" in inspect.getsource(train)

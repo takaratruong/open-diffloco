@@ -73,10 +73,12 @@ RMR_ACTION_STD = jp.array(
     dtype=jp.float32,
 )
 
+ActionNoiseStd = float | int | jax.Array
+
 
 def validate_action_noise_std(
     value, *, action_dim: int, actor_joint_names
-) -> jax.Array:
+) -> ActionNoiseStd:
     """Return a finite nonnegative scalar or exact-order action vector."""
     array = np.asarray(value)
     if array.ndim not in (0, 1):
@@ -116,13 +118,16 @@ def action_noise_std_hparam(value) -> float | list[float]:
 def resolve_action_noise_resume_settings(
     resumed_hparams: dict[str, object] | None,
     *,
+    is_resume: bool,
     requested_start,
     requested_end,
     allow_change: bool,
     action_dim: int,
     actor_joint_names,
-) -> tuple[jax.Array, jax.Array]:
+) -> tuple[ActionNoiseStd, ActionNoiseStd]:
     """Restore exact action noise unless its treatment change is authorized."""
+    if not isinstance(is_resume, bool):
+        raise ValueError("is_resume must be boolean")
     if not isinstance(allow_change, bool):
         raise ValueError("allow_resume_action_noise_change must be boolean")
     requested_start = validate_action_noise_std(
@@ -136,6 +141,8 @@ def resolve_action_noise_resume_settings(
         actor_joint_names=actor_joint_names,
     )
     if resumed_hparams is None:
+        if is_resume and not allow_change:
+            raise ValueError("resume metadata requires complete action noise metadata")
         return requested_start, requested_end
     required = {"action_noise_std_start", "action_noise_std_end"}
     if not required.issubset(resumed_hparams):
