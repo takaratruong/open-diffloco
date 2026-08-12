@@ -145,3 +145,17 @@ def test_build_aggregate_rejects_invalid_worker_record() -> None:
             reference_sha256="reference",
             code_commit="commit",
         )
+
+
+def test_build_aggregate_rejects_worker_threshold_inconsistent_with_conditions() -> None:
+    workers = [_worker(label, (1.0,) * 5) for label in CHECKPOINT_LABELS]
+    workers[1]["required_scales"]["200"] = 0.25
+    with pytest.raises(ValueError, match="derived thresholds"):
+        build_aggregate(
+            workers,
+            expected_checkpoint_sha256={
+                label: label * 8 for label in CHECKPOINT_LABELS
+            },
+            reference_sha256="reference",
+            code_commit="commit",
+        )

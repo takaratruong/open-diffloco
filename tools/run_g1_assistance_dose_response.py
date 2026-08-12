@@ -18,6 +18,7 @@ from src.evaluation.g1_assistance_dose_response import (
     CHECKPOINT_LABELS,
     PHASES,
     classify_threshold_trajectory,
+    required_scale,
 )
 from tools.prepare_g1_rmr_reference import sha256_file
 
@@ -158,13 +159,32 @@ def build_aggregate(
             ASSISTANCE_SCALES
         ):
             raise ValueError(f"{label} worker condition grid is incomplete")
+        expected_conditions = tuple(
+            (phase, scale)
+            for phase in PHASES
+            for scale in ASSISTANCE_SCALES
+        )
+        observed_conditions = tuple(
+            (item.get("phase"), item.get("scale")) for item in conditions
+        )
+        if observed_conditions != expected_conditions:
+            raise ValueError(f"{label} worker condition grid does not match")
         if not all(item.get("valid") is True for item in conditions):
             raise ValueError(f"{label} has an invalid condition")
+        derived_thresholds = {
+            str(phase): required_scale(
+                [item for item in conditions if item["phase"] == phase],
+                scales=ASSISTANCE_SCALES,
+            )
+            for phase in PHASES
+        }
+        if worker.get("required_scales") != derived_thresholds:
+            raise ValueError(f"{label} derived thresholds do not match conditions")
         checkpoints.append(
             {
                 "label": label,
                 "checkpoint_sha256": provenance["checkpoint_sha256"],
-                "required_scales": worker["required_scales"],
+                "required_scales": derived_thresholds,
                 "conditions": conditions,
             }
         )
