@@ -171,6 +171,60 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         )
         self.assertEqual(normalizer, "normalizer")
 
+    def test_checkpoint_loader_applies_legacy_residual_without_assistance_input(self):
+        from src.algorithms.shac.residual_preview_adapter import (
+            FrozenPreviewResidualParams,
+            PreviewResidualAdapter,
+            apply_frozen_preview_residual,
+        )
+
+        env = SimpleNamespace(
+            action_dim=2,
+            squash_actor_actions=True,
+            actor_obs_dim=15,
+            actor_frame_obs_dim=5,
+            actor_history_len=3,
+        )
+        parent = Actor(
+            2,
+            hidden=(4,),
+            squash=True,
+            layer_norm=False,
+            zero_output=False,
+        )
+        residual = PreviewResidualAdapter(action_dim=2, hidden_dim=4)
+        parent_params = parent.init(
+            jax.random.PRNGKey(21), jnp.zeros((1, 15), dtype=jnp.float32)
+        )
+        adapter_params = residual.init(
+            jax.random.PRNGKey(22), jnp.zeros((1, 5), dtype=jnp.float32)
+        )
+        params = FrozenPreviewResidualParams(parent_params, adapter_params)
+        state = SimpleNamespace(actor_params=params, normalizer="normalizer")
+        observations = jnp.arange(15, dtype=jnp.float32).reshape(1, 15)
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "checkpoint.pkl"
+            with checkpoint.open("wb") as handle:
+                pickle.dump(state, handle)
+            actor, loaded_params, normalizer = _load_policy(
+                env, checkpoint, seed=0
+            )
+
+        expected, _, _ = apply_frozen_preview_residual(
+            parent,
+            residual,
+            params,
+            observations,
+            history_len=3,
+            treatment_frame_dim=5,
+            assistance_scale=None,
+        )
+        np.testing.assert_array_equal(
+            actor.apply(loaded_params, observations), expected
+        )
+        self.assertEqual(normalizer, "normalizer")
+
     def test_loader_recreates_exact_compact_training_initialization(self):
         env = SimpleNamespace(
             action_dim=3,

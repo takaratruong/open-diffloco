@@ -226,6 +226,12 @@ def _load_policy(
                 action_dim=env.action_dim,
                 hidden_dim=int(adapter_kernel.shape[1]),
             )
+            assistance_scale = (
+                jnp.asarray(0.0, dtype=jnp.float32)
+                if int(adapter_kernel.shape[0])
+                == env.actor_frame_obs_dim + 1
+                else None
+            )
 
             class FrozenResidualCheckpointActor:
                 def apply(self, params, observations):
@@ -236,7 +242,7 @@ def _load_policy(
                         observations,
                         history_len=env.actor_history_len,
                         treatment_frame_dim=env.actor_frame_obs_dim,
-                        assistance_scale=jnp.asarray(0.0, dtype=jnp.float32),
+                        assistance_scale=assistance_scale,
                     )
                     return action
 
