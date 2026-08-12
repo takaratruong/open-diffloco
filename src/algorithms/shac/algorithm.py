@@ -22,6 +22,10 @@ from src.core.rmr_policy import (
     apply_trainable_rmr_policy,
     compose_bounded_rmr_residual,
 )
+from src.core.rmr_action_noise import (
+    action_noise_std_hparam,
+    resolve_action_noise_resume_settings,
+)
 from src.envs.go2.environment import Go2Env
 from src.envs.go2.terrain import differentiated_ou_foot_forces
 from src.core.utils import compute_grad_norm
@@ -1147,8 +1151,9 @@ def train(
     cmd_zero_prob: tuple = (0.1, 0.7, 0.5),
     cmd_ctrl_interval_range: tuple = (60, 140),
     # Randomization
-    action_noise_std_start: float = 0.5,
-    action_noise_std_end: float = 0.32,
+    action_noise_std_start: float | list[float] = 0.5,
+    action_noise_std_end: float | list[float] = 0.32,
+    allow_resume_action_noise_change: bool = False,
     friction_range: tuple = (0.5, 2.0),
     mass_range: tuple = (0.85, 1.15),
     kp_range: tuple = (25.0, 45.0),
@@ -1690,12 +1695,6 @@ def train(
                 f"  Loaded hparams: action_scale={resumed_hparams.get('action_scale')}"
             )
             action_scale = resumed_hparams.get("action_scale", action_scale)
-            action_noise_std_start = resumed_hparams.get(
-                "action_noise_std_start", action_noise_std_start
-            )
-            action_noise_std_end = resumed_hparams.get(
-                "action_noise_std_end", action_noise_std_end
-            )
             xml_path = resumed_hparams.get("xml_path", xml_path)
             env_variant = resumed_hparams.get("env_variant", env_variant)
             reference_path = resumed_hparams.get(
@@ -1896,6 +1895,16 @@ def train(
         max_episode_length=max_episode_length,
         actor_history_len=actor_history_len,
         **g1_environment_kwargs,
+    )
+    action_noise_std_start, action_noise_std_end = (
+        resolve_action_noise_resume_settings(
+            resumed_hparams,
+            requested_start=action_noise_std_start,
+            requested_end=action_noise_std_end,
+            allow_change=allow_resume_action_noise_change,
+            action_dim=env.action_dim,
+            actor_joint_names=getattr(env, "actor_joint_names", ()),
+        )
     )
     reference_hparams = {}
     if env_variant.startswith("g1_tracking"):
@@ -2237,7 +2246,7 @@ def train(
                 ).astype(jp.float64)
 
             # Reparameterized action noise
-            noisy_action = action + current_noise_std * noise_t.astype(jp.float64)
+            noisy_action = action + noise_t.astype(jp.float64) * current_noise_std
             if squash_actor_actions:
                 noisy_action = jp.clip(noisy_action, -1.0, 1.0)
 
@@ -3483,8 +3492,9 @@ def train(
         "cmd_yaw_rate_range": list(cmd_yaw_rate_range),
         "cmd_zero_prob": list(cmd_zero_prob),
         "cmd_ctrl_interval_range": list(cmd_ctrl_interval_range),
-        "action_noise_std_start": action_noise_std_start,
-        "action_noise_std_end": action_noise_std_end,
+        "action_noise_std_start": action_noise_std_hparam(action_noise_std_start),
+        "action_noise_std_end": action_noise_std_hparam(action_noise_std_end),
+        "allow_resume_action_noise_change": allow_resume_action_noise_change,
         "action_noise_schedule_steps": action_noise_schedule_steps,
         "friction_range": list(friction_range),
         "mass_range": list(mass_range),
