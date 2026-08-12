@@ -47,6 +47,18 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         self.assertEqual(args.reference_path, Path("/tmp/dance.npz"))
         self.assertEqual(args.reference_stride, 1)
         self.assertEqual(args.actor_reference_lookahead_steps, ())
+        self.assertEqual(args.actor_reference_preview_mode, "absolute")
+        self.assertEqual(
+            build_parser().parse_args(
+                [
+                    "--output-dir",
+                    "/tmp/g1-evaluation",
+                    "--actor-reference-preview-mode",
+                    "delta",
+                ]
+            ).actor_reference_preview_mode,
+            "delta",
+        )
 
     def test_complete_suffix_uses_every_carried_reference_transition(self):
         self.assertEqual(remaining_reference_transitions(500, 0, 1), 499)
@@ -104,6 +116,60 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
             actor.apply(loaded_params, jnp.zeros((1, 7))),
             expected_actor.apply(params, jnp.zeros((1, 7))),
         )
+
+    def test_checkpoint_loader_applies_conditioned_residual_with_zero_assistance(self):
+        from src.algorithms.shac.residual_preview_adapter import (
+            FrozenPreviewResidualParams,
+            PreviewResidualAdapter,
+            apply_frozen_preview_residual,
+        )
+
+        env = SimpleNamespace(
+            action_dim=2,
+            squash_actor_actions=True,
+            actor_obs_dim=15,
+            actor_frame_obs_dim=5,
+            actor_history_len=3,
+        )
+        parent = Actor(
+            2,
+            hidden=(4,),
+            squash=True,
+            layer_norm=False,
+            zero_output=False,
+        )
+        residual = PreviewResidualAdapter(action_dim=2, hidden_dim=4)
+        parent_params = parent.init(
+            jax.random.PRNGKey(11), jnp.zeros((1, 15), dtype=jnp.float32)
+        )
+        adapter_params = residual.init(
+            jax.random.PRNGKey(12), jnp.zeros((1, 6), dtype=jnp.float32)
+        )
+        params = FrozenPreviewResidualParams(parent_params, adapter_params)
+        state = SimpleNamespace(actor_params=params, normalizer="normalizer")
+        observations = jnp.arange(15, dtype=jnp.float32).reshape(1, 15)
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "checkpoint.pkl"
+            with checkpoint.open("wb") as handle:
+                pickle.dump(state, handle)
+            actor, loaded_params, normalizer = _load_policy(
+                env, checkpoint, seed=0
+            )
+
+        expected, _, _ = apply_frozen_preview_residual(
+            parent,
+            residual,
+            params,
+            observations,
+            history_len=3,
+            treatment_frame_dim=5,
+            assistance_scale=jnp.asarray(0.0),
+        )
+        np.testing.assert_array_equal(
+            actor.apply(loaded_params, observations), expected
+        )
+        self.assertEqual(normalizer, "normalizer")
 
     def test_loader_recreates_exact_compact_training_initialization(self):
         env = SimpleNamespace(

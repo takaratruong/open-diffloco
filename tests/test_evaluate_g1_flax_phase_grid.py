@@ -42,6 +42,7 @@ def test_flax_phase_grid_payload_records_exact_suffix_completion():
     assert payload["actor_residual_preview_adapter"] is True
     assert payload["actor_residual_preview_hidden"] == 256
     assert payload["actor_residual_preview_trainable_parameter_count"] == 91_677
+    assert payload["actor_assistance_conditioning_scale"] == 0.0
 
 
 def test_flax_phase_grid_parser_defaults_absolute_and_accepts_delta():

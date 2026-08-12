@@ -16,6 +16,12 @@ from src.core.data_structures import Normalizer
 from src.core.networks import Actor
 from src.core.rmr_policy import bound_residual_action
 from src.core.rmr_policy import apply_trainable_rmr_policy
+from src.algorithms.shac.residual_preview_adapter import (
+    FrozenPreviewResidualParams,
+    PreviewResidualAdapter,
+    apply_frozen_preview_residual,
+    split_residual_adapter_params,
+)
 from src.envs.g1_tracking.environment import G1TrackingEnv
 from src.envs.g1_tracking.solver_profiles import (
     SOLVER_PROFILES,
@@ -177,7 +183,14 @@ def _load_policy(
     if checkpoint is not None:
         with checkpoint.open("rb") as handle:
             state = pickle.load(handle)
-        modules = state.actor_params["params"]
+        composite = isinstance(
+            state.actor_params, FrozenPreviewResidualParams
+        )
+        modules = (
+            state.actor_params.parent["params"]
+            if composite
+            else state.actor_params["params"]
+        )
         dense_names = sorted(
             (name for name in modules if name.startswith("Dense_")),
             key=lambda name: int(name.rsplit("_", 1)[1]),
@@ -204,6 +217,30 @@ def _load_policy(
             # checkpoints without changing their stored parameters.
             zero_output=False,
         )
+        if composite:
+            parent_actor = actor
+            adapter_kernel, _ = split_residual_adapter_params(
+                state.actor_params.adapter
+            )
+            residual_actor = PreviewResidualAdapter(
+                action_dim=env.action_dim,
+                hidden_dim=int(adapter_kernel.shape[1]),
+            )
+
+            class FrozenResidualCheckpointActor:
+                def apply(self, params, observations):
+                    action, _, _ = apply_frozen_preview_residual(
+                        parent_actor,
+                        residual_actor,
+                        params,
+                        observations,
+                        history_len=env.actor_history_len,
+                        treatment_frame_dim=env.actor_frame_obs_dim,
+                        assistance_scale=jnp.asarray(0.0, dtype=jnp.float32),
+                    )
+                    return action
+
+            actor = FrozenResidualCheckpointActor()
         return actor, state.actor_params, state.normalizer
 
     actor = Actor(
@@ -279,6 +316,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=(),
     )
     parser.add_argument(
+        "--actor-reference-preview-mode",
+        choices=("absolute", "delta"),
+        default="absolute",
+    )
+    parser.add_argument(
         "--reference-residual-control", action="store_true"
     )
     parser.add_argument(
@@ -352,6 +394,7 @@ def main() -> None:
         actor_reference_lookahead_steps=tuple(
             args.actor_reference_lookahead_steps
         ),
+        actor_reference_preview_mode=args.actor_reference_preview_mode,
         reference_residual_control=args.reference_residual_control,
         reference_residual_scale=args.reference_residual_scale,
     )
@@ -561,6 +604,9 @@ def main() -> None:
         fps=round(1.0 / (env.dt * args.render_every)),
         quality=8,
     )
+    from tools.evaluate_g1_phase_grid import make_contact_sheet
+
+    make_contact_sheet(frames, args.output_dir / "contact_sheet.png")
     stability_summary = summarize_stability_errors(
         {
             "anchor_z_error": values[:, 12],

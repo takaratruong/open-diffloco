@@ -71,6 +71,7 @@ def build_payload(
         "actor_residual_preview_trainable_parameter_count": (
             actor_residual_preview_trainable_parameter_count
         ),
+        "actor_assistance_conditioning_scale": 0.0,
         "results": results,
         "summary": build_phase_grid_summary(
             results,

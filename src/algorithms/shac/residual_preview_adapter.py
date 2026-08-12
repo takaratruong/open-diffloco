@@ -112,6 +112,8 @@ def apply_frozen_preview_residual(
             if scale.shape not in ((), leading_shape):
                 raise ValueError("assistance scale shape must match observations")
             scale = jp.broadcast_to(scale, leading_shape)
+        scale_valid = jp.isfinite(scale) & (scale >= 0.0) & (scale <= 1.0)
+        scale = jp.where(scale_valid, scale, jp.asarray(jp.nan, frame.dtype))
         frame = jp.concatenate((frame, scale[..., None]), axis=-1)
     elif adapter_input_dim != treatment_frame_dim:
         raise ValueError("residual adapter input width is not registered")

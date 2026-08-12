@@ -188,6 +188,36 @@ def test_conditioned_adapter_rejects_scalar_shape_mismatch():
         )
 
 
+@pytest.mark.parametrize("scale", [float("nan"), -0.1, 1.1])
+def test_conditioned_adapter_fails_closed_on_invalid_scalar(scale: float):
+    from src.algorithms.shac.residual_preview_adapter import (
+        FrozenPreviewResidualParams,
+        PreviewResidualAdapter,
+        apply_frozen_preview_residual,
+    )
+
+    parent_actor, _, legacy_params = _toy_policy()
+    residual_actor = PreviewResidualAdapter(action_dim=2, hidden_dim=4)
+    adapter = residual_actor.init(
+        jax.random.PRNGKey(41), jnp.zeros((1, 6), dtype=jnp.float32)
+    )
+    params = FrozenPreviewResidualParams(legacy_params.parent, adapter)
+
+    action, _, _ = jax.jit(
+        lambda assistance: apply_frozen_preview_residual(
+            parent_actor,
+            residual_actor,
+            params,
+            jnp.zeros((1, 15), dtype=jnp.float32),
+            history_len=3,
+            treatment_frame_dim=5,
+            assistance_scale=assistance,
+        )
+    )(jnp.asarray(scale, dtype=jnp.float32))
+
+    assert not bool(jnp.all(jnp.isfinite(action)))
+
+
 def test_adapter_reads_only_newest_treatment_frame():
     from src.algorithms.shac.residual_preview_adapter import (
         current_treatment_frame,
