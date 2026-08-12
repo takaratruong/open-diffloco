@@ -20,6 +20,9 @@ from tools.run_g1_frozen_residual_assistance_curriculum import (
     build_frozen_residual_assistance_kwargs,
 )
 from tools.run_g1_tracking_shac import configure_jax
+from tools.run_g1_root_recovery_continuation import (
+    validate_consumed_resume_assets,
+)
 from tools.run_g1_zero_assistance_consolidation import (
     _git_output,
     _require_equal,
@@ -30,6 +33,7 @@ from tools.run_g1_zero_assistance_consolidation import (
 E012_SELECTED_STEP = 1_671_168
 ZERO_BOOTSTRAP_END_STEP = 1_867_776
 CHECKPOINT_INTERVAL = 49_152
+SEED = 0
 EXPECTED_RESUME_SHA256 = (
     "f375cadc9bf8b5cef26fc7414133071910fed393344c99bbacffea963aa9f4f7"
 )
@@ -81,7 +85,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(DEFAULT_REFERENCE_PATH),
     )
-    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--output-root",
         type=Path,
@@ -133,6 +136,10 @@ def validate_preflight(
         "start_step": E012_SELECTED_STEP,
         "end_step": ZERO_BOOTSTRAP_END_STEP,
         "checkpoint_steps": list(expected_checkpoint_steps()),
+        "seed": SEED,
+        "runtime_assets": validate_consumed_resume_assets(
+            hparams_path, reference_path
+        ),
     }
 
 
@@ -157,6 +164,7 @@ def validate_training_artifacts(run_directory: Path) -> dict[str, Any]:
         "unroll_length": 12,
         "num_envs": 256,
         "effective_num_envs": 512,
+        "seed": SEED,
     }
     for key, expected in expected_hparams.items():
         _require_equal(hparams, key, expected)
@@ -204,6 +212,60 @@ def validate_training_artifacts(run_directory: Path) -> dict[str, Any]:
             or any(count <= 0 for count in counts)
         ):
             raise ValueError(f"checkpoint {step} has invalid CAGrad coverage")
+        vector_fields = (
+            "actor_cagrad_bin_gradient_norms",
+            "actor_cagrad_bin_losses",
+            "actor_cagrad_weights",
+        )
+        vectors = {key: row.get(key) for key in vector_fields}
+        matrices = {
+            key: row.get(key)
+            for key in (
+                "actor_cagrad_gram_matrix",
+                "actor_cagrad_cosine_matrix",
+            )
+        }
+        scalar_fields = (
+            "actor_cagrad_objective",
+            "actor_cagrad_dual_gap",
+            "actor_cagrad_uniform_combined_cosine",
+            "actor_cagrad_combined_norm",
+        )
+        if (
+            row.get("actor_cagrad_valid") is not True
+            or any(
+                not isinstance(values, list)
+                or len(values) != 5
+                or any(not math.isfinite(float(value)) for value in values)
+                for values in vectors.values()
+            )
+            or any(
+                not isinstance(matrix, list)
+                or len(matrix) != 5
+                or any(
+                    not isinstance(matrix_row, list)
+                    or len(matrix_row) != 5
+                    or any(
+                        not math.isfinite(float(value)) for value in matrix_row
+                    )
+                    for matrix_row in matrix
+                )
+                for matrix in matrices.values()
+            )
+            or any(
+                not math.isfinite(float(row.get(key, math.nan)))
+                for key in scalar_fields
+            )
+            or any(float(value) < 0.0 for value in vectors["actor_cagrad_weights"])
+            or not math.isclose(
+                sum(float(value) for value in vectors["actor_cagrad_weights"]),
+                1.0,
+                rel_tol=0.0,
+                abs_tol=1e-5,
+            )
+            or float(row["actor_cagrad_combined_norm"]) <= 0.0
+        ):
+            raise ValueError(f"checkpoint {step} has invalid CAGrad telemetry")
         if row.get("torso_wrench_assistance_valid") is not True or row.get(
             "actor_preview_valid"
         ) is not True:
@@ -233,7 +295,7 @@ def main() -> None:
     kwargs = build_zero_bootstrap_kwargs(
         args.solver_profile,
         args.reference_path.resolve(),
-        args.seed,
+        SEED,
         args.resume_from.resolve(),
     )
     profile = get_solver_profile(args.solver_profile)

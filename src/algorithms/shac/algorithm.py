@@ -261,6 +261,42 @@ def persist_checkpoint_phase_metric(
     return path
 
 
+def build_checkpoint_cagrad_telemetry(metrics) -> dict[str, object]:
+    """Serialize the complete checkpoint-aligned CAGrad validity contract."""
+    return {
+        "actor_bootstrap_scale_current": float(
+            metrics["actor_bootstrap_scale_current"]
+        ),
+        "actor_cagrad_bin_counts": np.asarray(
+            metrics["actor_cagrad_bin_counts"]
+        ).tolist(),
+        "actor_cagrad_bin_gradient_norms": np.asarray(
+            metrics["actor_cagrad_bin_gradient_norms"]
+        ).tolist(),
+        "actor_cagrad_bin_losses": np.asarray(
+            metrics["actor_cagrad_bin_losses"]
+        ).tolist(),
+        "actor_cagrad_weights": np.asarray(
+            metrics["actor_cagrad_weights"]
+        ).tolist(),
+        "actor_cagrad_gram_matrix": np.asarray(
+            metrics["actor_cagrad_gram_matrix"]
+        ).tolist(),
+        "actor_cagrad_cosine_matrix": np.asarray(
+            metrics["actor_cagrad_cosine_matrix"]
+        ).tolist(),
+        "actor_cagrad_objective": float(metrics["actor_cagrad_objective"]),
+        "actor_cagrad_dual_gap": float(metrics["actor_cagrad_dual_gap"]),
+        "actor_cagrad_uniform_combined_cosine": float(
+            metrics["actor_cagrad_uniform_combined_cosine"]
+        ),
+        "actor_cagrad_combined_norm": float(
+            metrics["actor_cagrad_combined_norm"]
+        ),
+        "actor_cagrad_valid": bool(metrics["actor_cagrad_valid"]),
+    }
+
+
 def _has_adaptive_phase_state(state) -> bool:
     env_state = getattr(state, "env_state", None)
     info = getattr(env_state, "info", {})
@@ -3983,12 +4019,7 @@ def train(
                     save_dir,
                     {
                         "step": int(current_step),
-                        "actor_cagrad_bin_counts": np.asarray(
-                            metrics["actor_cagrad_bin_counts"]
-                        ).tolist(),
-                        "actor_cagrad_bin_losses": np.asarray(
-                            metrics["actor_cagrad_bin_losses"]
-                        ).tolist(),
+                        **build_checkpoint_cagrad_telemetry(metrics),
                         "actor_preview_gradient_norm": float(
                             metrics["actor_preview_gradient_norm"]
                         ),

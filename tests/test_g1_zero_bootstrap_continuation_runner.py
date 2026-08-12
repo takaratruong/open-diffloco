@@ -50,9 +50,9 @@ def test_zero_bootstrap_parser_exposes_no_scientific_overrides():
         "--code-commit",
         "0" * 40,
     ]
-    args = build_parser().parse_args(required)
-    assert args.seed == 0
+    build_parser().parse_args(required)
     for override in (
+        ["--seed", "1"],
         ["--actor-bootstrap-scale", "0.5"],
         ["--num-envs", "512"],
         ["--total-steps", "3000000"],
@@ -88,6 +88,7 @@ def test_training_validation_requires_zero_bootstrap_and_dense_grid(tmp_path):
         "unroll_length": 12,
         "num_envs": 256,
         "effective_num_envs": 512,
+        "seed": 0,
     }
     (run / "hparams.json").write_text(json.dumps(hparams), encoding="utf-8")
     rows = []
@@ -109,6 +110,16 @@ def test_training_validation_requires_zero_bootstrap_and_dense_grid(tmp_path):
                 "actor_preview_update_norm": 0.2,
                 "actor_preview_valid": True,
                 "actor_cagrad_bin_counts": [1, 1, 1, 1, 1],
+                "actor_cagrad_bin_gradient_norms": [1, 1, 1, 1, 1],
+                "actor_cagrad_bin_losses": [1, 2, 3, 4, 5],
+                "actor_cagrad_weights": [0.2, 0.2, 0.2, 0.2, 0.2],
+                "actor_cagrad_gram_matrix": [[1, 0, 0, 0, 0]] * 5,
+                "actor_cagrad_cosine_matrix": [[1, 0, 0, 0, 0]] * 5,
+                "actor_cagrad_objective": 1.0,
+                "actor_cagrad_dual_gap": 0.0,
+                "actor_cagrad_uniform_combined_cosine": 0.5,
+                "actor_cagrad_combined_norm": 1.0,
+                "actor_cagrad_valid": True,
             }
         )
     (run / "checkpoint_phase_metrics.json").write_text(
@@ -122,3 +133,39 @@ def test_training_validation_requires_zero_bootstrap_and_dense_grid(tmp_path):
     )
     with pytest.raises(ValueError, match="zero actor bootstrap"):
         validate_training_artifacts(run)
+
+    rows[-1]["actor_bootstrap_scale_current"] = 0.0
+    rows[-1]["actor_cagrad_valid"] = False
+    (run / "checkpoint_phase_metrics.json").write_text(
+        json.dumps(rows), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="invalid CAGrad telemetry"):
+        validate_training_artifacts(run)
+
+
+def test_checkpoint_telemetry_builder_persists_bootstrap_and_cagrad_contract():
+    import numpy as np
+
+    from src.algorithms.shac.algorithm import build_checkpoint_cagrad_telemetry
+
+    metrics = {
+        "actor_bootstrap_scale_current": 0.0,
+        "actor_cagrad_bin_counts": np.ones(5),
+        "actor_cagrad_bin_gradient_norms": np.ones(5),
+        "actor_cagrad_bin_losses": np.arange(5.0),
+        "actor_cagrad_weights": np.full(5, 0.2),
+        "actor_cagrad_gram_matrix": np.eye(5),
+        "actor_cagrad_cosine_matrix": np.eye(5),
+        "actor_cagrad_objective": 1.0,
+        "actor_cagrad_dual_gap": 0.0,
+        "actor_cagrad_uniform_combined_cosine": 0.5,
+        "actor_cagrad_combined_norm": 1.0,
+        "actor_cagrad_valid": True,
+    }
+
+    row = build_checkpoint_cagrad_telemetry(metrics)
+
+    assert row["actor_bootstrap_scale_current"] == 0.0
+    assert row["actor_cagrad_valid"] is True
+    assert row["actor_cagrad_bin_counts"] == [1.0] * 5
+    assert len(row["actor_cagrad_gram_matrix"]) == 5
