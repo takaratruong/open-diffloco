@@ -10,6 +10,8 @@ from tools.evaluate_g1_terminal_value_calibration import (
     discounted_terminal_returns,
     h12_boundary_records,
     validate_code_provenance,
+    validate_runtime_contract,
+    validate_step_arrays,
 )
 
 
@@ -101,6 +103,43 @@ def test_code_provenance_fails_closed_on_head_or_dirty_mismatch():
     with pytest.raises(ValueError):
         validate_code_provenance(
             expected_commit=commit, actual_commit=commit, dirty=True
+        )
+
+
+def test_runtime_contract_fixes_solver_and_seed():
+    assert validate_runtime_contract(solver_profile="g1-4x5", seed=0) == {
+        "solver_profile": "g1-4x5",
+        "seed": 0,
+    }
+    with pytest.raises(ValueError):
+        validate_runtime_contract(solver_profile="standard", seed=0)
+    with pytest.raises(ValueError):
+        validate_runtime_contract(solver_profile="g1-4x5", seed=1)
+
+
+def test_step_arrays_reject_nonfinite_or_nonzero_wrench():
+    validate_step_arrays(
+        physical_arrays=[np.zeros(3), np.ones(2)],
+        observation=np.zeros(4),
+        action=np.zeros(2),
+        critic_observation=np.zeros(5),
+        wrench=np.zeros((2, 6)),
+    )
+    with pytest.raises(ValueError):
+        validate_step_arrays(
+            physical_arrays=[np.zeros(3)],
+            observation=np.zeros(4),
+            action=np.zeros(2),
+            critic_observation=np.zeros(5),
+            wrench=np.array([[np.nan, 0, 0, 0, 0, 0]]),
+        )
+    with pytest.raises(ValueError):
+        validate_step_arrays(
+            physical_arrays=[np.zeros(3)],
+            observation=np.zeros(4),
+            action=np.zeros(2),
+            critic_observation=np.zeros(5),
+            wrench=np.array([[0, 0, 0, 0, 0, 1e-30]]),
         )
     assert (
         classify_calibration(

@@ -165,6 +165,41 @@ def validate_code_provenance(
     return {"code_commit": actual_commit, "dirty": False}
 
 
+def validate_runtime_contract(
+    *, solver_profile: str, seed: int
+) -> dict[str, object]:
+    """Fail closed on the registered deterministic evaluation settings."""
+    if solver_profile != "g1-4x5" or seed != 0:
+        raise ValueError("diagnostic requires solver g1-4x5 and seed zero")
+    return {"solver_profile": solver_profile, "seed": seed}
+
+
+def validate_step_arrays(
+    *,
+    physical_arrays,
+    observation,
+    action,
+    critic_observation,
+    wrench,
+) -> None:
+    """Require finite rollout state/action/observations and exact-zero wrench."""
+    named_arrays = {
+        "observation": observation,
+        "action": action,
+        "critic_observation": critic_observation,
+        "wrench": wrench,
+    }
+    for index, value in enumerate(physical_arrays):
+        named_arrays[f"physical_state[{index}]"] = value
+    for name, value in named_arrays.items():
+        array = np.asarray(value)
+        if not np.all(np.isfinite(array)):
+            raise ValueError(f"{name} contains a nonfinite value")
+    wrench_array = np.asarray(wrench)
+    if not np.array_equal(wrench_array, np.zeros_like(wrench_array)):
+        raise ValueError("terminal-value diagnostic requires exact-zero wrench")
+
+
 def runtime_asset_provenance(env) -> dict[str, str]:
     """Hash the actual XML and controller consumed by the environment."""
     model_path = Path(env.xml_path).resolve()
@@ -189,9 +224,8 @@ def _critic_value(
     target_critic_params,
     critic_normalizer: Normalizer,
     critic_normalizer_state,
-    state,
+    critic_obs,
 ) -> float:
-    critic_obs = env._get_critic_obs(state.data, state.info)
     normalized = critic_normalizer.normalize(
         critic_normalizer_state, critic_obs
     ).astype(jnp.float32)
@@ -218,7 +252,17 @@ def evaluate_phase(
     rewards: list[float] = []
     terminal = False
     max_wrench = 0.0
+    wrench_maxima: list[float] = []
     for _ in range(int(env.reference_transitions) - phase):
+        action = action_fn(state)
+        critic_obs = env._get_critic_obs(state.data, state.info)
+        validate_step_arrays(
+            physical_arrays=jax.tree_util.tree_leaves(state.data),
+            observation=state.obs,
+            action=action,
+            critic_observation=critic_obs,
+            wrench=state.data.xfrc_applied,
+        )
         values.append(
             _critic_value(
                 env,
@@ -226,26 +270,28 @@ def evaluate_phase(
                 target_critic_params,
                 critic_normalizer,
                 critic_normalizer_state,
-                state,
+                critic_obs,
             )
         )
-        max_wrench = max(
-            max_wrench,
-            float(jnp.max(jnp.abs(state.data.xfrc_applied))),
+        wrench_maxima.append(
+            float(jnp.max(jnp.abs(state.data.xfrc_applied)))
         )
-        state = env.step(state, action_fn(state))
-        max_wrench = max(
-            max_wrench,
-            float(jnp.max(jnp.abs(state.data.xfrc_applied))),
-        )
+        state = env.step(state, action)
         rewards.append(float(state.reward))
         terminal = bool(float(state.info["terminal"]) > 0.5)
         if float(state.done) > 0.5:
             break
     if not terminal:
         raise ValueError(f"phase {phase} did not reach a natural terminal")
-    if max_wrench != 0.0:
-        raise ValueError("terminal-value diagnostic requires exact-zero wrench")
+    final_critic_obs = env._get_critic_obs(state.data, state.info)
+    validate_step_arrays(
+        physical_arrays=jax.tree_util.tree_leaves(state.data),
+        observation=state.obs,
+        action=np.zeros(env.action_dim, dtype=np.float64),
+        critic_observation=final_critic_obs,
+        wrench=state.data.xfrc_applied,
+    )
+    max_wrench = max(wrench_maxima, default=0.0)
     realized_returns = discounted_terminal_returns(rewards, gamma=GAMMA)
     metrics = calibration_metrics(values, realized_returns)
     return {
@@ -253,6 +299,7 @@ def evaluate_phase(
         "steps": len(rewards),
         "terminal": True,
         "max_abs_xfrc_applied": max_wrench,
+        "max_abs_xfrc_applied_by_step": wrench_maxima,
         "values": [float(value) for value in values],
         "rewards": rewards,
         "realized_returns": [float(value) for value in realized_returns],
@@ -303,6 +350,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     configure_jax()
+    runtime_contract = validate_runtime_contract(
+        solver_profile=args.solver_profile, seed=args.seed
+    )
     checkpoint_path = args.checkpoint.resolve()
     reference_path = args.reference_path.resolve()
     for path in (checkpoint_path, reference_path):
@@ -382,14 +432,13 @@ def main() -> None:
     provenance = {
         **code_provenance,
         **runtime_asset_provenance(env),
+        **runtime_contract,
         "checkpoint_path": str(checkpoint_path),
         "checkpoint_sha256": checkpoint_sha256,
         "reference_path": str(reference_path),
         "reference_sha256": reference_sha256,
-        "solver_profile": args.solver_profile,
         "solver_iterations": profile.iterations,
         "solver_ls_iterations": profile.ls_iterations,
-        "seed": args.seed,
         "phases": list(DEFAULT_PHASES),
         "actor_reference_preview_mode": "delta",
         "actor_residual_preview_hidden": 256,

@@ -42,7 +42,12 @@ requires exact hashes for code, checkpoint, reference, model, and controller;
 JAX x64; one enumerated GPU; the delta-preview 256-wide residual actor; ten-frame
 history; lookahead `(4,8,12)`; gamma `0.99`; and exact-zero external wrench.
 Every rollout must terminate naturally, remain finite, and reproduce the
-registered survival vector for the same process artifact.
+survival vector inside the same manifest as its value/return trace. Exact
+equality to an archived process's survival count is deliberately not an
+identity gate: prior same-checkpoint MJX evaluations established small
+process-level contact divergence. Code, checkpoint, assets, solver, and seed
+remain strict identity gates; calibration is computed only between predictions
+and returns from the same realized trajectory.
 
 ## Outcomes
 
