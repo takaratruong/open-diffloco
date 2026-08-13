@@ -33,6 +33,8 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
         self.assertEqual(kwargs["com_offset_range"], (0.0, 0.0, 0.0))
         self.assertEqual(kwargs["push_velocity_range"], (0.0, 0.0))
         self.assertEqual(kwargs["push_interval_s"], 2.0)
+        self.assertFalse(kwargs["actor_observation_noise"])
+        self.assertEqual(kwargs["reference_reset_noise_scale"], 0.0)
         self.assertEqual(kwargs["action_noise_std_start"], 1.0)
         np.testing.assert_array_equal(
             kwargs["action_noise_std_end"], RMR_ACTION_STD
@@ -191,7 +193,8 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
             result["environment_variant"],
             "g1_tracking_rmr_50hz_action_parity",
         )
-        self.assertEqual(result["joint_velocity_observation_noise"], 0.5)
+        self.assertEqual(result["joint_velocity_observation_noise"], 0.0)
+        self.assertTrue(result["exact_reference_resets"])
         self.assertEqual(result["randomization_com_body_name"], "torso_link")
         self.assertFalse(result["randomization_uses_curriculum"])
         self.assertFalse(result["domain_randomization"])
@@ -294,7 +297,8 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
                 "total_steps": 6_144,
                 "env_variant": "g1_tracking_rmr_50hz_action_parity",
                 "squash_actor_actions": False,
-                "actor_observation_noise": True,
+                "actor_observation_noise": False,
+                "reference_reset_noise_scale": 0.0,
                 "reference_residual_control": True,
                 "reference_residual_scale": 1.0,
                 "kp_range": [35.0, 35.0],
