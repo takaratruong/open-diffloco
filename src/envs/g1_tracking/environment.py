@@ -1807,6 +1807,16 @@ class G1TrackingRMR50HzDecoupledExplorationEnv(
         self.clip_sampled_actor_actions = False
 
 
+class G1TrackingRMR50HzUpstreamBoundaryEnv(
+    G1TrackingRMR50HzDecoupledExplorationEnv
+):
+    """Use Open-DiffLoco's bounded mean and clipped sampled actions."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.clip_sampled_actor_actions = True
+
+
 class G1TrackingRMR50HzValidatedEnv(
     G1TrackingRMR50HzSourceStepEnv
 ):

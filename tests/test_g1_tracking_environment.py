@@ -1359,6 +1359,27 @@ class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
         self.assertFalse(env.clip_sampled_actor_actions)
         self.assertFalse(env.squash_actor_actions)
 
+    def test_upstream_boundary_bounds_mean_and_sample(self):
+        from src.envs.g1_tracking.environment import (
+            G1TrackingRMR50HzUpstreamBoundaryEnv,
+        )
+        from src.envs.go2.environment import get_go2_env_class
+
+        env = G1TrackingRMR50HzUpstreamBoundaryEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+        )
+
+        self.assertIs(
+            get_go2_env_class("g1_tracking_rmr_50hz_upstream_boundary"),
+            G1TrackingRMR50HzUpstreamBoundaryEnv,
+        )
+        self.assertTrue(env.squash_actor_mean)
+        self.assertTrue(env.clip_sampled_actor_actions)
+        self.assertFalse(env.squash_actor_actions)
+
     def test_parity_randomization_targets_torso_com_not_pelvis(self):
         from src.envs.g1_tracking.environment import (
             G1TrackingRMR50HzActionParityEnv,

@@ -145,8 +145,8 @@ def build_decoupled_early_learning_kwargs(
         curriculum_steps=1,
         actor_lr=5e-3,
         action_noise_std_start=np.asarray(RMR_ACTION_STD).tolist(),
-        clip_sampled_actor_actions=True,
         reference_residual_scale=0.5,
+        env_variant="g1_tracking_rmr_50hz_upstream_boundary",
     )
     return kwargs
 
@@ -403,7 +403,7 @@ def render_decoupled_early_learning_rollouts(
 def _require_early_learning_hparams(hparams: dict[str, object]) -> None:
     expected = {
         "total_steps": 98_304,
-        "env_variant": "g1_tracking_rmr_50hz_decoupled_exploration",
+        "env_variant": "g1_tracking_rmr_50hz_upstream_boundary",
         "squash_actor_actions": False,
         "squash_actor_mean": True,
         "clip_sampled_actor_actions": True,

@@ -14,7 +14,7 @@ def _write_early_learning_fixture(run: Path) -> None:
 
     hparams = {
         "total_steps": 98_304,
-        "env_variant": "g1_tracking_rmr_50hz_decoupled_exploration",
+        "env_variant": "g1_tracking_rmr_50hz_upstream_boundary",
         "squash_actor_actions": False,
         "squash_actor_mean": True,
         "clip_sampled_actor_actions": True,
@@ -357,7 +357,7 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
                 "curriculum_grace",
                 "curriculum_steps",
                 "action_noise_std_start",
-                "clip_sampled_actor_actions",
+                "env_variant",
                 "reference_residual_scale",
             },
         )
@@ -372,7 +372,9 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
         np.testing.assert_array_equal(
             early["action_noise_std_end"], RMR_ACTION_STD
         )
-        self.assertTrue(early["clip_sampled_actor_actions"])
+        self.assertEqual(
+            early["env_variant"], "g1_tracking_rmr_50hz_upstream_boundary"
+        )
         self.assertEqual(early["reference_residual_scale"], 0.5)
 
     def test_decoupled_kwargs_bound_mean_without_clipping_noise(self):
