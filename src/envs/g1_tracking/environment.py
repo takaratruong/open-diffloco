@@ -544,9 +544,7 @@ class G1TrackingEnv:
         self.reference_stride = reference_stride
         self.reward_scale = reward_scale
         self.clip_actions = clip_actions
-        self.squash_actor_actions = (
-            clip_actions or self.reference_residual_control
-        )
+        self.squash_actor_actions = clip_actions
         self.dt = float(self.mj_model.opt.timestep * self.n_frames)
         self.control_reference_dt = self.dt
         if self.reference.fps is not None:

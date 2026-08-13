@@ -273,6 +273,41 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
 
         np.testing.assert_allclose(target, expected, rtol=0.0, atol=1e-12)
 
+    def test_reference_residual_can_use_unbounded_full_rmr_action_scale(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        env = G1TrackingEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+            actor_joint_order="source",
+            clip_actions=False,
+            reference_residual_control=True,
+            reference_residual_scale=1.0,
+        )
+        state = env.reset_at_phase(
+            jax.random.PRNGKey(32),
+            jnp.array(0.0),
+            jnp.array(17),
+        )
+        raw_action = jnp.linspace(-2.0, 2.0, env.action_dim)
+        model_action = raw_action[env.actor_to_model_permutation]
+
+        np.testing.assert_allclose(
+            env._prepare_action(raw_action),
+            model_action,
+            rtol=0.0,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            env.position_target(state, raw_action),
+            env.qpos_reference[17, 7:] + model_action * env.action_scales,
+            rtol=0.0,
+            atol=1e-12,
+        )
+        self.assertFalse(env.squash_actor_actions)
+
     def test_reference_residual_options_are_validated(self):
         from src.envs.g1_tracking.environment import G1TrackingEnv
 
