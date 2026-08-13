@@ -27,10 +27,10 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
         self.assertEqual(kwargs["action_scale"], 1.0)
         self.assertEqual(kwargs["kp_range"], (35.0, 35.0))
         self.assertEqual(kwargs["kd_range"], (0.5, 0.5))
-        self.assertTrue(kwargs["domain_randomization"])
+        self.assertFalse(kwargs["domain_randomization"])
         self.assertEqual(kwargs["friction_range"], (1.0, 1.0))
         self.assertEqual(kwargs["mass_range"], (1.0, 1.0))
-        self.assertEqual(kwargs["com_offset_range"], (0.025, 0.05, 0.05))
+        self.assertEqual(kwargs["com_offset_range"], (0.0, 0.0, 0.0))
         self.assertEqual(kwargs["push_velocity_range"], (0.0, 0.0))
         self.assertEqual(kwargs["push_interval_s"], 2.0)
         self.assertEqual(kwargs["action_noise_std_start"], 1.0)
@@ -194,12 +194,16 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
         self.assertEqual(result["joint_velocity_observation_noise"], 0.5)
         self.assertEqual(result["randomization_com_body_name"], "torso_link")
         self.assertFalse(result["randomization_uses_curriculum"])
+        self.assertFalse(result["domain_randomization"])
+        self.assertEqual(result["com_offset_range"], [0.0, 0.0, 0.0])
+        self.assertEqual(result["push_velocity_range"], [0.0, 0.0])
         self.assertEqual(
             result["remaining_rmr_randomization_gaps"],
             [
                 "friction-and-restitution-material-buckets",
                 "joint-default-position-offsets",
                 "pushes-disabled",
+                "torso-com-randomization-disabled",
             ],
         )
         self.assertEqual(result["kp_range"], [35.0, 35.0])
@@ -297,7 +301,8 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
                 "kd_range": [0.5, 0.5],
                 "friction_range": [1.0, 1.0],
                 "mass_range": [1.0, 1.0],
-                "com_offset_range": [0.025, 0.05, 0.05],
+                "com_offset_range": [0.0, 0.0, 0.0],
+                "domain_randomization": False,
                 "randomization_com_body_name": "torso_link",
                 "randomization_uses_curriculum": False,
                 "push_velocity_range": [0.0, 0.0],
