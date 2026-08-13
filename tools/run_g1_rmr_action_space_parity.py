@@ -67,7 +67,7 @@ def build_rmr_action_space_parity_kwargs(
         actor_cagrad_iterations=32,
         actor_phase_bin_count=5,
         actor_reference_lookahead_steps=(4, 8, 12),
-        checkpoint_interval=196_608,
+        checkpoint_interval=98_304,
     )
     return kwargs
 

@@ -41,7 +41,7 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
         )
         self.assertEqual(kwargs["action_noise_schedule_steps"], 800_000)
         self.assertEqual(kwargs["total_steps"], 786_432)
-        self.assertEqual(kwargs["checkpoint_interval"], 196_608)
+        self.assertEqual(kwargs["checkpoint_interval"], 98_304)
         self.assertNotIn("resume_from", kwargs)
 
     def test_fresh_parity_kwargs_keep_proven_shac_recipe(self):
