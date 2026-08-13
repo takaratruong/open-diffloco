@@ -411,6 +411,14 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         self.assertEqual(env.reference_stride, 2)
         self.assertFalse(env.squash_actor_actions)
 
+    def test_upstream_boundary_variant_is_available_for_evaluation(self):
+        env = make_evaluation_env("g1_tracking_rmr_50hz_upstream_boundary")
+
+        self.assertAlmostEqual(env.dt, 0.02)
+        self.assertTrue(env.squash_actor_mean)
+        self.assertTrue(env.clip_sampled_actor_actions)
+        self.assertFalse(env.squash_actor_actions)
+
     def test_source_policy_reset_action_agrees_with_logged_rollout(self):
         env = make_evaluation_env("g1_tracking_rmr_50hz_unbounded")
         state = env.reset_at_phase(

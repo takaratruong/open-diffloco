@@ -39,6 +39,7 @@ EVALUATION_ENV_VARIANTS = (
     "g1_tracking_rmr_50hz_source_step_robust",
     "g1_tracking_rmr_50hz_action_parity",
     "g1_tracking_rmr_50hz_decoupled_exploration",
+    "g1_tracking_rmr_50hz_upstream_boundary",
     "g1_tracking_rmr_50hz_validated",
 )
 
