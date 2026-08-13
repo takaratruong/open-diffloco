@@ -1,9 +1,9 @@
-import unittest
-from unittest import mock
-from pathlib import Path
 import pickle
-from types import SimpleNamespace
 import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import jax
 import jax.numpy as jnp
@@ -31,6 +31,39 @@ RMR_ACTIONS = Path(
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    def test_action_noise_only_visualization_disables_obs_noise_and_random_reset(self):
+        from tools.evaluate_g1_tracking import resolve_training_visualization_controls
+
+        args = build_parser().parse_args(
+            [
+                "--output-dir",
+                "/tmp/g1-evaluation",
+                "--training-distribution-rollout",
+                "--disable-training-observation-noise",
+                "--exact-training-reset-phase",
+                "217",
+            ]
+        )
+
+        controls = resolve_training_visualization_controls(args)
+        self.assertFalse(controls.actor_observation_noise)
+        self.assertEqual(controls.exact_reset_phase, 217)
+        self.assertFalse(controls.continue_after_terminal)
+        self.assertTrue(controls.force_zero_reset_noise)
+
+    def test_training_visualization_overrides_require_training_rollout(self):
+        from tools.evaluate_g1_tracking import resolve_training_visualization_controls
+
+        args = build_parser().parse_args(
+            [
+                "--output-dir",
+                "/tmp/g1-evaluation",
+                "--disable-training-observation-noise",
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "training-distribution-rollout"):
+            resolve_training_visualization_controls(args)
+
     def test_training_noise_schedule_is_checkpoint_exact(self):
         from tools.evaluate_g1_tracking import training_action_noise_at_step
 

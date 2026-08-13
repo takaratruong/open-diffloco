@@ -1,10 +1,10 @@
 """Paired replay-free evaluation and side-by-side G1/reference video."""
 
 import argparse
-from contextlib import nullcontext
 import json
 import math
 import pickle
+from contextlib import nullcontext
 from pathlib import Path
 
 import imageio.v2 as imageio
@@ -13,16 +13,15 @@ import jax.numpy as jnp
 import mujoco
 import numpy as np
 
-from src.core.data_structures import Normalizer
-from src.core.networks import Actor
-from src.core.rmr_policy import bound_residual_action
-from src.core.rmr_policy import apply_trainable_rmr_policy
 from src.algorithms.shac.residual_preview_adapter import (
     FrozenPreviewResidualParams,
     PreviewResidualAdapter,
     apply_frozen_preview_residual,
     split_residual_adapter_params,
 )
+from src.core.data_structures import Normalizer
+from src.core.networks import Actor
+from src.core.rmr_policy import apply_trainable_rmr_policy, bound_residual_action
 from src.envs.g1_tracking.environment import G1TrackingEnv
 from src.envs.g1_tracking.solver_profiles import (
     SOLVER_PROFILES,
@@ -31,7 +30,6 @@ from src.envs.g1_tracking.solver_profiles import (
 )
 from src.envs.go2.environment import get_go2_env_class
 from tools.prepare_g1_rmr_reference import sha256_file
-
 
 EVALUATION_ENV_VARIANTS = (
     "g1_tracking",
@@ -76,6 +74,33 @@ def resolve_rollout_step_limit(
     if training_distribution_rollout:
         return 120 if requested is None else requested
     return remaining if requested is None else min(requested, remaining)
+
+
+def resolve_training_visualization_controls(
+    args: argparse.Namespace,
+) -> argparse.Namespace:
+    """Resolve optional action-noise-only visualization overrides."""
+    overrides_requested = (
+        args.disable_training_observation_noise
+        or args.exact_training_reset_phase is not None
+    )
+    if overrides_requested and not args.training_distribution_rollout:
+        raise ValueError(
+            "training visualization overrides require "
+            "--training-distribution-rollout"
+        )
+    return argparse.Namespace(
+        actor_observation_noise=(
+            args.training_distribution_rollout
+            and not args.disable_training_observation_noise
+        ),
+        exact_reset_phase=args.exact_training_reset_phase,
+        continue_after_terminal=(
+            args.training_distribution_rollout
+            and args.exact_training_reset_phase is None
+        ),
+        force_zero_reset_noise=args.exact_training_reset_phase is not None,
+    )
 
 
 def build_compiled_step(env):
@@ -415,6 +440,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--disable-training-observation-noise",
+        action="store_true",
+        help="retain training action noise but evaluate the actor observation cleanly",
+    )
+    parser.add_argument(
+        "--exact-training-reset-phase",
+        type=int,
+        help="retain training action noise but reset exactly at this reference phase",
+    )
+    parser.add_argument(
         "--training-initialization",
         action="store_true",
         help="recreate train()'s actor PRNG split for a no-checkpoint baseline",
@@ -431,6 +466,10 @@ def main() -> None:
     configure_jax()
     parser = build_parser()
     args = parser.parse_args()
+    try:
+        visualization_controls = resolve_training_visualization_controls(args)
+    except ValueError as error:
+        parser.error(str(error))
     if not 0.0 <= args.action_gain <= 1.0:
         parser.error("--action-gain must be between 0 and 1")
     if args.max_steps is not None and args.max_steps < 1:
@@ -515,7 +554,7 @@ def main() -> None:
             args.actor_reference_lookahead_steps
         ),
         actor_reference_preview_mode=args.actor_reference_preview_mode,
-        actor_observation_noise=args.training_distribution_rollout,
+        actor_observation_noise=visualization_controls.actor_observation_noise,
         domain_randomization=(
             bool(training_hparams["domain_randomization"])
             if training_hparams is not None
@@ -542,7 +581,9 @@ def main() -> None:
             else (0.0, 0.0, 0.0)
         ),
         reference_reset_noise_scale=(
-            float(training_hparams["reference_reset_noise_scale"])
+            0.0
+            if visualization_controls.force_zero_reset_noise
+            else float(training_hparams["reference_reset_noise_scale"])
             if training_hparams is not None
             else 0.0
         ),
@@ -620,16 +661,24 @@ def main() -> None:
     reset_key, action_noise_key = jax.random.split(
         jax.random.PRNGKey(args.seed)
     )
-    if args.training_distribution_rollout:
+    if (
+        args.training_distribution_rollout
+        and visualization_controls.exact_reset_phase is None
+    ):
         state = env.reset(
             reset_key,
             jnp.asarray(training_difficulty, dtype=jnp.float64),
         )
     else:
+        reset_phase = (
+            args.phase
+            if visualization_controls.exact_reset_phase is None
+            else visualization_controls.exact_reset_phase
+        )
         state = env.reset_at_phase(
             reset_key,
             jnp.array(0.0),
-            jnp.array(args.phase),
+            jnp.array(reset_phase),
         )
     start_phase = int(state.info["phase"])
     compiled_step = build_compiled_step(env)
@@ -674,7 +723,7 @@ def main() -> None:
                 )
             )
         policy_obs = state.obs
-        if args.training_distribution_rollout:
+        if visualization_controls.actor_observation_noise:
             obs_rng, env_rng = jax.random.split(state.info["rng"])
             state = state.replace(info={**state.info, "rng": env_rng})
             policy_obs = env._apply_obs_noise(state.obs, obs_rng)
@@ -754,7 +803,10 @@ def main() -> None:
                 float(state.metrics["termination_distal_z_error"]),
             )
         )
-        if float(state.done) > 0.5 and not args.training_distribution_rollout:
+        if (
+            float(state.done) > 0.5
+            and not visualization_controls.continue_after_terminal
+        ):
             break
 
     columns = (
@@ -855,6 +907,8 @@ def main() -> None:
         "remaining_reference_transitions": remaining,
         "requested_step_limit": args.max_steps,
         "training_distribution_rollout": args.training_distribution_rollout,
+        "training_observation_noise": visualization_controls.actor_observation_noise,
+        "training_exact_reset_phase": visualization_controls.exact_reset_phase,
         "training_checkpoint_step": checkpoint_step,
         "training_difficulty": training_difficulty,
         "training_action_noise_std": (
