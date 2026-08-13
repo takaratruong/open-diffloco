@@ -78,6 +78,11 @@ def resolve_rollout_step_limit(
     return remaining if requested is None else min(requested, remaining)
 
 
+def build_compiled_step(env):
+    """Compile the repeated MJX environment step once for evaluation."""
+    return jax.jit(env.step)
+
+
 def configure_jax() -> None:
     """Match the float64 precision used by G1 training."""
     jax.config.update("jax_enable_x64", True)
@@ -627,6 +632,7 @@ def main() -> None:
             jnp.array(args.phase),
         )
     start_phase = int(state.info["phase"])
+    compiled_step = build_compiled_step(env)
 
     actual_renderer = mujoco.Renderer(env.mj_model, height=480, width=640)
     reference_renderer = mujoco.Renderer(env.mj_model, height=480, width=640)
@@ -723,7 +729,7 @@ def main() -> None:
             nullcontext() if profile is None else solver_context(profile)
         )
         with step_scope:
-            state = env.step(state, action)
+            state = compiled_step(state, action)
         next_phase = min(
             phase + env.reference_stride,
             env.reference_length - 1,
