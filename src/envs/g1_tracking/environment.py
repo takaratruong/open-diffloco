@@ -605,7 +605,7 @@ class G1TrackingEnv:
                 jp.full(6, 0.05),
                 jp.full(3, 0.2),
                 jp.full(29, 0.01),
-                jp.full(29, 0.01),
+                jp.full(29, 0.5),
                 jp.zeros(29),
                 jp.zeros(self.actor_future_reference_dim),
             )

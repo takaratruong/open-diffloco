@@ -64,7 +64,7 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         np.testing.assert_array_equal(mask[58:64], 0.05)
         np.testing.assert_array_equal(mask[64:67], 0.2)
         np.testing.assert_array_equal(mask[67:96], 0.01)
-        np.testing.assert_array_equal(mask[96:125], 0.01)
+        np.testing.assert_array_equal(mask[96:125], 0.5)
         np.testing.assert_array_equal(mask[125:154], 0.0)
 
     def test_canonical_actor_noise_is_bounded_and_tiled_over_history(self):

@@ -301,6 +301,18 @@ def build_checkpoint_cagrad_telemetry(metrics) -> dict[str, object]:
     }
 
 
+def should_persist_checkpoint_metrics(
+    checkpoint_path: Path | None,
+    *,
+    actor_cagrad: bool,
+    frozen_preview_treatment: bool,
+) -> bool:
+    """Persist validity evidence for every checkpointed CAGrad treatment."""
+    return checkpoint_path is not None and (
+        actor_cagrad or frozen_preview_treatment
+    )
+
+
 def _has_adaptive_phase_state(state) -> bool:
     env_state = getattr(state, "env_state", None)
     info = getattr(env_state, "info", {})
@@ -4053,16 +4065,21 @@ def train(
                 hparams=hparams,
             )
         )
-        if checkpoint_path is not None:
+        if should_persist_checkpoint_metrics(
+            checkpoint_path,
+            actor_cagrad=actor_cagrad,
+            frozen_preview_treatment=frozen_preview_treatment,
+        ):
+            checkpoint_metrics = {
+                "step": int(current_step),
+                "action_noise_current": action_noise_std_hparam(
+                    np.asarray(metrics["action_noise_current"])
+                ),
+                **build_checkpoint_cagrad_telemetry(metrics),
+            }
             if frozen_preview_treatment:
-                persist_checkpoint_phase_metric(
-                    save_dir,
+                checkpoint_metrics.update(
                     {
-                        "step": int(current_step),
-                        "action_noise_current": action_noise_std_hparam(
-                            np.asarray(metrics["action_noise_current"])
-                        ),
-                        **build_checkpoint_cagrad_telemetry(metrics),
                         "actor_preview_gradient_norm": float(
                             metrics["actor_preview_gradient_norm"]
                         ),
@@ -4167,8 +4184,10 @@ def train(
                             if residual_muon_treatment
                             else {}
                         ),
-                    },
+                    }
                 )
+            persist_checkpoint_phase_metric(save_dir, checkpoint_metrics)
+        if checkpoint_path is not None:
             print(f"  >> Checkpoint saved at step {current_step}")
 
     # Save final state and logs

@@ -1,5 +1,6 @@
 import inspect
 import json
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -107,6 +108,33 @@ def test_checkpoint_phase_metrics_are_atomic_and_step_addressed(tmp_path):
     )
     assert [row["step"] for row in rows] == [1_376_256, 1_572_864]
     assert rows[0]["actor_cagrad_bin_losses"] == [0, 0, 0, 0, 0]
+
+
+def test_plain_cagrad_checkpoints_persist_validity_telemetry():
+    from src.algorithms.shac.algorithm import should_persist_checkpoint_metrics
+
+    checkpoint = Path("checkpoint_step_6144.pkl")
+
+    assert should_persist_checkpoint_metrics(
+        checkpoint,
+        actor_cagrad=True,
+        frozen_preview_treatment=False,
+    )
+    assert should_persist_checkpoint_metrics(
+        checkpoint,
+        actor_cagrad=False,
+        frozen_preview_treatment=True,
+    )
+    assert not should_persist_checkpoint_metrics(
+        None,
+        actor_cagrad=True,
+        frozen_preview_treatment=True,
+    )
+    assert not should_persist_checkpoint_metrics(
+        checkpoint,
+        actor_cagrad=False,
+        frozen_preview_treatment=False,
+    )
 
 
 def test_train_wires_preview_adapter_without_changing_disabled_path():
