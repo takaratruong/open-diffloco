@@ -1380,6 +1380,26 @@ class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
         self.assertTrue(env.clip_sampled_actor_actions)
         self.assertFalse(env.squash_actor_actions)
 
+    def test_upstream_action_penalty_variant_matches_quadruped_weight(self):
+        from src.envs.g1_tracking.environment import (
+            G1TrackingRMR50HzUpstreamActionPenaltyEnv,
+        )
+        from src.envs.go2.environment import get_go2_env_class
+
+        env = G1TrackingRMR50HzUpstreamActionPenaltyEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+        )
+
+        self.assertIs(
+            get_go2_env_class("g1_tracking_rmr_50hz_upstream_action_penalty"),
+            G1TrackingRMR50HzUpstreamActionPenaltyEnv,
+        )
+        self.assertEqual(env.action_magnitude_weight, 0.05)
+        self.assertTrue(env.clip_sampled_actor_actions)
+
     def test_parity_randomization_targets_torso_com_not_pelvis(self):
         from src.envs.g1_tracking.environment import (
             G1TrackingRMR50HzActionParityEnv,

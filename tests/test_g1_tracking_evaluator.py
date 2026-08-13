@@ -419,6 +419,13 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         self.assertTrue(env.clip_sampled_actor_actions)
         self.assertFalse(env.squash_actor_actions)
 
+    def test_upstream_action_penalty_variant_is_available_for_evaluation(self):
+        env = make_evaluation_env(
+            "g1_tracking_rmr_50hz_upstream_action_penalty"
+        )
+
+        self.assertEqual(env.action_magnitude_weight, 0.05)
+
     def test_source_policy_reset_action_agrees_with_logged_rollout(self):
         env = make_evaluation_env("g1_tracking_rmr_50hz_unbounded")
         state = env.reset_at_phase(

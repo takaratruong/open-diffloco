@@ -653,6 +653,30 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "decoupled"):
             validate_mode_args(missing_decoupling)
 
+    def test_upstream_action_penalty_is_an_early_learning_treatment(self):
+        from tools.run_g1_rmr_action_space_parity import (
+            build_parser,
+            selected_env_variant,
+            validate_mode_args,
+        )
+
+        args = build_parser().parse_args(
+            [
+                "--solver-profile",
+                "g1-4x5",
+                "--code-commit",
+                "0" * 40,
+                "--early-learning-gate",
+                "--decoupled-exploration",
+                "--upstream-action-penalty",
+            ]
+        )
+        validate_mode_args(args)
+        self.assertEqual(
+            selected_env_variant(args),
+            "g1_tracking_rmr_50hz_upstream_action_penalty",
+        )
+
     def test_parser_rejects_both_gate_modes(self):
         from tools.run_g1_rmr_action_space_parity import build_parser
 

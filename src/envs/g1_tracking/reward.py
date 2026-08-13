@@ -59,9 +59,13 @@ def rmr_regularization_reward(
     joint_pos: jax.Array,
     soft_joint_lower: jax.Array,
     soft_joint_upper: jax.Array,
+    action_magnitude_weight: float = 0.0,
 ) -> tuple[jax.Array, Mapping[str, jax.Array]]:
     """Computes RMR's differentiable action-rate and joint-limit terms."""
     action_rate = -0.1 * jp.sum(jp.square(action - previous_action), axis=-1)
+    action_magnitude = -action_magnitude_weight * jp.sum(
+        jp.square(action), axis=-1
+    )
     below_limit = jp.maximum(soft_joint_lower - joint_pos, 0.0)
     above_limit = jp.maximum(joint_pos - soft_joint_upper, 0.0)
     # Upstream PhysX trajectories do not exhibit MJX's rare finite solver
@@ -74,9 +78,12 @@ def rmr_regularization_reward(
     joint_limit = -10.0 * total_violation
     components = {
         "action_rate": action_rate,
+        "action_magnitude": action_magnitude,
         "joint_limit": joint_limit,
     }
-    return action_rate + joint_limit, components
+    if action_magnitude_weight == 0.0:
+        return action_rate + joint_limit, components
+    return action_rate + action_magnitude + joint_limit, components
 
 
 def rmr_tracking_reward(

@@ -174,6 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--gate-only", action="store_true")
     gate.add_argument("--early-learning-gate", action="store_true")
     parser.add_argument("--decoupled-exploration", action="store_true")
+    parser.add_argument("--upstream-action-penalty", action="store_true")
     return parser
 
 
@@ -187,6 +188,24 @@ def validate_mode_args(args: argparse.Namespace) -> None:
         )
     if getattr(args, "early_learning_gate", False) and args.seed != 0:
         raise ValueError("--early-learning-gate requires seed zero")
+    if getattr(args, "upstream_action_penalty", False) and not (
+        getattr(args, "early_learning_gate", False)
+        and getattr(args, "decoupled_exploration", False)
+    ):
+        raise ValueError(
+            "--upstream-action-penalty requires the decoupled early-learning gate"
+        )
+
+
+def selected_env_variant(args: argparse.Namespace) -> str:
+    """Resolve the preregistered environment treatment before preflight."""
+    if getattr(args, "upstream_action_penalty", False):
+        return "g1_tracking_rmr_50hz_upstream_action_penalty"
+    if getattr(args, "early_learning_gate", False):
+        return "g1_tracking_rmr_50hz_upstream_boundary"
+    if getattr(args, "decoupled_exploration", False):
+        return "g1_tracking_rmr_50hz_decoupled_exploration"
+    return "g1_tracking_rmr_50hz_action_parity"
 
 
 def validate_preflight(
@@ -249,6 +268,12 @@ def validate_gate_artifacts(
     hparams = json.loads(
         (run_directory / "hparams.json").read_text(encoding="utf-8")
     )
+    allowed_variants = {
+        "g1_tracking_rmr_50hz_upstream_boundary",
+        "g1_tracking_rmr_50hz_upstream_action_penalty",
+    }
+    if hparams.get("env_variant") not in allowed_variants:
+        raise ValueError("early-learning environment is not an approved treatment")
     expected = {
         "total_steps": 6_144,
         "env_variant": env_variant,
@@ -403,7 +428,6 @@ def render_decoupled_early_learning_rollouts(
 def _require_early_learning_hparams(hparams: dict[str, object]) -> None:
     expected = {
         "total_steps": 98_304,
-        "env_variant": "g1_tracking_rmr_50hz_upstream_boundary",
         "squash_actor_actions": False,
         "squash_actor_mean": True,
         "clip_sampled_actor_actions": True,
@@ -662,15 +686,12 @@ def execute(args: argparse.Namespace) -> Path:
     repository = Path(__file__).resolve().parents[1]
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
+    env_variant = selected_env_variant(args)
     preflight = validate_preflight(
         repository=repository,
         reference_path=args.reference_path,
         code_commit=args.code_commit,
-        env_variant=(
-            "g1_tracking_rmr_50hz_decoupled_exploration"
-            if getattr(args, "decoupled_exploration", False)
-            else "g1_tracking_rmr_50hz_action_parity"
-        ),
+        env_variant=env_variant,
     )
     _write_json_atomically(
         output_root / "action_space_parity_preflight.json", preflight
@@ -694,6 +715,7 @@ def execute(args: argparse.Namespace) -> Path:
         args.reference_path.resolve(),
         args.seed,
     )
+    kwargs["env_variant"] = env_variant
     profile = get_solver_profile(args.solver_profile)
     previous_directory = Path.cwd()
     try:

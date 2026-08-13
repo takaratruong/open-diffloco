@@ -153,7 +153,7 @@ class RMRTrackingRewardTest(unittest.TestCase):
 
         self.assertAlmostEqual(float(components["action_rate"]), -0.2)
         self.assertAlmostEqual(float(components["joint_limit"]), -6.0)
-        self.assertAlmostEqual(float(penalty), -6.2)
+        self.assertAlmostEqual(float(penalty), -6.2, places=6)
 
     def test_regularizers_are_zero_for_steady_in_limit_commands(self):
         from src.envs.g1_tracking.reward import rmr_regularization_reward
@@ -168,6 +168,21 @@ class RMRTrackingRewardTest(unittest.TestCase):
 
         self.assertAlmostEqual(float(penalty), 0.0)
         self.assertTrue(all(float(value) == 0.0 for value in components.values()))
+
+    def test_optional_action_magnitude_matches_upstream_weight(self):
+        from src.envs.g1_tracking.reward import rmr_regularization_reward
+
+        penalty, components = rmr_regularization_reward(
+            action=jnp.array([1.0, -1.0, 0.5]),
+            previous_action=jnp.array([1.0, -1.0, 0.5]),
+            joint_pos=jnp.zeros(3),
+            soft_joint_lower=-jnp.ones(3),
+            soft_joint_upper=jnp.ones(3),
+            action_magnitude_weight=0.05,
+        )
+
+        self.assertAlmostEqual(float(components["action_magnitude"]), -0.1125)
+        self.assertAlmostEqual(float(penalty), -0.1125)
 
     def test_joint_limit_penalty_caps_solver_explosion_without_changing_weight(self):
         from src.envs.g1_tracking.reward import rmr_regularization_reward

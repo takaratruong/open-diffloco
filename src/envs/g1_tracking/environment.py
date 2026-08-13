@@ -148,6 +148,7 @@ class G1TrackingEnv:
         randomization_com_body_name: str = "pelvis",
         randomization_uses_curriculum: bool = True,
         effort_limit_scale: float = 1.0,
+        action_magnitude_weight: float = 0.0,
         termination_margin_weight: float = 0.0,
         reference_reset_noise_scale: float = 0.0,
         reference_root_reset_noise_multiplier: float = 1.0,
@@ -235,6 +236,15 @@ class G1TrackingEnv:
                 "effort_limit_scale must be positive and finite"
             )
         self.effort_limit_scale = float(effort_limit_scale)
+        if (
+            isinstance(action_magnitude_weight, bool)
+            or not np.isfinite(action_magnitude_weight)
+            or action_magnitude_weight < 0.0
+        ):
+            raise ValueError(
+                "action_magnitude_weight must be non-negative and finite"
+            )
+        self.action_magnitude_weight = float(action_magnitude_weight)
         if (
             isinstance(termination_margin_weight, bool)
             or not np.isfinite(termination_margin_weight)
@@ -959,6 +969,7 @@ class G1TrackingEnv:
             "rew_body_linear_velocity": zero,
             "rew_body_angular_velocity": zero,
             "rew_action_rate": zero,
+            "rew_action_magnitude": zero,
             "rew_joint_limit": zero,
             # Compatibility names for the current SHAC logger.
             "vel_x": zero,
@@ -1476,6 +1487,7 @@ class G1TrackingEnv:
                 joint_pos=data.qpos[7:],
                 soft_joint_lower=self.soft_joint_lower,
                 soft_joint_upper=self.soft_joint_upper,
+                action_magnitude_weight=self.action_magnitude_weight,
             )
         )
         reward = reward + regularization_reward
@@ -1621,6 +1633,7 @@ class G1TrackingEnv:
             "rew_body_linear_velocity": components["body_linear_velocity"],
             "rew_body_angular_velocity": components["body_angular_velocity"],
             "rew_action_rate": components["action_rate"],
+            "rew_action_magnitude": components["action_magnitude"],
             "rew_joint_limit": components["joint_limit"],
             # Current SHAC logger compatibility: these carry errors, not velocity.
             "vel_x": anchor_position_error,
@@ -1815,6 +1828,16 @@ class G1TrackingRMR50HzUpstreamBoundaryEnv(
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.clip_sampled_actor_actions = True
+
+
+class G1TrackingRMR50HzUpstreamActionPenaltyEnv(
+    G1TrackingRMR50HzUpstreamBoundaryEnv
+):
+    """Add Open-DiffLoco's direct action-magnitude regularizer."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.pop("action_magnitude_weight", None)
+        super().__init__(*args, action_magnitude_weight=0.05, **kwargs)
 
 
 class G1TrackingRMR50HzValidatedEnv(
