@@ -43,6 +43,7 @@ def build_rmr_action_space_parity_kwargs(
     """Return a fresh SHAC contract with exact RMR delta-action semantics."""
     kwargs = build_canonical_kwargs(profile_name, reference_path, seed)
     kwargs.update(
+        total_steps=786_432,
         env_variant="g1_tracking_rmr_50hz_action_parity",
         action_scale=1.0,
         action_noise_std_start=1.0,
