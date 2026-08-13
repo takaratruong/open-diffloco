@@ -43,6 +43,7 @@ def build_rmr_action_space_parity_kwargs(
     """Return a fresh SHAC contract with exact RMR delta-action semantics."""
     kwargs = build_canonical_kwargs(profile_name, reference_path, seed)
     kwargs.update(
+        env_variant="g1_tracking_rmr_50hz_action_parity",
         action_scale=1.0,
         action_noise_std_start=1.0,
         action_noise_std_end=RMR_ACTION_STD,
@@ -132,10 +133,17 @@ def validate_preflight(
         "reference_sha256": EXPECTED_REFERENCE_SHA256,
         **assets,
         "fresh_initialization": True,
+        "environment_variant": "g1_tracking_rmr_50hz_action_parity",
         "normalized_action_clip": False,
+        "joint_velocity_observation_noise": 0.5,
         "reference_residual_scale": 1.0,
         "kp_range": [35.0, 35.0],
         "kd_range": [0.5, 0.5],
+        "remaining_rmr_randomization_gaps": [
+            "restitution-buckets",
+            "joint-default-position-offsets",
+            "randomized-six-axis-push-timing",
+        ],
     }
 
 
@@ -147,7 +155,9 @@ def validate_gate_artifacts(run_directory: Path) -> dict[str, object]:
     )
     expected = {
         "total_steps": 6_144,
+        "env_variant": "g1_tracking_rmr_50hz_action_parity",
         "squash_actor_actions": False,
+        "actor_observation_noise": True,
         "reference_residual_control": True,
         "reference_residual_scale": 1.0,
         "kp_range": [35.0, 35.0],

@@ -64,7 +64,7 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         np.testing.assert_array_equal(mask[58:64], 0.05)
         np.testing.assert_array_equal(mask[64:67], 0.2)
         np.testing.assert_array_equal(mask[67:96], 0.01)
-        np.testing.assert_array_equal(mask[96:125], 0.5)
+        np.testing.assert_array_equal(mask[96:125], 0.01)
         np.testing.assert_array_equal(mask[125:154], 0.0)
 
     def test_canonical_actor_noise_is_bounded_and_tiled_over_history(self):
@@ -283,6 +283,7 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
             actor_history_len=1,
             actor_joint_order="source",
             clip_actions=False,
+            squash_actor_actions_override=False,
             reference_residual_control=True,
             reference_residual_scale=1.0,
         )
@@ -1289,6 +1290,53 @@ class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
         self.assertEqual(robust.mj_model.opt.ls_iterations, 20)
         self.assertEqual(validated.mj_model.opt.iterations, 4)
         self.assertEqual(validated.mj_model.opt.ls_iterations, 5)
+
+    def test_parity_variant_is_explicit_and_legacy_residual_stays_squashed(self):
+        from src.envs.g1_tracking.environment import (
+            G1TrackingRMR50HzActionParityEnv,
+            G1TrackingRMR50HzSourceStepEnv,
+        )
+        from src.envs.go2.environment import get_go2_env_class
+
+        legacy = G1TrackingRMR50HzSourceStepEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+            actor_observation_noise=True,
+            reference_residual_control=True,
+        )
+        parity = G1TrackingRMR50HzActionParityEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+            actor_observation_noise=True,
+            reference_residual_control=True,
+        )
+
+        self.assertIs(
+            get_go2_env_class("g1_tracking_rmr_50hz_action_parity"),
+            G1TrackingRMR50HzActionParityEnv,
+        )
+        self.assertTrue(legacy.squash_actor_actions)
+        self.assertFalse(parity.squash_actor_actions)
+        np.testing.assert_array_equal(
+            np.asarray(legacy.actor_noise_mask)[96:125], 0.01
+        )
+        np.testing.assert_array_equal(
+            np.asarray(parity.actor_noise_mask)[96:125], 0.5
+        )
+
+        state = parity.reset_at_phase(
+            jax.random.PRNGKey(43), jnp.array(0.0), jnp.array(17)
+        )
+        raw_action = jnp.linspace(-4.8, 4.8, parity.action_dim)
+        gradient = jax.grad(
+            lambda value: jnp.sum(parity.position_target(state, value))
+        )(raw_action)
+        self.assertTrue(np.isfinite(np.asarray(gradient)).all())
+        self.assertTrue(np.all(np.abs(np.asarray(gradient)) > 0.0))
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
         )
 
         self.assertEqual(
-            kwargs["env_variant"], "g1_tracking_rmr_50hz_source_step"
+            kwargs["env_variant"], "g1_tracking_rmr_50hz_action_parity"
         )
         self.assertTrue(kwargs["reference_residual_control"])
         self.assertEqual(kwargs["reference_residual_scale"], 1.0)
@@ -185,6 +185,19 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
         self.assertEqual(result["controller_sha256"], "controller")
         self.assertEqual(result["reference_residual_scale"], 1.0)
         self.assertFalse(result["normalized_action_clip"])
+        self.assertEqual(
+            result["environment_variant"],
+            "g1_tracking_rmr_50hz_action_parity",
+        )
+        self.assertEqual(result["joint_velocity_observation_noise"], 0.5)
+        self.assertEqual(
+            result["remaining_rmr_randomization_gaps"],
+            [
+                "restitution-buckets",
+                "joint-default-position-offsets",
+                "randomized-six-axis-push-timing",
+            ],
+        )
         self.assertEqual(result["kp_range"], [35.0, 35.0])
         self.assertEqual(result["kd_range"], [0.5, 0.5])
 
@@ -271,7 +284,9 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
             run = Path(directory)
             hparams = {
                 "total_steps": 6_144,
+                "env_variant": "g1_tracking_rmr_50hz_action_parity",
                 "squash_actor_actions": False,
+                "actor_observation_noise": True,
                 "reference_residual_control": True,
                 "reference_residual_scale": 1.0,
                 "kp_range": [35.0, 35.0],

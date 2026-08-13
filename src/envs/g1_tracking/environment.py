@@ -127,6 +127,8 @@ class G1TrackingEnv:
         controller_path: str = DEFAULT_CONTROLLER_PATH,
         actor_history_len: int = 1,
         actor_observation_noise: bool = False,
+        actor_joint_velocity_noise_scale: float = 0.01,
+        squash_actor_actions_override: bool | None = None,
         actor_reference_lookahead_steps: tuple[int, ...] = (),
         actor_reference_preview_mode: str = "absolute",
         physics_substeps: int = 5,
@@ -162,6 +164,23 @@ class G1TrackingEnv:
         if not isinstance(actor_observation_noise, bool):
             raise ValueError("actor_observation_noise must be boolean")
         self.actor_observation_noise = actor_observation_noise
+        if (
+            isinstance(actor_joint_velocity_noise_scale, bool)
+            or not np.isfinite(actor_joint_velocity_noise_scale)
+            or actor_joint_velocity_noise_scale < 0.0
+        ):
+            raise ValueError(
+                "actor_joint_velocity_noise_scale must be non-negative and finite"
+            )
+        self.actor_joint_velocity_noise_scale = float(
+            actor_joint_velocity_noise_scale
+        )
+        if squash_actor_actions_override is not None and not isinstance(
+            squash_actor_actions_override, bool
+        ):
+            raise ValueError(
+                "squash_actor_actions_override must be boolean or None"
+            )
         if not isinstance(actor_reference_lookahead_steps, tuple):
             raise ValueError(
                 "actor reference lookahead steps must be a tuple"
@@ -544,7 +563,11 @@ class G1TrackingEnv:
         self.reference_stride = reference_stride
         self.reward_scale = reward_scale
         self.clip_actions = clip_actions
-        self.squash_actor_actions = clip_actions
+        self.squash_actor_actions = (
+            clip_actions or self.reference_residual_control
+            if squash_actor_actions_override is None
+            else squash_actor_actions_override
+        )
         self.dt = float(self.mj_model.opt.timestep * self.n_frames)
         self.control_reference_dt = self.dt
         if self.reference.fps is not None:
@@ -605,7 +628,7 @@ class G1TrackingEnv:
                 jp.full(6, 0.05),
                 jp.full(3, 0.2),
                 jp.full(29, 0.01),
-                jp.full(29, 0.5),
+                jp.full(29, self.actor_joint_velocity_noise_scale),
                 jp.zeros(29),
                 jp.zeros(self.actor_future_reference_dim),
             )
@@ -1724,6 +1747,20 @@ class G1TrackingRMR50HzSourceStepRobustEnv(
             *args,
             solver_iterations=10,
             solver_ls_iterations=20,
+            **kwargs,
+        )
+
+
+class G1TrackingRMR50HzActionParityEnv(G1TrackingRMR50HzSourceStepEnv):
+    """Explicit RMR delta-action and policy-noise compatibility boundary."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.pop("squash_actor_actions_override", None)
+        kwargs.pop("actor_joint_velocity_noise_scale", None)
+        super().__init__(
+            *args,
+            squash_actor_actions_override=False,
+            actor_joint_velocity_noise_scale=0.5,
             **kwargs,
         )
 
