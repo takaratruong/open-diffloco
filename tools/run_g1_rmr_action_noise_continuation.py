@@ -291,6 +291,7 @@ def validate_action_noise_training_artifacts(
     *,
     expected_action_noise_std: object,
     protocol: str,
+    expected_hparams_overrides: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     """Validate one exact 32-update fixed-action-noise treatment."""
     run_directory = run_directory.resolve()
@@ -321,6 +322,8 @@ def validate_action_noise_training_artifacts(
         "effective_num_envs": 512,
         "seed": SEED,
     }
+    if expected_hparams_overrides is not None:
+        expected_hparams.update(expected_hparams_overrides)
     for key, expected in expected_hparams.items():
         _require_equal(hparams, key, expected)
     if (RMR_NOISE_END_STEP - E008_SELECTED_STEP) // (
