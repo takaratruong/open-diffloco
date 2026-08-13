@@ -143,7 +143,7 @@ def build_decoupled_early_learning_kwargs(
         checkpoint_interval=98_304,
         curriculum_grace=98_304,
         curriculum_steps=1,
-        actor_lr=1e-3,
+        actor_lr=2.5e-3,
     )
     return kwargs
 
@@ -434,7 +434,7 @@ def _require_early_learning_hparams(hparams: dict[str, object]) -> None:
         "actor_torso_wrench_assistance_conditioning": False,
         "curriculum_grace": 98_304,
         "curriculum_steps": 1,
-        "actor_lr": 1e-3,
+        "actor_lr": 2.5e-3,
     }
     for key, expected_value in expected.items():
         if hparams.get(key) != expected_value:
