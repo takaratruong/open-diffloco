@@ -53,6 +53,7 @@ def _write_early_learning_fixture(run: Path) -> None:
         "actor_torso_wrench_assistance_conditioning": False,
         "curriculum_grace": 98_304,
         "curriculum_steps": 1,
+        "actor_lr": 1e-3,
         "actor_layer_norm": True,
         "actor_hidden": [512, 256, 128],
     }
@@ -329,7 +330,7 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "clean trajectory"):
                 validate_early_learning_artifacts(run)
 
-    def test_decoupled_early_learning_kwargs_change_only_bounded_budget(self):
+    def test_decoupled_early_learning_kwargs_use_lower_actor_lr(self):
         from tools.run_g1_rmr_action_space_parity import (
             build_decoupled_early_learning_kwargs,
             build_decoupled_exploration_kwargs,
@@ -353,12 +354,14 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
                 "total_steps",
                 "curriculum_grace",
                 "curriculum_steps",
+                "actor_lr",
             },
         )
         self.assertEqual(early["total_steps"], 98_304)
         self.assertEqual(early["checkpoint_interval"], 98_304)
         self.assertEqual(early["curriculum_grace"], 98_304)
         self.assertEqual(early["curriculum_steps"], 1)
+        self.assertEqual(early["actor_lr"], 1e-3)
 
     def test_decoupled_kwargs_bound_mean_without_clipping_noise(self):
         from tools.run_g1_rmr_action_space_parity import (
