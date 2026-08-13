@@ -48,7 +48,7 @@ def build_rmr_action_space_parity_kwargs(
         action_noise_std_start=1.0,
         action_noise_std_end=RMR_ACTION_STD,
         action_noise_schedule_steps=800_000,
-        friction_range=(0.3, 1.6),
+        friction_range=(1.0, 1.0),
         mass_range=(1.0, 1.0),
         kp_range=(35.0, 35.0),
         kd_range=(0.5, 0.5),
@@ -136,11 +136,13 @@ def validate_preflight(
         "environment_variant": "g1_tracking_rmr_50hz_action_parity",
         "normalized_action_clip": False,
         "joint_velocity_observation_noise": 0.5,
+        "randomization_com_body_name": "torso_link",
+        "randomization_uses_curriculum": False,
         "reference_residual_scale": 1.0,
         "kp_range": [35.0, 35.0],
         "kd_range": [0.5, 0.5],
         "remaining_rmr_randomization_gaps": [
-            "restitution-buckets",
+            "friction-and-restitution-material-buckets",
             "joint-default-position-offsets",
             "pushes-disabled",
         ],
@@ -162,9 +164,11 @@ def validate_gate_artifacts(run_directory: Path) -> dict[str, object]:
         "reference_residual_scale": 1.0,
         "kp_range": [35.0, 35.0],
         "kd_range": [0.5, 0.5],
-        "friction_range": [0.3, 1.6],
+        "friction_range": [1.0, 1.0],
         "mass_range": [1.0, 1.0],
         "com_offset_range": [0.025, 0.05, 0.05],
+        "randomization_com_body_name": "torso_link",
+        "randomization_uses_curriculum": False,
         "push_velocity_range": [0.0, 0.0],
         "action_noise_std_start": 1.0,
         "action_noise_std_end": np.asarray(RMR_ACTION_STD).tolist(),
@@ -174,7 +178,7 @@ def validate_gate_artifacts(run_directory: Path) -> dict[str, object]:
     for key, value in expected.items():
         if hparams.get(key) != value:
             raise ValueError(f"gate hparams {key} does not match parity contract")
-    checkpoint = run_directory / "checkpoint_step_6144.pkl"
+    checkpoint = run_directory / "checkpoint_step_006144.pkl"
     if not checkpoint.is_file():
         raise ValueError("gate checkpoint is missing")
     rows = json.loads(

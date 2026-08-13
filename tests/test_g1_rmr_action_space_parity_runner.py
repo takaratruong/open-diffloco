@@ -28,7 +28,7 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
         self.assertEqual(kwargs["kp_range"], (35.0, 35.0))
         self.assertEqual(kwargs["kd_range"], (0.5, 0.5))
         self.assertTrue(kwargs["domain_randomization"])
-        self.assertEqual(kwargs["friction_range"], (0.3, 1.6))
+        self.assertEqual(kwargs["friction_range"], (1.0, 1.0))
         self.assertEqual(kwargs["mass_range"], (1.0, 1.0))
         self.assertEqual(kwargs["com_offset_range"], (0.025, 0.05, 0.05))
         self.assertEqual(kwargs["push_velocity_range"], (0.0, 0.0))
@@ -190,10 +190,12 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
             "g1_tracking_rmr_50hz_action_parity",
         )
         self.assertEqual(result["joint_velocity_observation_noise"], 0.5)
+        self.assertEqual(result["randomization_com_body_name"], "torso_link")
+        self.assertFalse(result["randomization_uses_curriculum"])
         self.assertEqual(
             result["remaining_rmr_randomization_gaps"],
             [
-                "restitution-buckets",
+                "friction-and-restitution-material-buckets",
                 "joint-default-position-offsets",
                 "pushes-disabled",
             ],
@@ -291,9 +293,11 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
                 "reference_residual_scale": 1.0,
                 "kp_range": [35.0, 35.0],
                 "kd_range": [0.5, 0.5],
-                "friction_range": [0.3, 1.6],
+                "friction_range": [1.0, 1.0],
                 "mass_range": [1.0, 1.0],
                 "com_offset_range": [0.025, 0.05, 0.05],
+                "randomization_com_body_name": "torso_link",
+                "randomization_uses_curriculum": False,
                 "push_velocity_range": [0.0, 0.0],
                 "action_noise_std_start": 1.0,
                 "action_noise_std_end": np.asarray(RMR_ACTION_STD).tolist(),
@@ -301,7 +305,7 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
                 "gradient_accumulation_steps": 2,
             }
             (run / "hparams.json").write_text(json.dumps(hparams))
-            (run / "checkpoint_step_6144.pkl").write_bytes(b"checkpoint")
+            (run / "checkpoint_step_006144.pkl").write_bytes(b"checkpoint")
             (run / "checkpoint_phase_metrics.json").write_text(
                 json.dumps(
                     [

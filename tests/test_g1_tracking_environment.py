@@ -1338,6 +1338,66 @@ class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
         self.assertTrue(np.isfinite(np.asarray(gradient)).all())
         self.assertTrue(np.all(np.abs(np.asarray(gradient)) > 0.0))
 
+    def test_parity_randomization_targets_torso_com_not_pelvis(self):
+        from src.envs.g1_tracking.environment import (
+            G1TrackingRMR50HzActionParityEnv,
+            G1TrackingRMR50HzSourceStepEnv,
+        )
+
+        common = dict(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+            domain_randomization=True,
+            friction_range=(1.0, 1.0),
+            com_offset_range=(0.025, 0.05, 0.05),
+        )
+        legacy = G1TrackingRMR50HzSourceStepEnv(**common)
+        parity = G1TrackingRMR50HzActionParityEnv(**common)
+        sample = parity._nominal_randomization()
+        sample = {
+            **sample,
+            "com_offset": jnp.asarray([0.01, -0.02, 0.03]),
+        }
+
+        randomized = parity._get_randomized_model(sample)
+        legacy_randomized = legacy._get_randomized_model(sample)
+
+        legacy_zero = legacy._sample_randomization(
+            jax.random.PRNGKey(44), jnp.asarray(0.0)
+        )
+        parity_zero = parity._sample_randomization(
+            jax.random.PRNGKey(44), jnp.asarray(0.0)
+        )
+
+        self.assertEqual(
+            parity.randomization_com_body_id,
+            parity.mj_model.body("torso_link").id,
+        )
+        np.testing.assert_allclose(
+            randomized.body_ipos[parity.randomization_com_body_id],
+            parity.base_ipos[parity.randomization_com_body_id]
+            + sample["com_offset"],
+            rtol=0.0,
+            atol=0.0,
+        )
+        np.testing.assert_array_equal(
+            randomized.body_ipos[parity.pelvis_body_id],
+            parity.base_ipos[parity.pelvis_body_id],
+        )
+        np.testing.assert_array_equal(legacy_zero["com_offset"], jnp.zeros(3))
+        self.assertGreater(
+            np.linalg.norm(np.asarray(parity_zero["com_offset"])), 0.0
+        )
+
+        np.testing.assert_allclose(
+            legacy_randomized.body_ipos[legacy.pelvis_body_id],
+            legacy.base_ipos[legacy.pelvis_body_id] + sample["com_offset"],
+            rtol=0.0,
+            atol=0.0,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

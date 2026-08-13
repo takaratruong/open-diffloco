@@ -145,6 +145,8 @@ class G1TrackingEnv:
         kp_range: tuple[float, float] = (35.0, 35.0),
         kd_range: tuple[float, float] = (0.5, 0.5),
         com_offset_range: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        randomization_com_body_name: str = "pelvis",
+        randomization_uses_curriculum: bool = True,
         effort_limit_scale: float = 1.0,
         termination_margin_weight: float = 0.0,
         reference_reset_noise_scale: float = 0.0,
@@ -342,6 +344,9 @@ class G1TrackingEnv:
         if not isinstance(domain_randomization, bool):
             raise ValueError("domain_randomization must be boolean")
         self.domain_randomization = domain_randomization
+        if not isinstance(randomization_uses_curriculum, bool):
+            raise ValueError("randomization_uses_curriculum must be boolean")
+        self.randomization_uses_curriculum = randomization_uses_curriculum
 
         def positive_pair(name, values):
             array = np.asarray(values, dtype=np.float64)
@@ -430,6 +435,19 @@ class G1TrackingEnv:
         self.body_ids = tuple(self.reference.body_ids)
         self.anchor_body_id = self.body_ids[0]
         self.pelvis_body_id = self.anchor_body_id
+        if not isinstance(randomization_com_body_name, str) or not (
+            randomization_com_body_name.strip()
+        ):
+            raise ValueError("randomization_com_body_name must name a body")
+        try:
+            self.randomization_com_body_id = int(
+                self.mj_model.body(randomization_com_body_name).id
+            )
+        except KeyError as error:
+            raise ValueError(
+                "randomization_com_body_name must identify a model body"
+            ) from error
+        self.randomization_com_body_name = randomization_com_body_name
         self.distal_body_slots = (3, 6, 10, 13)
 
         self.qpos_reference = jp.asarray(self.reference.qpos)
@@ -880,9 +898,14 @@ class G1TrackingEnv:
     ) -> dict[str, jax.Array]:
         if not self.domain_randomization:
             return self._nominal_randomization()
+        sample_difficulty = (
+            difficulty
+            if self.randomization_uses_curriculum
+            else jp.ones_like(difficulty)
+        )
         return sample_g1_randomization(
             key,
-            difficulty,
+            sample_difficulty,
             self.randomization_ranges,
         )
 
@@ -890,7 +913,7 @@ class G1TrackingEnv:
         """Materialize one environment's MJX model from carried parameters."""
         if not self.domain_randomization:
             return self.mjx_model
-        body_ipos = self.base_ipos.at[self.pelvis_body_id].add(
+        body_ipos = self.base_ipos.at[self.randomization_com_body_id].add(
             info["com_offset"]
         )
         return self.mjx_model.replace(
@@ -1757,10 +1780,14 @@ class G1TrackingRMR50HzActionParityEnv(G1TrackingRMR50HzSourceStepEnv):
     def __init__(self, *args, **kwargs):
         kwargs.pop("squash_actor_actions_override", None)
         kwargs.pop("actor_joint_velocity_noise_scale", None)
+        kwargs.pop("randomization_com_body_name", None)
+        kwargs.pop("randomization_uses_curriculum", None)
         super().__init__(
             *args,
             squash_actor_actions_override=False,
             actor_joint_velocity_noise_scale=0.5,
+            randomization_com_body_name="torso_link",
+            randomization_uses_curriculum=False,
             **kwargs,
         )
 

@@ -882,6 +882,12 @@ def reference_hparams_for_env(env) -> dict[str, object]:
         "reference_stride": int(env.reference_stride),
         "reference_states": int(env.reference.qpos.shape[0]),
         "reference_transitions": int(env.reference_transitions),
+        "randomization_com_body_name": getattr(
+            env, "randomization_com_body_name", None
+        ),
+        "randomization_uses_curriculum": getattr(
+            env, "randomization_uses_curriculum", None
+        ),
     }
     if getattr(env, "carried_reset_bank_path", None) is not None:
         bank_path = Path(env.carried_reset_bank_path).resolve()
