@@ -53,7 +53,7 @@ def build_rmr_action_space_parity_kwargs(
         kp_range=(35.0, 35.0),
         kd_range=(0.5, 0.5),
         com_offset_range=(0.025, 0.05, 0.05),
-        push_velocity_range=(-0.5, 0.5),
+        push_velocity_range=(0.0, 0.0),
         push_interval_s=2.0,
         reference_residual_scale=1.0,
         gradient_accumulation_steps=2,
@@ -142,7 +142,7 @@ def validate_preflight(
         "remaining_rmr_randomization_gaps": [
             "restitution-buckets",
             "joint-default-position-offsets",
-            "randomized-six-axis-push-timing",
+            "pushes-disabled",
         ],
     }
 
@@ -165,6 +165,7 @@ def validate_gate_artifacts(run_directory: Path) -> dict[str, object]:
         "friction_range": [0.3, 1.6],
         "mass_range": [1.0, 1.0],
         "com_offset_range": [0.025, 0.05, 0.05],
+        "push_velocity_range": [0.0, 0.0],
         "action_noise_std_start": 1.0,
         "action_noise_std_end": np.asarray(RMR_ACTION_STD).tolist(),
         "actor_cagrad": True,

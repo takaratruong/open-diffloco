@@ -31,7 +31,7 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
         self.assertEqual(kwargs["friction_range"], (0.3, 1.6))
         self.assertEqual(kwargs["mass_range"], (1.0, 1.0))
         self.assertEqual(kwargs["com_offset_range"], (0.025, 0.05, 0.05))
-        self.assertEqual(kwargs["push_velocity_range"], (-0.5, 0.5))
+        self.assertEqual(kwargs["push_velocity_range"], (0.0, 0.0))
         self.assertEqual(kwargs["push_interval_s"], 2.0)
         self.assertEqual(kwargs["action_noise_std_start"], 1.0)
         np.testing.assert_array_equal(
@@ -195,7 +195,7 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
             [
                 "restitution-buckets",
                 "joint-default-position-offsets",
-                "randomized-six-axis-push-timing",
+                "pushes-disabled",
             ],
         )
         self.assertEqual(result["kp_range"], [35.0, 35.0])
@@ -294,6 +294,7 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
                 "friction_range": [0.3, 1.6],
                 "mass_range": [1.0, 1.0],
                 "com_offset_range": [0.025, 0.05, 0.05],
+                "push_velocity_range": [0.0, 0.0],
                 "action_noise_std_start": 1.0,
                 "action_noise_std_end": np.asarray(RMR_ACTION_STD).tolist(),
                 "actor_cagrad": True,
