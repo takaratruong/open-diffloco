@@ -2002,10 +2002,16 @@ def train(
 
     # Initialize networks
     squash_actor_actions = getattr(env, "squash_actor_actions", True)
+    squash_actor_mean = getattr(
+        env, "squash_actor_mean", squash_actor_actions
+    )
+    clip_sampled_actor_actions = getattr(
+        env, "clip_sampled_actor_actions", squash_actor_actions
+    )
     actor = Actor(
         env.action_dim,
         hidden=actor_hidden,
-        squash=squash_actor_actions,
+        squash=squash_actor_mean,
         layer_norm=actor_layer_norm,
         zero_output=actor_zero_output,
     )
@@ -2295,7 +2301,7 @@ def train(
 
             # Reparameterized action noise
             noisy_action = action + noise_t.astype(jp.float64) * current_noise_std
-            if squash_actor_actions:
+            if clip_sampled_actor_actions:
                 noisy_action = jp.clip(noisy_action, -1.0, 1.0)
 
             if adaptive_phase_sampling or frozen_preview_treatment:
@@ -3704,6 +3710,8 @@ def train(
         "differentiate_source_feedback": differentiate_source_feedback,
         "env_variant": env_variant,
         "squash_actor_actions": squash_actor_actions,
+        "squash_actor_mean": squash_actor_mean,
+        "clip_sampled_actor_actions": clip_sampled_actor_actions,
         **reference_hparams,
     }
     persist_run_hparams(save_dir, hparams)

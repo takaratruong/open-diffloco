@@ -19,6 +19,7 @@ from tools.evaluate_g1_tracking import (
     remaining_reference_transitions,
     scale_policy_action,
     summarize_stability_errors,
+    validate_training_action_mean,
 )
 
 RMR_CHECKPOINT = Path(
@@ -31,6 +32,11 @@ RMR_ACTIONS = Path(
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    def test_training_action_tape_rejects_an_unbounded_mean(self):
+        validate_training_action_mean(np.array([[1.0, -1.0, 0.0]]))
+        with self.assertRaisesRegex(ValueError, "actor mean"):
+            validate_training_action_mean(np.array([[1.01, 0.0, 0.0]]))
+
     def test_prepare_evaluation_action_matches_training_squash_boundary(self):
         from tools import evaluate_g1_tracking
 

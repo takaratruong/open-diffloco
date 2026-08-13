@@ -38,6 +38,7 @@ EVALUATION_ENV_VARIANTS = (
     "g1_tracking_rmr_50hz_source_step",
     "g1_tracking_rmr_50hz_source_step_robust",
     "g1_tracking_rmr_50hz_action_parity",
+    "g1_tracking_rmr_50hz_decoupled_exploration",
     "g1_tracking_rmr_50hz_validated",
 )
 
@@ -62,6 +63,18 @@ def training_action_noise_at_step(
     end = endpoint("action_noise_std_end")
     progress = np.clip(step / schedule_steps, 0.0, 1.0)
     return start + progress * (end - start)
+
+
+def validate_training_action_mean(action_mean: np.ndarray) -> None:
+    """Reject a supposedly bounded actor mean that escaped [-1, 1]."""
+    values = np.asarray(action_mean)
+    if (
+        values.ndim != 2
+        or values.shape[1] < 1
+        or not np.isfinite(values).all()
+        or np.max(np.abs(values), initial=0.0) > 1.0 + 1e-6
+    ):
+        raise ValueError("training actor mean is nonfinite or outside [-1, 1]")
 
 
 def resolve_rollout_step_limit(
@@ -296,7 +309,11 @@ def _load_policy(
         actor = Actor(
             env.action_dim,
             hidden=hidden,
-            squash=getattr(env, "squash_actor_actions", True),
+            squash=getattr(
+                env,
+                "squash_actor_mean",
+                getattr(env, "squash_actor_actions", True),
+            ),
             layer_norm=layer_norm,
             # Initializers do not affect apply(), but using a nonzero head
             # describes both compact random-head checkpoints and legacy
@@ -338,7 +355,11 @@ def _load_policy(
     actor = Actor(
         env.action_dim,
         hidden=actor_hidden,
-        squash=getattr(env, "squash_actor_actions", True),
+        squash=getattr(
+            env,
+            "squash_actor_mean",
+            getattr(env, "squash_actor_actions", True),
+        ),
         layer_norm=actor_layer_norm,
         zero_output=actor_zero_output,
     )
@@ -784,7 +805,11 @@ def main() -> None:
             noisy_actions.append(np.asarray(action))
         action = prepare_evaluation_action(
             action,
-            squash=getattr(env, "squash_actor_actions", True),
+            squash=getattr(
+                env,
+                "clip_sampled_actor_actions",
+                getattr(env, "squash_actor_actions", True),
+            ),
         )
         if args.training_distribution_rollout:
             effective_actions.append(np.asarray(action))
@@ -859,6 +884,12 @@ def main() -> None:
         quality=8,
     )
     if args.training_distribution_rollout:
+        if getattr(
+            env,
+            "squash_actor_mean",
+            getattr(env, "squash_actor_actions", True),
+        ):
+            validate_training_action_mean(np.asarray(action_means))
         imageio.mimsave(
             args.output_dir / "training_slice_h12.mp4",
             frames[: min(12, len(frames))],

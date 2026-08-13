@@ -586,6 +586,10 @@ class G1TrackingEnv:
             if squash_actor_actions_override is None
             else squash_actor_actions_override
         )
+        # Keep the learned-mean and sampled-action boundaries independently
+        # configurable.  Legacy environments intentionally share one value.
+        self.squash_actor_mean = self.squash_actor_actions
+        self.clip_sampled_actor_actions = self.squash_actor_actions
         self.dt = float(self.mj_model.opt.timestep * self.n_frames)
         self.control_reference_dt = self.dt
         if self.reference.fps is not None:
@@ -1790,6 +1794,17 @@ class G1TrackingRMR50HzActionParityEnv(G1TrackingRMR50HzSourceStepEnv):
             randomization_uses_curriculum=False,
             **kwargs,
         )
+
+
+class G1TrackingRMR50HzDecoupledExplorationEnv(
+    G1TrackingRMR50HzActionParityEnv
+):
+    """Bound the learned mean while retaining unclipped exploration noise."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.squash_actor_mean = True
+        self.clip_sampled_actor_actions = False
 
 
 class G1TrackingRMR50HzValidatedEnv(

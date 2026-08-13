@@ -9,6 +9,22 @@ import numpy as np
 
 
 class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
+    def test_decoupled_kwargs_bound_mean_without_clipping_noise(self):
+        from tools.run_g1_rmr_action_space_parity import (
+            build_decoupled_exploration_kwargs,
+        )
+
+        kwargs = build_decoupled_exploration_kwargs(
+            "g1-4x5", Path("/tmp/dance.npz"), seed=3
+        )
+
+        self.assertEqual(
+            kwargs["env_variant"],
+            "g1_tracking_rmr_50hz_decoupled_exploration",
+        )
+        self.assertEqual(kwargs["reference_residual_scale"], 1.0)
+        self.assertEqual(kwargs["action_noise_std_start"], 1.0)
+
     def test_fresh_parity_kwargs_use_linear_full_scale_nominal_gains(self):
         from src.core.rmr_action_noise import RMR_ACTION_STD
         from tools.run_g1_rmr_action_space_parity import (

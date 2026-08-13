@@ -90,6 +90,38 @@ def build_parity_gate_kwargs(
     return kwargs
 
 
+def build_decoupled_exploration_kwargs(
+    profile_name: str,
+    reference_path: str | Path,
+    seed: int,
+) -> dict:
+    """Use a tanh-bounded mean with unclipped reparameterized exploration."""
+    kwargs = build_rmr_action_space_parity_kwargs(
+        profile_name, reference_path, seed
+    )
+    kwargs["env_variant"] = (
+        "g1_tracking_rmr_50hz_decoupled_exploration"
+    )
+    return kwargs
+
+
+def build_decoupled_gate_kwargs(
+    profile_name: str,
+    reference_path: str | Path,
+    seed: int,
+) -> dict:
+    kwargs = build_decoupled_exploration_kwargs(
+        profile_name, reference_path, seed
+    )
+    kwargs.update(
+        total_steps=6_144,
+        checkpoint_interval=6_144,
+        curriculum_grace=6_144,
+        curriculum_steps=1,
+    )
+    return kwargs
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -110,11 +142,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--code-commit", required=True)
     parser.add_argument("--gate-only", action="store_true")
+    parser.add_argument("--decoupled-exploration", action="store_true")
     return parser
 
 
 def validate_preflight(
-    *, repository: Path, reference_path: Path, code_commit: str
+    *,
+    repository: Path,
+    reference_path: Path,
+    code_commit: str,
+    env_variant: str = "g1_tracking_rmr_50hz_action_parity",
 ) -> dict[str, object]:
     """Bind a fresh parity run to clean code and immutable runtime assets."""
     head = _git_output(repository, "rev-parse", "HEAD")
@@ -138,7 +175,7 @@ def validate_preflight(
         "reference_sha256": EXPECTED_REFERENCE_SHA256,
         **assets,
         "fresh_initialization": True,
-        "environment_variant": "g1_tracking_rmr_50hz_action_parity",
+        "environment_variant": env_variant,
         "normalized_action_clip": False,
         "joint_velocity_observation_noise": 0.0,
         "exact_reference_resets": True,
@@ -159,7 +196,11 @@ def validate_preflight(
     }
 
 
-def validate_gate_artifacts(run_directory: Path) -> dict[str, object]:
+def validate_gate_artifacts(
+    run_directory: Path,
+    *,
+    env_variant: str = "g1_tracking_rmr_50hz_action_parity",
+) -> dict[str, object]:
     """Fail closed unless the one-update run executed the parity contract."""
     run_directory = run_directory.resolve()
     hparams = json.loads(
@@ -167,7 +208,7 @@ def validate_gate_artifacts(run_directory: Path) -> dict[str, object]:
     )
     expected = {
         "total_steps": 6_144,
-        "env_variant": "g1_tracking_rmr_50hz_action_parity",
+        "env_variant": env_variant,
         "squash_actor_actions": False,
         "actor_observation_noise": False,
         "reference_reset_noise_scale": 0.0,
@@ -187,6 +228,11 @@ def validate_gate_artifacts(run_directory: Path) -> dict[str, object]:
         "actor_cagrad": True,
         "gradient_accumulation_steps": 2,
     }
+    if env_variant == "g1_tracking_rmr_50hz_decoupled_exploration":
+        expected.update(
+            squash_actor_mean=True,
+            clip_sampled_actor_actions=False,
+        )
     for key, value in expected.items():
         if hparams.get(key) != value:
             raise ValueError(f"gate hparams {key} does not match parity contract")
@@ -241,16 +287,28 @@ def execute(args: argparse.Namespace) -> Path:
         repository=repository,
         reference_path=args.reference_path,
         code_commit=args.code_commit,
+        env_variant=(
+            "g1_tracking_rmr_50hz_decoupled_exploration"
+            if getattr(args, "decoupled_exploration", False)
+            else "g1_tracking_rmr_50hz_action_parity"
+        ),
     )
     _write_json_atomically(
         output_root / "action_space_parity_preflight.json", preflight
     )
     configure_jax()
-    builder = (
-        build_parity_gate_kwargs
-        if args.gate_only
-        else build_rmr_action_space_parity_kwargs
-    )
+    if getattr(args, "decoupled_exploration", False):
+        builder = (
+            build_decoupled_gate_kwargs
+            if args.gate_only
+            else build_decoupled_exploration_kwargs
+        )
+    else:
+        builder = (
+            build_parity_gate_kwargs
+            if args.gate_only
+            else build_rmr_action_space_parity_kwargs
+        )
     kwargs = builder(
         args.solver_profile,
         args.reference_path.resolve(),
@@ -266,7 +324,13 @@ def execute(args: argparse.Namespace) -> Path:
         os.chdir(previous_directory)
     run_directory = (output_root / relative_save_dir).resolve()
     if args.gate_only:
-        gate_validation = validate_gate_artifacts(run_directory)
+        if getattr(args, "decoupled_exploration", False):
+            gate_validation = validate_gate_artifacts(
+                run_directory,
+                env_variant=kwargs["env_variant"],
+            )
+        else:
+            gate_validation = validate_gate_artifacts(run_directory)
         _write_json_atomically(
             output_root / "action_space_parity_gate_validation.json",
             gate_validation,

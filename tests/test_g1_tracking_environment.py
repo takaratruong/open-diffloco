@@ -1338,6 +1338,27 @@ class G1TrackingRMR50HzEnvironmentTest(unittest.TestCase):
         self.assertTrue(np.isfinite(np.asarray(gradient)).all())
         self.assertTrue(np.all(np.abs(np.asarray(gradient)) > 0.0))
 
+    def test_decoupled_exploration_bounds_mean_but_not_sample(self):
+        from src.envs.g1_tracking.environment import (
+            G1TrackingRMR50HzDecoupledExplorationEnv,
+        )
+        from src.envs.go2.environment import get_go2_env_class
+
+        env = G1TrackingRMR50HzDecoupledExplorationEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+        )
+
+        self.assertIs(
+            get_go2_env_class("g1_tracking_rmr_50hz_decoupled_exploration"),
+            G1TrackingRMR50HzDecoupledExplorationEnv,
+        )
+        self.assertTrue(env.squash_actor_mean)
+        self.assertFalse(env.clip_sampled_actor_actions)
+        self.assertFalse(env.squash_actor_actions)
+
     def test_parity_randomization_targets_torso_com_not_pelvis(self):
         from src.envs.g1_tracking.environment import (
             G1TrackingRMR50HzActionParityEnv,
