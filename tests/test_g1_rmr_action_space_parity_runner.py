@@ -677,6 +677,40 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
             "g1_tracking_rmr_50hz_upstream_action_penalty",
         )
 
+    def test_zero_bootstrap_is_explicit_early_action_penalty_treatment(self):
+        from tools.run_g1_rmr_action_space_parity import (
+            build_parser,
+            validate_mode_args,
+        )
+
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "--solver-profile",
+                "g1-4x5",
+                "--code-commit",
+                "0" * 40,
+                "--early-learning-gate",
+                "--decoupled-exploration",
+                "--upstream-action-penalty",
+                "--zero-terminal-bootstrap",
+            ]
+        )
+        validate_mode_args(args)
+        self.assertTrue(args.zero_terminal_bootstrap)
+
+        invalid = parser.parse_args(
+            [
+                "--solver-profile",
+                "g1-4x5",
+                "--code-commit",
+                "0" * 40,
+                "--zero-terminal-bootstrap",
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "action-penalty"):
+            validate_mode_args(invalid)
+
     def test_parser_rejects_both_gate_modes(self):
         from tools.run_g1_rmr_action_space_parity import build_parser
 
@@ -807,6 +841,7 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
         self.assertEqual(result["reference_residual_scale"], 0.5)
         self.assertTrue(result["normalized_action_clip"])
         self.assertEqual(result["action_magnitude_weight"], 0.05)
+        self.assertEqual(result["actor_bootstrap_scale"], 1.0)
         self.assertEqual(result["kd_range"], [0.5, 0.5])
 
     def test_preflight_rejects_a_dirty_worktree(self):

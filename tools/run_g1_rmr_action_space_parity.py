@@ -175,6 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--early-learning-gate", action="store_true")
     parser.add_argument("--decoupled-exploration", action="store_true")
     parser.add_argument("--upstream-action-penalty", action="store_true")
+    parser.add_argument("--zero-terminal-bootstrap", action="store_true")
     return parser
 
 
@@ -195,6 +196,12 @@ def validate_mode_args(args: argparse.Namespace) -> None:
         raise ValueError(
             "--upstream-action-penalty requires the decoupled early-learning gate"
         )
+    if getattr(args, "zero_terminal_bootstrap", False) and not getattr(
+        args, "upstream_action_penalty", False
+    ):
+        raise ValueError(
+            "--zero-terminal-bootstrap requires the action-penalty treatment"
+        )
 
 
 def selected_env_variant(args: argparse.Namespace) -> str:
@@ -214,6 +221,7 @@ def validate_preflight(
     reference_path: Path,
     code_commit: str,
     env_variant: str = "g1_tracking_rmr_50hz_action_parity",
+    actor_bootstrap_scale: float = 1.0,
 ) -> dict[str, object]:
     """Bind a fresh parity run to clean code and immutable runtime assets."""
     upstream_boundary = env_variant in {
@@ -257,6 +265,7 @@ def validate_preflight(
         "push_velocity_range": [0.0, 0.0],
         "reference_residual_scale": 0.5 if upstream_boundary else 1.0,
         "action_magnitude_weight": action_magnitude_weight,
+        "actor_bootstrap_scale": actor_bootstrap_scale,
         "kp_range": [35.0, 35.0],
         "kd_range": [0.5, 0.5],
         "remaining_rmr_randomization_gaps": [
@@ -697,11 +706,15 @@ def execute(args: argparse.Namespace) -> Path:
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     env_variant = selected_env_variant(args)
+    actor_bootstrap_scale = (
+        0.0 if getattr(args, "zero_terminal_bootstrap", False) else 1.0
+    )
     preflight = validate_preflight(
         repository=repository,
         reference_path=args.reference_path,
         code_commit=args.code_commit,
         env_variant=env_variant,
+        actor_bootstrap_scale=actor_bootstrap_scale,
     )
     _write_json_atomically(
         output_root / "action_space_parity_preflight.json", preflight
@@ -726,6 +739,7 @@ def execute(args: argparse.Namespace) -> Path:
         args.seed,
     )
     kwargs["env_variant"] = env_variant
+    kwargs["actor_bootstrap_scale"] = actor_bootstrap_scale
     profile = get_solver_profile(args.solver_profile)
     previous_directory = Path.cwd()
     try:
