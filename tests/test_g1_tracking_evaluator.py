@@ -31,6 +31,33 @@ RMR_ACTIONS = Path(
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    def test_prepare_evaluation_action_matches_training_squash_boundary(self):
+        from tools import evaluate_g1_tracking
+
+        self.assertTrue(
+            hasattr(evaluate_g1_tracking, "prepare_evaluation_action")
+        )
+        np.testing.assert_array_equal(
+            evaluate_g1_tracking.prepare_evaluation_action(
+                jnp.array([-2.0, 0.25, 2.0]), squash=True
+            ),
+            np.array([-1.0, 0.25, 1.0]),
+        )
+
+    def test_prepare_evaluation_action_preserves_unbounded_policy(self):
+        from tools import evaluate_g1_tracking
+
+        self.assertTrue(
+            hasattr(evaluate_g1_tracking, "prepare_evaluation_action")
+        )
+        action = jnp.array([-2.0, 0.25, 2.0])
+        np.testing.assert_array_equal(
+            evaluate_g1_tracking.prepare_evaluation_action(
+                action, squash=False
+            ),
+            np.asarray(action),
+        )
+
     def test_action_noise_only_visualization_disables_obs_noise_and_random_reset(self):
         from tools.evaluate_g1_tracking import resolve_training_visualization_controls
 
