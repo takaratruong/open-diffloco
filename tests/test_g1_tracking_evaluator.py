@@ -31,6 +31,22 @@ RMR_ACTIONS = Path(
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    def test_training_noise_schedule_is_checkpoint_exact(self):
+        from tools.evaluate_g1_tracking import training_action_noise_at_step
+
+        hparams = {
+            "action_noise_std_start": 1.0,
+            "action_noise_std_end": [0.2, 0.4],
+            "action_noise_schedule_steps": 800,
+        }
+
+        np.testing.assert_allclose(
+            training_action_noise_at_step(hparams, 200, action_dim=2),
+            [0.8, 0.85],
+            rtol=0.0,
+            atol=1e-12,
+        )
+
     def test_parser_defaults_to_complete_named_reference_suffix(self):
         args = build_parser().parse_args(
             [
