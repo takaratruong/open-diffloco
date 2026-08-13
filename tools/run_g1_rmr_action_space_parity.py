@@ -143,7 +143,8 @@ def build_decoupled_early_learning_kwargs(
         checkpoint_interval=98_304,
         curriculum_grace=98_304,
         curriculum_steps=1,
-        actor_lr=2.5e-3,
+        actor_lr=5e-3,
+        action_noise_std_start=np.asarray(RMR_ACTION_STD).tolist(),
     )
     return kwargs
 
@@ -415,7 +416,7 @@ def _require_early_learning_hparams(hparams: dict[str, object]) -> None:
         "com_offset_range": [0.0, 0.0, 0.0],
         "domain_randomization": False,
         "push_velocity_range": [0.0, 0.0],
-        "action_noise_std_start": 1.0,
+        "action_noise_std_start": np.asarray(RMR_ACTION_STD).tolist(),
         "action_noise_std_end": np.asarray(RMR_ACTION_STD).tolist(),
         "action_noise_schedule_steps": 800_000,
         "actor_cagrad": True,
@@ -434,7 +435,7 @@ def _require_early_learning_hparams(hparams: dict[str, object]) -> None:
         "actor_torso_wrench_assistance_conditioning": False,
         "curriculum_grace": 98_304,
         "curriculum_steps": 1,
-        "actor_lr": 2.5e-3,
+        "actor_lr": 5e-3,
     }
     for key, expected_value in expected.items():
         if hparams.get(key) != expected_value:
