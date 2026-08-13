@@ -49,6 +49,22 @@ def test_fresh_fixed_noise_builder_is_exact_and_has_dense_checkpoints() -> None:
     assert kwargs["actor_reference_lookahead_steps"] == (4, 8, 12)
     assert kwargs["actor_reference_preview_mode"] == "delta"
     assert kwargs["actor_bootstrap_scale"] == 0.0
+    assert kwargs["actor_lr"] == 5e-3
+
+
+def test_fresh_fixed_noise_builder_accepts_low_actor_lr_recipe() -> None:
+    from tools.run_g1_fresh_fixed_noise_training import (
+        build_fresh_fixed_noise_kwargs,
+    )
+
+    kwargs = build_fresh_fixed_noise_kwargs(
+        "g1-4x5",
+        Path("/tmp/reference.npz"),
+        seed=3,
+        actor_lr=1e-3,
+    )
+
+    assert kwargs["actor_lr"] == 1e-3
 
 
 def test_episode_action_diagnostics_expose_saturation() -> None:

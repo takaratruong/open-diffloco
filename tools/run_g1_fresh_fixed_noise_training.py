@@ -40,6 +40,8 @@ def build_fresh_fixed_noise_kwargs(
     profile_name: str,
     reference_path: str | Path,
     seed: int,
+    *,
+    actor_lr: float = 5e-3,
 ) -> dict[str, Any]:
     """Build the immutable fresh actor diagnostic contract."""
     kwargs = build_canonical_kwargs(profile_name, reference_path, seed)
@@ -87,6 +89,7 @@ def build_fresh_fixed_noise_kwargs(
         actor_reference_preview_mode="delta",
         actor_bootstrap_scale=0.0,
         actor_bootstrap_delay_steps=0,
+        actor_lr=actor_lr,
     )
     return kwargs
 
@@ -95,9 +98,13 @@ def build_gate_kwargs(
     profile_name: str,
     reference_path: str | Path,
     seed: int,
+    *,
+    actor_lr: float = 5e-3,
 ) -> dict[str, Any]:
     """Use the exact contract for one effective-512 H12 update."""
-    kwargs = build_fresh_fixed_noise_kwargs(profile_name, reference_path, seed)
+    kwargs = build_fresh_fixed_noise_kwargs(
+        profile_name, reference_path, seed, actor_lr=actor_lr
+    )
     kwargs.update(
         total_steps=6_144,
         checkpoint_interval=6_144,
@@ -108,7 +115,11 @@ def build_gate_kwargs(
 
 
 def validate_preflight(
-    *, repository: Path, reference_path: Path, code_commit: str
+    *,
+    repository: Path,
+    reference_path: Path,
+    code_commit: str,
+    actor_lr: float = 5e-3,
 ) -> dict[str, Any]:
     """Bind code and runtime assets before allocating a GPU."""
     head = _git_output(repository, "rev-parse", "HEAD")
@@ -132,6 +143,7 @@ def validate_preflight(
         **assets,
         "fresh_initialization": True,
         "action_noise_std": ACTION_NOISE_STD,
+        "actor_lr": actor_lr,
         "observation_noise": False,
         "reset_noise": False,
         "domain_randomization": False,
@@ -141,7 +153,7 @@ def validate_preflight(
 
 
 def validate_training_artifacts(
-    run_directory: Path, *, gate_only: bool
+    run_directory: Path, *, gate_only: bool, actor_lr: float = 5e-3
 ) -> dict[str, Any]:
     """Reject incomplete, nonfinite, or contract-drifting training output."""
     run_directory = run_directory.resolve()
@@ -149,9 +161,15 @@ def validate_training_artifacts(
         (run_directory / "hparams.json").read_text(encoding="utf-8")
     )
     expected = build_gate_kwargs(
-        "g1-4x5", hparams["reference_path"], int(hparams["seed"])
+        "g1-4x5",
+        hparams["reference_path"],
+        int(hparams["seed"]),
+        actor_lr=actor_lr,
     ) if gate_only else build_fresh_fixed_noise_kwargs(
-        "g1-4x5", hparams["reference_path"], int(hparams["seed"])
+        "g1-4x5",
+        hparams["reference_path"],
+        int(hparams["seed"]),
+        actor_lr=actor_lr,
     )
     persisted = {
         "total_steps",
@@ -183,6 +201,7 @@ def validate_training_artifacts(
         "actor_reference_lookahead_steps",
         "actor_reference_preview_mode",
         "actor_bootstrap_scale",
+        "actor_lr",
     }
     for key in persisted:
         expected_value = expected[key]
@@ -237,6 +256,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--code-commit", required=True)
     parser.add_argument("--gate-only", action="store_true")
+    parser.add_argument(
+        "--actor-lr", type=float, choices=(1e-3, 5e-3), default=5e-3
+    )
     return parser
 
 
@@ -248,11 +270,17 @@ def execute(args: argparse.Namespace) -> Path:
         repository=repository,
         reference_path=args.reference_path,
         code_commit=args.code_commit,
+        actor_lr=args.actor_lr,
     )
     _write_json_atomically(output_root / "fresh_fixed_020_preflight.json", preflight)
     configure_jax()
     builder = build_gate_kwargs if args.gate_only else build_fresh_fixed_noise_kwargs
-    kwargs = builder(args.solver_profile, args.reference_path.resolve(), args.seed)
+    kwargs = builder(
+        args.solver_profile,
+        args.reference_path.resolve(),
+        args.seed,
+        actor_lr=args.actor_lr,
+    )
     profile = get_solver_profile(args.solver_profile)
     previous_directory = Path.cwd()
     try:
@@ -263,7 +291,7 @@ def execute(args: argparse.Namespace) -> Path:
         os.chdir(previous_directory)
     run_directory = (output_root / relative_save_dir).resolve()
     validation = validate_training_artifacts(
-        run_directory, gate_only=args.gate_only
+        run_directory, gate_only=args.gate_only, actor_lr=args.actor_lr
     )
     _write_json_atomically(
         output_root / "fresh_fixed_020_training_validation.json", validation
