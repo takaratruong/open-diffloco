@@ -249,6 +249,13 @@ def scale_policy_action(action: jax.Array, gain: float) -> jax.Array:
     return action * gain
 
 
+def prepare_evaluation_action(
+    action: jax.Array, *, squash: bool
+) -> jax.Array:
+    """Apply the same post-noise action boundary used by SHAC training."""
+    return jnp.clip(action, -1.0, 1.0) if squash else action
+
+
 def _load_policy(
     env: G1TrackingEnv,
     checkpoint: Path | None,
@@ -692,6 +699,7 @@ def main() -> None:
     action_means = []
     action_epsilons = []
     noisy_actions = []
+    effective_actions = []
 
     try:
         remaining = remaining_reference_transitions(
@@ -774,6 +782,12 @@ def main() -> None:
             action_means.append(np.asarray(action_mean))
             action_epsilons.append(np.asarray(epsilon))
             noisy_actions.append(np.asarray(action))
+        action = prepare_evaluation_action(
+            action,
+            squash=getattr(env, "squash_actor_actions", True),
+        )
+        if args.training_distribution_rollout:
+            effective_actions.append(np.asarray(action))
         step_scope = (
             nullcontext() if profile is None else solver_context(profile)
         )
@@ -857,6 +871,7 @@ def main() -> None:
             epsilon=np.asarray(action_epsilons),
             action_std=np.asarray(current_training_noise),
             noisy_action=np.asarray(noisy_actions),
+            effective_action=np.asarray(effective_actions),
         )
     from tools.evaluate_g1_phase_grid import make_contact_sheet
 
