@@ -47,6 +47,26 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
             atol=1e-12,
         )
 
+    def test_training_rollout_keeps_h12_even_across_terminal_reset(self):
+        from tools.evaluate_g1_tracking import resolve_rollout_step_limit
+
+        self.assertEqual(
+            resolve_rollout_step_limit(
+                remaining=3,
+                requested=12,
+                training_distribution_rollout=True,
+            ),
+            12,
+        )
+        self.assertEqual(
+            resolve_rollout_step_limit(
+                remaining=3,
+                requested=12,
+                training_distribution_rollout=False,
+            ),
+            3,
+        )
+
     def test_parser_defaults_to_complete_named_reference_suffix(self):
         args = build_parser().parse_args(
             [
