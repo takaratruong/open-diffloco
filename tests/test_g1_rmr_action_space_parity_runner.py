@@ -8,7 +8,256 @@ from unittest import mock
 import numpy as np
 
 
+def _write_early_learning_fixture(run: Path) -> None:
+    from src.core.rmr_action_noise import RMR_ACTION_STD
+    from tools.prepare_g1_rmr_reference import sha256_file
+
+    hparams = {
+        "total_steps": 98_304,
+        "env_variant": "g1_tracking_rmr_50hz_decoupled_exploration",
+        "squash_actor_actions": False,
+        "squash_actor_mean": True,
+        "clip_sampled_actor_actions": False,
+        "actor_observation_noise": False,
+        "reference_reset_noise_scale": 0.0,
+        "reference_residual_control": True,
+        "reference_residual_scale": 1.0,
+        "kp_range": [35.0, 35.0],
+        "kd_range": [0.5, 0.5],
+        "friction_range": [1.0, 1.0],
+        "mass_range": [1.0, 1.0],
+        "com_offset_range": [0.0, 0.0, 0.0],
+        "domain_randomization": False,
+        "randomization_com_body_name": "torso_link",
+        "randomization_uses_curriculum": False,
+        "push_velocity_range": [0.0, 0.0],
+        "action_noise_std_start": 1.0,
+        "action_noise_std_end": np.asarray(RMR_ACTION_STD).tolist(),
+        "action_noise_schedule_steps": 800_000,
+        "actor_cagrad": True,
+        "actor_phase_bin_count": 5,
+        "gradient_accumulation_steps": 2,
+        "num_envs": 256,
+        "unroll_length": 12,
+        "actor_reference_lookahead_steps": [4, 8, 12],
+        "reference_path": "/tmp/dance.npz",
+        "reference_stride": 1,
+        "actor_history_len": 10,
+        "actor_reference_preview_mode": "absolute",
+        "solver_profile": "g1-4x5",
+        "actor_layer_norm": True,
+        "actor_hidden": [512, 256, 128],
+    }
+    (run / "hparams.json").write_text(json.dumps(hparams))
+    checkpoint = run / "checkpoint_step_098304.pkl"
+    checkpoint.write_bytes(b"checkpoint")
+    (run / "checkpoint_phase_metrics.json").write_text(
+        json.dumps(
+            [
+                {
+                    "step": 98_304,
+                    "actor_cagrad_valid": True,
+                    "actor_cagrad_bin_counts": [1, 2, 3, 4, 5],
+                    "actor_cagrad_combined_norm": 2.0,
+                }
+            ]
+        )
+    )
+    (run / "diag_log.json").write_text(
+        json.dumps(
+            [
+                {
+                    "step": 98_304,
+                    "actor_grad": 2.0,
+                    "actor_update_norm": 0.1,
+                }
+            ]
+        )
+    )
+    evidence = run / "early_learning_evidence" / "checkpoint_step_098304"
+    noisy = evidence / "noisy"
+    clean = evidence / "clean"
+    noisy.mkdir(parents=True)
+    clean.mkdir(parents=True)
+    checkpoint_sha = sha256_file(checkpoint)
+    common = {
+        "checkpoint_sha256": checkpoint_sha,
+        "reference_sha256": (
+            "bf8c8b407062d1b309440f4c1787c345b04d79501ea75f615e5b41c0c5ebb6db"
+        ),
+        "solver_profile": "g1-4x5",
+        "evaluation_start_phase": 0,
+    }
+    (noisy / "summary.json").write_text(
+        json.dumps(
+            {
+                **common,
+                "steps": 120,
+                "training_distribution_rollout": True,
+                "training_observation_noise": False,
+                "training_exact_reset_phase": 0,
+                "training_checkpoint_step": 98_304,
+            }
+        )
+    )
+    (clean / "summary.json").write_text(
+        json.dumps(
+            {
+                **common,
+                "steps": 45,
+                "training_distribution_rollout": False,
+            }
+        )
+    )
+    mean = np.full((120, 29), 0.1)
+    epsilon = np.ones((120, 29))
+    progress = 98_304 / 800_000
+    std = 1.0 + progress * (
+        np.asarray(RMR_ACTION_STD, dtype=np.float64) - 1.0
+    )
+    np.savez_compressed(
+        noisy / "training_action_noise.npz",
+        action_mean=mean,
+        epsilon=epsilon,
+        action_std=std,
+        noisy_action=mean + epsilon * std,
+        effective_action=mean + epsilon * std,
+    )
+    columns = np.asarray(["step", "done", "terminal"])
+    values = np.zeros((120, 3))
+    values[:, 0] = np.arange(120)
+    values[51, 1:] = 1.0
+    np.savez_compressed(
+        noisy / "evaluation.npz", columns=columns, values=values
+    )
+    for path in (
+        noisy / "training_rollout.mp4",
+        noisy / "contact_sheet.png",
+        clean / "evaluation.mp4",
+        clean / "contact_sheet.png",
+    ):
+        path.write_bytes(b"evidence")
+
+
 class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
+    def test_early_learning_commands_render_noisy_training_and_clean_rollouts(self):
+        from tools.run_g1_rmr_action_space_parity import (
+            build_early_learning_rollout_commands,
+        )
+
+        with TemporaryDirectory() as directory:
+            run = Path(directory)
+            _write_early_learning_fixture(run)
+            noisy, clean = build_early_learning_rollout_commands(
+                repository=Path("/repo"), run_directory=run
+            )
+
+        self.assertIn("--training-distribution-rollout", noisy)
+        self.assertIn("--continue-training-after-terminal", noisy)
+        self.assertEqual(noisy[noisy.index("--max-steps") + 1], "120")
+        self.assertIn("--exact-training-reset-phase", noisy)
+        self.assertNotIn("--training-distribution-rollout", clean)
+        self.assertEqual(clean[clean.index("--phase") + 1], "0")
+
+    def test_early_learning_validator_requires_usable_mean_and_survival(self):
+        from tools.run_g1_rmr_action_space_parity import (
+            validate_early_learning_artifacts,
+        )
+
+        with TemporaryDirectory() as directory:
+            run = Path(directory)
+            _write_early_learning_fixture(run)
+
+            result = validate_early_learning_artifacts(run)
+            self.assertTrue(result["valid"])
+            self.assertEqual(result["step"], 98_304)
+            self.assertEqual(result["updates"], 16)
+            self.assertEqual(result["noisy_first_episode_survival"], 52)
+            self.assertEqual(result["clean_phase_zero_survival"], 45)
+            self.assertLess(result["actor_mean_saturation_fraction"], 0.20)
+
+            noisy = (
+                run
+                / "early_learning_evidence"
+                / "checkpoint_step_098304"
+                / "noisy"
+            )
+            with np.load(noisy / "training_action_noise.npz") as archive:
+                payload = {key: archive[key] for key in archive.files}
+            payload["action_mean"] = np.full((120, 29), 0.99)
+            payload["noisy_action"] = (
+                payload["action_mean"]
+                + payload["epsilon"] * payload["action_std"]
+            )
+            payload["effective_action"] = payload["noisy_action"].copy()
+            np.savez_compressed(noisy / "training_action_noise.npz", **payload)
+            with self.assertRaisesRegex(ValueError, "saturation"):
+                validate_early_learning_artifacts(run)
+
+    def test_early_learning_validator_rejects_short_clean_rollout(self):
+        from tools.run_g1_rmr_action_space_parity import (
+            validate_early_learning_artifacts,
+        )
+
+        with TemporaryDirectory() as directory:
+            run = Path(directory)
+            _write_early_learning_fixture(run)
+            clean_summary = (
+                run
+                / "early_learning_evidence"
+                / "checkpoint_step_098304"
+                / "clean"
+                / "summary.json"
+            )
+            summary = json.loads(clean_summary.read_text())
+            summary["steps"] = 39
+            clean_summary.write_text(json.dumps(summary))
+
+            with self.assertRaisesRegex(ValueError, "clean phase-zero"):
+                validate_early_learning_artifacts(run)
+
+    def test_early_learning_validator_rejects_missing_media(self):
+        from tools.run_g1_rmr_action_space_parity import (
+            validate_early_learning_artifacts,
+        )
+
+        with TemporaryDirectory() as directory:
+            run = Path(directory)
+            _write_early_learning_fixture(run)
+            (
+                run
+                / "early_learning_evidence"
+                / "checkpoint_step_098304"
+                / "noisy"
+                / "training_rollout.mp4"
+            ).unlink()
+
+            with self.assertRaisesRegex(ValueError, "media"):
+                validate_early_learning_artifacts(run)
+
+    def test_early_learning_validator_recomputes_noisy_action(self):
+        from tools.run_g1_rmr_action_space_parity import (
+            validate_early_learning_artifacts,
+        )
+
+        with TemporaryDirectory() as directory:
+            run = Path(directory)
+            _write_early_learning_fixture(run)
+            tape = (
+                run
+                / "early_learning_evidence"
+                / "checkpoint_step_098304"
+                / "noisy"
+                / "training_action_noise.npz"
+            )
+            with np.load(tape) as archive:
+                payload = {key: archive[key] for key in archive.files}
+            payload["noisy_action"] = np.zeros((120, 29))
+            np.savez_compressed(tape, **payload)
+
+            with self.assertRaisesRegex(ValueError, "reparameterized"):
+                validate_early_learning_artifacts(run)
+
     def test_decoupled_early_learning_kwargs_change_only_bounded_budget(self):
         from tools.run_g1_rmr_action_space_parity import (
             build_decoupled_early_learning_kwargs,

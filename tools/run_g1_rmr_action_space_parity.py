@@ -24,7 +24,11 @@ from src.envs.g1_tracking.solver_profiles import (
     get_solver_profile,
     solver_context,
 )
-from tools.evaluate_g1_tracking import validate_training_action_mean
+from tools.evaluate_g1_tracking import (
+    training_action_noise_at_step,
+    validate_training_action_mean,
+)
+from tools.log_g1_training_episodes import build_commands
 from tools.prepare_g1_rmr_reference import sha256_file
 from tools.run_canonical_g1_shac import build_canonical_kwargs
 from tools.run_g1_root_recovery_continuation import validate_runtime_assets
@@ -360,6 +364,252 @@ def render_decoupled_gate_rollout(
     subprocess.run(command, cwd=repository, check=True)
 
 
+def build_early_learning_rollout_commands(
+    *, repository: Path, run_directory: Path
+) -> tuple[list[str], list[str]]:
+    """Build checkpoint-bound noisy and clean phase-zero evaluations."""
+    checkpoint = run_directory / "checkpoint_step_098304.pkl"
+    noisy, clean = build_commands(
+        checkpoint=checkpoint,
+        output_root=run_directory / "early_learning_evidence",
+        evaluator=repository / "tools/evaluate_g1_tracking.py",
+    )
+    noisy.extend(
+        [
+            "--max-steps",
+            "120",
+            "--continue-training-after-terminal",
+        ]
+    )
+    return noisy, clean
+
+
+def render_decoupled_early_learning_rollouts(
+    *, repository: Path, run_directory: Path
+) -> None:
+    """Render the exact stochastic training slice and clean deployment arm."""
+    for command in build_early_learning_rollout_commands(
+        repository=repository, run_directory=run_directory
+    ):
+        subprocess.run(command, cwd=repository, check=True)
+
+
+def _require_early_learning_hparams(hparams: dict[str, object]) -> None:
+    expected = {
+        "total_steps": 98_304,
+        "env_variant": "g1_tracking_rmr_50hz_decoupled_exploration",
+        "squash_actor_actions": False,
+        "squash_actor_mean": True,
+        "clip_sampled_actor_actions": False,
+        "actor_observation_noise": False,
+        "reference_reset_noise_scale": 0.0,
+        "reference_residual_control": True,
+        "reference_residual_scale": 1.0,
+        "kp_range": [35.0, 35.0],
+        "kd_range": [0.5, 0.5],
+        "friction_range": [1.0, 1.0],
+        "mass_range": [1.0, 1.0],
+        "com_offset_range": [0.0, 0.0, 0.0],
+        "domain_randomization": False,
+        "push_velocity_range": [0.0, 0.0],
+        "action_noise_std_start": 1.0,
+        "action_noise_std_end": np.asarray(RMR_ACTION_STD).tolist(),
+        "action_noise_schedule_steps": 800_000,
+        "actor_cagrad": True,
+        "actor_phase_bin_count": 5,
+        "gradient_accumulation_steps": 2,
+        "num_envs": 256,
+        "unroll_length": 12,
+        "actor_reference_lookahead_steps": [4, 8, 12],
+        "reference_stride": 1,
+        "solver_profile": "g1-4x5",
+    }
+    for key, expected_value in expected.items():
+        if hparams.get(key) != expected_value:
+            raise ValueError(
+                f"early-learning hparams {key} does not match treatment"
+            )
+
+
+def _first_episode_survival(path: Path, *, expected_steps: int) -> int:
+    with np.load(path, allow_pickle=False) as archive:
+        columns = tuple(map(str, archive["columns"]))
+        values = np.asarray(archive["values"], dtype=np.float64)
+    if values.shape[0] != expected_steps or values.ndim != 2:
+        raise ValueError("noisy rollout records must contain exactly 120 rows")
+    try:
+        done = values[:, columns.index("done")]
+        terminal = values[:, columns.index("terminal")]
+    except (ValueError, IndexError) as error:
+        raise ValueError("noisy rollout terminal columns are missing") from error
+    if not np.isfinite(values).all():
+        raise ValueError("noisy rollout records are nonfinite")
+    ended = np.flatnonzero((done > 0.5) | (terminal > 0.5))
+    return int(ended[0] + 1) if ended.size else expected_steps
+
+
+def validate_early_learning_artifacts(
+    run_directory: Path,
+) -> dict[str, object]:
+    """Fail closed unless the 16-update treatment remains learnable."""
+    run_directory = run_directory.resolve()
+    hparams = json.loads(
+        (run_directory / "hparams.json").read_text(encoding="utf-8")
+    )
+    _require_early_learning_hparams(hparams)
+    checkpoint = run_directory / "checkpoint_step_098304.pkl"
+    if not checkpoint.is_file():
+        raise ValueError("early-learning checkpoint is missing")
+    checkpoint_sha = sha256_file(checkpoint)
+
+    rows = json.loads(
+        (run_directory / "checkpoint_phase_metrics.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    if not isinstance(rows, list) or len(rows) != 1:
+        raise ValueError("early-learning checkpoint telemetry is incomplete")
+    row = rows[0]
+    counts = row.get("actor_cagrad_bin_counts")
+    combined_norm = float(
+        row.get("actor_cagrad_combined_norm", math.nan)
+    )
+    if (
+        row.get("step") != 98_304
+        or row.get("actor_cagrad_valid") is not True
+        or not isinstance(counts, list)
+        or len(counts) != 5
+        or any(
+            not math.isfinite(float(value)) or float(value) <= 0.0
+            for value in counts
+        )
+        or not math.isfinite(combined_norm)
+        or combined_norm <= 0.0
+    ):
+        raise ValueError("early-learning CAGrad telemetry is invalid")
+    diagnostics = json.loads(
+        (run_directory / "diag_log.json").read_text(encoding="utf-8")
+    )
+    if not isinstance(diagnostics, list) or not diagnostics:
+        raise ValueError("early-learning diagnostics are missing")
+    final = diagnostics[-1]
+    if final.get("step") != 98_304:
+        raise ValueError("early-learning diagnostic endpoint is invalid")
+    for key in ("actor_grad", "actor_update_norm"):
+        value = float(final.get(key, math.nan))
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"early-learning {key} is not finite and positive")
+
+    evidence = (
+        run_directory
+        / "early_learning_evidence"
+        / "checkpoint_step_098304"
+    )
+    noisy = evidence / "noisy"
+    clean = evidence / "clean"
+    media = (
+        noisy / "training_rollout.mp4",
+        noisy / "contact_sheet.png",
+        clean / "evaluation.mp4",
+        clean / "contact_sheet.png",
+    )
+    if any(not path.is_file() or path.stat().st_size == 0 for path in media):
+        raise ValueError("early-learning rollout media is incomplete")
+    noisy_summary = json.loads(
+        (noisy / "summary.json").read_text(encoding="utf-8")
+    )
+    clean_summary = json.loads(
+        (clean / "summary.json").read_text(encoding="utf-8")
+    )
+    common_expected = {
+        "checkpoint_sha256": checkpoint_sha,
+        "reference_sha256": EXPECTED_REFERENCE_SHA256,
+        "solver_profile": "g1-4x5",
+        "evaluation_start_phase": 0,
+    }
+    if any(
+        noisy_summary.get(key) != value
+        or clean_summary.get(key) != value
+        for key, value in common_expected.items()
+    ):
+        raise ValueError("early-learning rollout provenance is invalid")
+    if (
+        noisy_summary.get("training_distribution_rollout") is not True
+        or noisy_summary.get("training_observation_noise") is not False
+        or noisy_summary.get("training_exact_reset_phase") != 0
+        or noisy_summary.get("training_checkpoint_step") != 98_304
+        or noisy_summary.get("steps") != 120
+        or clean_summary.get("training_distribution_rollout") is not False
+    ):
+        raise ValueError("early-learning rollout mode is invalid")
+
+    tape_path = noisy / "training_action_noise.npz"
+    with np.load(tape_path, allow_pickle=False) as archive:
+        arrays = {
+            key: np.asarray(archive[key], dtype=np.float64)
+            for key in (
+                "action_mean",
+                "epsilon",
+                "noisy_action",
+                "effective_action",
+            )
+        }
+        action_std = np.asarray(archive["action_std"], dtype=np.float64)
+    if any(value.shape != (120, 29) for value in arrays.values()):
+        raise ValueError("early-learning action tapes must have shape (120, 29)")
+    if action_std.shape != (29,):
+        raise ValueError("early-learning action std must have shape (29,)")
+    if any(not np.isfinite(value).all() for value in arrays.values()) or not np.isfinite(
+        action_std
+    ).all():
+        raise ValueError("early-learning action tape is nonfinite")
+    action_mean = arrays["action_mean"]
+    expected_std = training_action_noise_at_step(
+        hparams, 98_304, action_dim=29
+    )
+    if not np.allclose(action_std, expected_std, rtol=0.0, atol=1e-12):
+        raise ValueError("early-learning action std does not match training")
+    reconstructed = action_mean + arrays["epsilon"] * action_std
+    if not np.allclose(
+        arrays["noisy_action"], reconstructed, rtol=0.0, atol=1e-12
+    ) or not np.array_equal(
+        arrays["effective_action"], arrays["noisy_action"]
+    ):
+        raise ValueError("early-learning reparameterized action tape is invalid")
+    validate_training_action_mean(action_mean)
+    mean_abs = np.abs(action_mean)
+    mean_max = float(np.max(mean_abs))
+    mean_rms = float(
+        np.sqrt(np.mean(np.square(action_mean, dtype=np.float64)))
+    )
+    saturation = float(np.mean(mean_abs >= 0.95))
+    if saturation >= 0.20:
+        raise ValueError("early-learning actor mean saturation is too high")
+    noisy_survival = _first_episode_survival(
+        noisy / "evaluation.npz", expected_steps=120
+    )
+    clean_survival = int(clean_summary.get("steps", -1))
+    if clean_survival < 40:
+        raise ValueError("clean phase-zero survival is below 40 transitions")
+    return {
+        "protocol": "g1-bounded-mean-early-learning-validation-v1",
+        "valid": True,
+        "step": 98_304,
+        "updates": 16,
+        "checkpoint_sha256": checkpoint_sha,
+        "actor_cagrad_combined_norm": combined_norm,
+        "actor_grad": float(final["actor_grad"]),
+        "actor_update_norm": float(final["actor_update_norm"]),
+        "actor_mean_rms": mean_rms,
+        "actor_mean_max_abs": mean_max,
+        "actor_mean_saturation_fraction": saturation,
+        "noisy_first_episode_survival": noisy_survival,
+        "clean_phase_zero_survival": clean_survival,
+        "training_action_noise_sha256": sha256_file(tape_path),
+        "training_rollout_sha256": sha256_file(noisy / "evaluation.npz"),
+    }
+
+
 def execute(args: argparse.Namespace) -> Path:
     """Preflight and launch either the one-update gate or full fresh run."""
     validate_mode_args(args)
@@ -422,6 +672,17 @@ def execute(args: argparse.Namespace) -> Path:
         _write_json_atomically(
             output_root / "action_space_parity_gate_validation.json",
             gate_validation,
+        )
+    elif getattr(args, "early_learning_gate", False):
+        render_decoupled_early_learning_rollouts(
+            repository=repository,
+            run_directory=run_directory,
+        )
+        early_validation = validate_early_learning_artifacts(run_directory)
+        _write_json_atomically(
+            output_root
+            / "action_space_parity_early_learning_validation.json",
+            early_validation,
         )
     return run_directory
 

@@ -96,6 +96,7 @@ def resolve_training_visualization_controls(
     overrides_requested = (
         args.disable_training_observation_noise
         or args.exact_training_reset_phase is not None
+        or args.continue_training_after_terminal
     )
     if overrides_requested and not args.training_distribution_rollout:
         raise ValueError(
@@ -110,7 +111,10 @@ def resolve_training_visualization_controls(
         exact_reset_phase=args.exact_training_reset_phase,
         continue_after_terminal=(
             args.training_distribution_rollout
-            and args.exact_training_reset_phase is None
+            and (
+                args.exact_training_reset_phase is None
+                or args.continue_training_after_terminal
+            )
         ),
         force_zero_reset_noise=args.exact_training_reset_phase is not None,
     )
@@ -476,6 +480,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--exact-training-reset-phase",
         type=int,
         help="retain training action noise but reset exactly at this reference phase",
+    )
+    parser.add_argument(
+        "--continue-training-after-terminal",
+        action="store_true",
+        help=(
+            "continue an exact-phase training visualization through the "
+            "environment's ordinary auto-resets"
+        ),
     )
     parser.add_argument(
         "--training-initialization",

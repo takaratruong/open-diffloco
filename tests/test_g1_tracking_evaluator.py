@@ -94,6 +94,26 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         self.assertFalse(controls.continue_after_terminal)
         self.assertTrue(controls.force_zero_reset_noise)
 
+    def test_exact_training_rollout_can_continue_through_auto_resets(self):
+        from tools.evaluate_g1_tracking import (
+            resolve_training_visualization_controls,
+        )
+
+        args = build_parser().parse_args(
+            [
+                "--output-dir",
+                "/tmp/g1-evaluation",
+                "--training-distribution-rollout",
+                "--disable-training-observation-noise",
+                "--exact-training-reset-phase",
+                "0",
+                "--continue-training-after-terminal",
+            ]
+        )
+
+        controls = resolve_training_visualization_controls(args)
+        self.assertTrue(controls.continue_after_terminal)
+
     def test_training_visualization_overrides_require_training_rollout(self):
         from tools.evaluate_g1_tracking import resolve_training_visualization_controls
 
