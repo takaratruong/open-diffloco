@@ -66,6 +66,18 @@ def training_action_noise_at_step(
     return start + progress * (end - start)
 
 
+def resolve_rollout_step_limit(
+    *,
+    remaining: int,
+    requested: int | None,
+    training_distribution_rollout: bool,
+) -> int:
+    """Keep training samples running through the environment's auto-resets."""
+    if training_distribution_rollout:
+        return 120 if requested is None else requested
+    return remaining if requested is None else min(requested, remaining)
+
+
 def configure_jax() -> None:
     """Match the float64 precision used by G1 training."""
     jax.config.update("jax_enable_x64", True)
@@ -634,10 +646,10 @@ def main() -> None:
         )
     except ValueError as error:
         parser.error(str(error))
-    step_limit = (
-        remaining
-        if args.max_steps is None
-        else min(args.max_steps, remaining)
+    step_limit = resolve_rollout_step_limit(
+        remaining=remaining,
+        requested=args.max_steps,
+        training_distribution_rollout=args.training_distribution_rollout,
     )
 
     for step in range(step_limit):
@@ -736,7 +748,7 @@ def main() -> None:
                 float(state.metrics["termination_distal_z_error"]),
             )
         )
-        if float(state.done) > 0.5:
+        if float(state.done) > 0.5 and not args.training_distribution_rollout:
             break
 
     columns = (
