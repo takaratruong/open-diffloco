@@ -125,6 +125,24 @@ def build_decoupled_gate_kwargs(
     return kwargs
 
 
+def build_decoupled_early_learning_kwargs(
+    profile_name: str,
+    reference_path: str | Path,
+    seed: int,
+) -> dict:
+    """Run 16 effective-512 H12 updates of decoupled exploration."""
+    kwargs = build_decoupled_exploration_kwargs(
+        profile_name, reference_path, seed
+    )
+    kwargs.update(
+        total_steps=98_304,
+        checkpoint_interval=98_304,
+        curriculum_grace=98_304,
+        curriculum_steps=1,
+    )
+    return kwargs
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -144,9 +162,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("g1_rmr_action_space_parity_runs"),
     )
     parser.add_argument("--code-commit", required=True)
-    parser.add_argument("--gate-only", action="store_true")
+    gate = parser.add_mutually_exclusive_group()
+    gate.add_argument("--gate-only", action="store_true")
+    gate.add_argument("--early-learning-gate", action="store_true")
     parser.add_argument("--decoupled-exploration", action="store_true")
     return parser
+
+
+def validate_mode_args(args: argparse.Namespace) -> None:
+    """Reject an early-learning treatment without its bounded actor mean."""
+    if getattr(args, "early_learning_gate", False) and not getattr(
+        args, "decoupled_exploration", False
+    ):
+        raise ValueError(
+            "--early-learning-gate requires --decoupled-exploration"
+        )
 
 
 def validate_preflight(
@@ -332,6 +362,7 @@ def render_decoupled_gate_rollout(
 
 def execute(args: argparse.Namespace) -> Path:
     """Preflight and launch either the one-update gate or full fresh run."""
+    validate_mode_args(args)
     repository = Path(__file__).resolve().parents[1]
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -350,11 +381,12 @@ def execute(args: argparse.Namespace) -> Path:
     )
     configure_jax()
     if getattr(args, "decoupled_exploration", False):
-        builder = (
-            build_decoupled_gate_kwargs
-            if args.gate_only
-            else build_decoupled_exploration_kwargs
-        )
+        if getattr(args, "early_learning_gate", False):
+            builder = build_decoupled_early_learning_kwargs
+        elif args.gate_only:
+            builder = build_decoupled_gate_kwargs
+        else:
+            builder = build_decoupled_exploration_kwargs
     else:
         builder = (
             build_parity_gate_kwargs

@@ -9,6 +9,37 @@ import numpy as np
 
 
 class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
+    def test_decoupled_early_learning_kwargs_change_only_bounded_budget(self):
+        from tools.run_g1_rmr_action_space_parity import (
+            build_decoupled_early_learning_kwargs,
+            build_decoupled_exploration_kwargs,
+        )
+
+        full = build_decoupled_exploration_kwargs(
+            "g1-4x5", Path("/tmp/dance.npz"), seed=3
+        )
+        early = build_decoupled_early_learning_kwargs(
+            "g1-4x5", Path("/tmp/dance.npz"), seed=3
+        )
+
+        differing = {
+            key
+            for key in full
+            if not np.array_equal(np.asarray(full[key]), np.asarray(early[key]))
+        }
+        self.assertEqual(
+            differing,
+            {
+                "total_steps",
+                "curriculum_grace",
+                "curriculum_steps",
+            },
+        )
+        self.assertEqual(early["total_steps"], 98_304)
+        self.assertEqual(early["checkpoint_interval"], 98_304)
+        self.assertEqual(early["curriculum_grace"], 98_304)
+        self.assertEqual(early["curriculum_steps"], 1)
+
     def test_decoupled_kwargs_bound_mean_without_clipping_noise(self):
         from tools.run_g1_rmr_action_space_parity import (
             build_decoupled_exploration_kwargs,
@@ -253,6 +284,52 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
         )
 
         self.assertTrue(args.gate_only)
+
+    def test_parser_accepts_early_learning_only_with_decoupled_exploration(self):
+        from tools.run_g1_rmr_action_space_parity import (
+            build_parser,
+            validate_mode_args,
+        )
+
+        args = build_parser().parse_args(
+            [
+                "--solver-profile",
+                "g1-4x5",
+                "--code-commit",
+                "0" * 40,
+                "--early-learning-gate",
+                "--decoupled-exploration",
+            ]
+        )
+        validate_mode_args(args)
+        self.assertTrue(args.early_learning_gate)
+
+        missing_decoupling = build_parser().parse_args(
+            [
+                "--solver-profile",
+                "g1-4x5",
+                "--code-commit",
+                "0" * 40,
+                "--early-learning-gate",
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "decoupled"):
+            validate_mode_args(missing_decoupling)
+
+    def test_parser_rejects_both_gate_modes(self):
+        from tools.run_g1_rmr_action_space_parity import build_parser
+
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(
+                [
+                    "--solver-profile",
+                    "g1-4x5",
+                    "--code-commit",
+                    "0" * 40,
+                    "--gate-only",
+                    "--early-learning-gate",
+                ]
+            )
 
     def test_preflight_binds_clean_code_reference_and_runtime_assets(self):
         from tools.run_g1_rmr_action_space_parity import (
