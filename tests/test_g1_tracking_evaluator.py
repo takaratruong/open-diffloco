@@ -67,6 +67,17 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
             3,
         )
 
+    def test_evaluator_compiles_the_environment_step_once(self):
+        from tools.evaluate_g1_tracking import build_compiled_step
+
+        env = SimpleNamespace(step=object())
+        compiled = object()
+        with mock.patch(
+            "tools.evaluate_g1_tracking.jax.jit", return_value=compiled
+        ) as jit:
+            self.assertIs(build_compiled_step(env), compiled)
+        jit.assert_called_once_with(env.step)
+
     def test_parser_defaults_to_complete_named_reference_suffix(self):
         args = build_parser().parse_args(
             [
