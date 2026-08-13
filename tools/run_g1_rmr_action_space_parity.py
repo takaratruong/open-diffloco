@@ -26,8 +26,10 @@ from tools.prepare_g1_rmr_reference import sha256_file
 from tools.run_canonical_g1_shac import build_canonical_kwargs
 from tools.run_g1_root_recovery_continuation import validate_runtime_assets
 from tools.run_g1_tracking_shac import configure_jax
-from tools.run_g1_zero_assistance_consolidation import _git_output
-from tools.run_g1_zero_assistance_consolidation import _write_json_atomically
+from tools.run_g1_zero_assistance_consolidation import (
+    _git_output,
+    _write_json_atomically,
+)
 
 
 EXPECTED_REFERENCE_SHA256 = (

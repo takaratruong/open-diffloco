@@ -1,6 +1,6 @@
+import json
 import unittest
 from argparse import Namespace
-import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -216,16 +216,18 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
         from tools.run_g1_rmr_action_space_parity import validate_preflight
 
         commit = "b" * 40
-        with mock.patch(
-            "tools.run_g1_rmr_action_space_parity._git_output",
-            side_effect=(commit, " M src/file.py"),
+        with (
+            mock.patch(
+                "tools.run_g1_rmr_action_space_parity._git_output",
+                side_effect=(commit, " M src/file.py"),
+            ),
+            self.assertRaisesRegex(ValueError, "clean"),
         ):
-            with self.assertRaisesRegex(ValueError, "clean"):
-                validate_preflight(
-                    repository=Path("/tmp/repository"),
-                    reference_path=Path("/tmp/dance.npz"),
-                    code_commit=commit,
-                )
+            validate_preflight(
+                repository=Path("/tmp/repository"),
+                reference_path=Path("/tmp/dance.npz"),
+                code_commit=commit,
+            )
 
     def test_execute_runs_the_one_update_gate_after_preflight(self):
         from tools import run_g1_rmr_action_space_parity as runner
