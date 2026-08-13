@@ -2,6 +2,7 @@
 
 import argparse
 from contextlib import nullcontext
+import json
 import math
 import pickle
 from pathlib import Path
@@ -43,6 +44,28 @@ EVALUATION_ENV_VARIANTS = (
 )
 
 
+def training_action_noise_at_step(
+    hparams: dict[str, object], step: int, *, action_dim: int
+) -> np.ndarray:
+    """Resolve the exact reparameterized action-noise scale at a checkpoint."""
+    schedule_steps = int(hparams["action_noise_schedule_steps"])
+    if schedule_steps <= 0 or step < 0:
+        raise ValueError("training action-noise schedule must be positive")
+
+    def endpoint(name: str) -> np.ndarray:
+        value = np.asarray(hparams[name], dtype=np.float64)
+        if value.ndim == 0:
+            value = np.full((action_dim,), float(value), dtype=np.float64)
+        if value.shape != (action_dim,) or not np.isfinite(value).all():
+            raise ValueError(f"{name} must be finite scalar or action vector")
+        return value
+
+    start = endpoint("action_noise_std_start")
+    end = endpoint("action_noise_std_end")
+    progress = np.clip(step / schedule_steps, 0.0, 1.0)
+    return start + progress * (end - start)
+
+
 def configure_jax() -> None:
     """Match the float64 precision used by G1 training."""
     jax.config.update("jax_enable_x64", True)
@@ -60,6 +83,13 @@ def make_evaluation_env(
     actor_history_len: int = 1,
     actor_reference_lookahead_steps: tuple[int, ...] = (),
     actor_reference_preview_mode: str = "absolute",
+    actor_observation_noise: bool = False,
+    domain_randomization: bool = False,
+    friction_range: tuple[float, float] = (1.0, 1.0),
+    kp_range: tuple[float, float] = (35.0, 35.0),
+    kd_range: tuple[float, float] = (0.5, 0.5),
+    com_offset_range: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    reference_reset_noise_scale: float = 0.0,
     reference_residual_control: bool = False,
     reference_residual_scale: float = 0.5,
 ) -> G1TrackingEnv:
@@ -72,8 +102,14 @@ def make_evaluation_env(
         "actor_history_len": actor_history_len,
         "actor_reference_lookahead_steps": actor_reference_lookahead_steps,
         "actor_reference_preview_mode": actor_reference_preview_mode,
-        "actor_observation_noise": False,
+        "actor_observation_noise": actor_observation_noise,
+        "domain_randomization": domain_randomization,
+        "friction_range": friction_range,
         "mass_range": (body_mass_scale, body_mass_scale),
+        "kp_range": kp_range,
+        "kd_range": kd_range,
+        "com_offset_range": com_offset_range,
+        "reference_reset_noise_scale": reference_reset_noise_scale,
         "effort_limit_scale": effort_limit_scale,
         "reference_residual_control": reference_residual_control,
         "reference_residual_scale": reference_residual_scale,
@@ -354,6 +390,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-actor-layer-norm", action="store_true")
     parser.add_argument("--random-actor-output-head", action="store_true")
     parser.add_argument(
+        "--training-distribution-rollout",
+        action="store_true",
+        help=(
+            "sample the checkpoint's randomized reset, observation noise, "
+            "and reparameterized action noise instead of clean evaluation"
+        ),
+    )
+    parser.add_argument(
         "--training-initialization",
         action="store_true",
         help="recreate train()'s actor PRNG split for a no-checkpoint baseline",
@@ -374,6 +418,58 @@ def main() -> None:
         parser.error("--action-gain must be between 0 and 1")
     if args.max_steps is not None and args.max_steps < 1:
         parser.error("--max-steps must be positive")
+    training_hparams = None
+    checkpoint_step = None
+    current_training_noise = None
+    training_difficulty = None
+    if args.training_distribution_rollout:
+        if args.checkpoint is None:
+            parser.error("--training-distribution-rollout requires --checkpoint")
+        if args.rmr_action_tape is not None or args.rmr_policy_checkpoint is not None:
+            parser.error(
+                "training-distribution rollout requires a standalone SHAC checkpoint"
+            )
+        hparams_path = args.checkpoint.parent / "hparams.json"
+        if not hparams_path.is_file():
+            parser.error("training-distribution rollout requires sibling hparams.json")
+        training_hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
+        with args.checkpoint.open("rb") as stream:
+            checkpoint_step = int(pickle.load(stream).step)
+        if training_hparams.get("push_velocity_range") != [0.0, 0.0]:
+            parser.error(
+                "training-distribution visualization supports only zero-push runs"
+            )
+        args.env_variant = training_hparams["env_variant"]
+        args.reference_path = Path(training_hparams["reference_path"])
+        args.reference_stride = int(training_hparams["reference_stride"])
+        args.actor_history_len = int(training_hparams["actor_history_len"])
+        args.actor_reference_lookahead_steps = tuple(
+            training_hparams["actor_reference_lookahead_steps"]
+        )
+        args.actor_reference_preview_mode = training_hparams[
+            "actor_reference_preview_mode"
+        ]
+        args.reference_residual_control = bool(
+            training_hparams["reference_residual_control"]
+        )
+        args.reference_residual_scale = float(
+            training_hparams["reference_residual_scale"]
+        )
+        args.solver_iterations = int(training_hparams["solver_iterations"])
+        args.solver_ls_iterations = int(
+            training_hparams["solver_ls_iterations"]
+        )
+        args.solver_profile = training_hparams["solver_profile"]
+        current_training_noise = training_action_noise_at_step(
+            training_hparams,
+            checkpoint_step,
+            action_dim=29,
+        )
+        grace = int(training_hparams["curriculum_grace"])
+        duration = int(training_hparams["curriculum_steps"])
+        training_difficulty = float(
+            np.clip((checkpoint_step - grace) / duration, 0.0, 1.0)
+        )
     profile = (
         None
         if args.solver_profile is None
@@ -402,6 +498,37 @@ def main() -> None:
             args.actor_reference_lookahead_steps
         ),
         actor_reference_preview_mode=args.actor_reference_preview_mode,
+        actor_observation_noise=args.training_distribution_rollout,
+        domain_randomization=(
+            bool(training_hparams["domain_randomization"])
+            if training_hparams is not None
+            else False
+        ),
+        friction_range=(
+            tuple(training_hparams["friction_range"])
+            if training_hparams is not None
+            else (1.0, 1.0)
+        ),
+        kp_range=(
+            tuple(training_hparams["kp_range"])
+            if training_hparams is not None
+            else (35.0, 35.0)
+        ),
+        kd_range=(
+            tuple(training_hparams["kd_range"])
+            if training_hparams is not None
+            else (0.5, 0.5)
+        ),
+        com_offset_range=(
+            tuple(training_hparams["com_offset_range"])
+            if training_hparams is not None
+            else (0.0, 0.0, 0.0)
+        ),
+        reference_reset_noise_scale=(
+            float(training_hparams["reference_reset_noise_scale"])
+            if training_hparams is not None
+            else 0.0
+        ),
         reference_residual_control=args.reference_residual_control,
         reference_residual_scale=args.reference_residual_scale,
     )
@@ -473,11 +600,21 @@ def main() -> None:
             actor_zero_output=not args.random_actor_output_head,
             training_initialization=args.training_initialization,
         )
-    state = env.reset_at_phase(
-        jax.random.PRNGKey(args.seed),
-        jnp.array(0.0),
-        jnp.array(args.phase),
+    reset_key, action_noise_key = jax.random.split(
+        jax.random.PRNGKey(args.seed)
     )
+    if args.training_distribution_rollout:
+        state = env.reset(
+            reset_key,
+            jnp.asarray(training_difficulty, dtype=jnp.float64),
+        )
+    else:
+        state = env.reset_at_phase(
+            reset_key,
+            jnp.array(0.0),
+            jnp.array(args.phase),
+        )
+    start_phase = int(state.info["phase"])
 
     actual_renderer = mujoco.Renderer(env.mj_model, height=480, width=640)
     reference_renderer = mujoco.Renderer(env.mj_model, height=480, width=640)
@@ -485,11 +622,14 @@ def main() -> None:
     reference_data = mujoco.MjData(env.mj_model)
     frames = []
     records = []
+    action_means = []
+    action_epsilons = []
+    noisy_actions = []
 
     try:
         remaining = remaining_reference_transitions(
             env.reference_length,
-            args.phase,
+            start_phase,
             env.reference_stride,
         )
     except ValueError as error:
@@ -515,9 +655,14 @@ def main() -> None:
                     reference_data,
                 )
             )
+        policy_obs = state.obs
+        if args.training_distribution_rollout:
+            obs_rng, env_rng = jax.random.split(state.info["rng"])
+            state = state.replace(info={**state.info, "rng": env_rng})
+            policy_obs = env._apply_obs_noise(state.obs, obs_rng)
         if full_rmr_actor is not None:
             action = apply_trainable_rmr_policy(
-                full_rmr_actor, state.obs
+                full_rmr_actor, policy_obs
             ).astype(jnp.float64)
         elif action_tape is not None:
             # The logged RMR controller runs at 50 Hz; the grounded reference
@@ -527,12 +672,12 @@ def main() -> None:
                 action_tape[min(phase // 2, len(action_tape) - 1)]
             )
         elif rmr_policy is not None:
-            action = rmr_policy(state.obs)
+            action = rmr_policy(policy_obs)
             if actor is not None:
                 normalized = env.normalize_actor_obs(
                     Normalizer(env.actor_frame_obs_dim),
                     normalizer_state,
-                    state.obs,
+                    policy_obs,
                 ).astype(jnp.float32)
                 residual_logits = actor.apply(actor_params, normalized)
                 action = action + bound_residual_action(
@@ -543,12 +688,25 @@ def main() -> None:
             normalized = env.normalize_actor_obs(
                 Normalizer(env.actor_frame_obs_dim),
                 normalizer_state,
-                state.obs,
+                policy_obs,
             ).astype(jnp.float32)
             action = scale_policy_action(
                 actor.apply(actor_params, normalized).astype(jnp.float64),
                 args.action_gain,
             )
+        action_mean = action
+        if args.training_distribution_rollout:
+            epsilon = jax.random.normal(
+                jax.random.fold_in(action_noise_key, step),
+                (env.action_dim,),
+                dtype=jnp.float64,
+            )
+            action = action_mean + epsilon * jnp.asarray(
+                current_training_noise, dtype=jnp.float64
+            )
+            action_means.append(np.asarray(action_mean))
+            action_epsilons.append(np.asarray(epsilon))
+            noisy_actions.append(np.asarray(action))
         step_scope = (
             nullcontext() if profile is None else solver_context(profile)
         )
@@ -605,12 +763,31 @@ def main() -> None:
         columns=np.asarray(columns),
         values=values,
     )
+    rollout_name = (
+        "training_rollout.mp4"
+        if args.training_distribution_rollout
+        else "evaluation.mp4"
+    )
     imageio.mimsave(
-        args.output_dir / "evaluation.mp4",
+        args.output_dir / rollout_name,
         frames,
         fps=round(1.0 / (env.dt * args.render_every)),
         quality=8,
     )
+    if args.training_distribution_rollout:
+        imageio.mimsave(
+            args.output_dir / "training_slice_h12.mp4",
+            frames[: min(12, len(frames))],
+            fps=round(1.0 / (env.dt * args.render_every)),
+            quality=8,
+        )
+        np.savez_compressed(
+            args.output_dir / "training_action_noise.npz",
+            action_mean=np.asarray(action_means),
+            epsilon=np.asarray(action_epsilons),
+            action_std=np.asarray(current_training_noise),
+            noisy_action=np.asarray(noisy_actions),
+        )
     from tools.evaluate_g1_phase_grid import make_contact_sheet
 
     make_contact_sheet(frames, args.output_dir / "contact_sheet.png")
@@ -656,9 +833,22 @@ def main() -> None:
         ),
         "reference_states": env.reference_length,
         "reference_transitions": env.reference_transitions,
-        "evaluation_start_phase": args.phase,
+        "evaluation_start_phase": start_phase,
         "remaining_reference_transitions": remaining,
         "requested_step_limit": args.max_steps,
+        "training_distribution_rollout": args.training_distribution_rollout,
+        "training_checkpoint_step": checkpoint_step,
+        "training_difficulty": training_difficulty,
+        "training_action_noise_std": (
+            current_training_noise.tolist()
+            if current_training_noise is not None
+            else None
+        ),
+        "training_action_noise_rms": (
+            float(np.sqrt(np.mean(np.square(current_training_noise))))
+            if current_training_noise is not None
+            else None
+        ),
         "completed_reference_suffix": completed_suffix,
         "intermediate_reset_occurred": true_terminal,
         "controller": (
