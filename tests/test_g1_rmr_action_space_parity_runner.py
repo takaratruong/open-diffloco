@@ -45,6 +45,14 @@ def _write_early_learning_fixture(run: Path) -> None:
         "actor_history_len": 10,
         "actor_reference_preview_mode": "absolute",
         "solver_profile": "g1-4x5",
+        "seed": 0,
+        "effort_limit_scale": 1.0,
+        "terrain": False,
+        "torso_wrench_assistance": False,
+        "actor_observe_torso_wrench_assistance": False,
+        "actor_torso_wrench_assistance_conditioning": False,
+        "curriculum_grace": 98_304,
+        "curriculum_steps": 1,
         "actor_layer_norm": True,
         "actor_hidden": [512, 256, 128],
     }
@@ -67,10 +75,15 @@ def _write_early_learning_fixture(run: Path) -> None:
         json.dumps(
             [
                 {
-                    "step": 98_304,
+                    "step": 6_144,
                     "actor_grad": 2.0,
                     "actor_update_norm": 0.1,
-                }
+                },
+                {
+                    "step": 67_584,
+                    "actor_grad": 1.5,
+                    "actor_update_norm": 0.08,
+                },
             ]
         )
     )
@@ -129,6 +142,14 @@ def _write_early_learning_fixture(run: Path) -> None:
     values[51, 1:] = 1.0
     np.savez_compressed(
         noisy / "evaluation.npz", columns=columns, values=values
+    )
+    clean_values = np.zeros((45, 3))
+    clean_values[:, 0] = np.arange(45)
+    clean_values[-1, 1:] = 1.0
+    np.savez_compressed(
+        clean / "evaluation.npz",
+        columns=columns,
+        values=clean_values,
     )
     for path in (
         noisy / "training_rollout.mp4",
@@ -212,6 +233,15 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
             summary = json.loads(clean_summary.read_text())
             summary["steps"] = 39
             clean_summary.write_text(json.dumps(summary))
+            clean_trajectory = clean_summary.parent / "evaluation.npz"
+            with np.load(clean_trajectory) as archive:
+                columns = archive["columns"]
+                values = archive["values"][:39]
+            np.savez_compressed(
+                clean_trajectory,
+                columns=columns,
+                values=values,
+            )
 
             with self.assertRaisesRegex(ValueError, "clean phase-zero"):
                 validate_early_learning_artifacts(run)
@@ -256,6 +286,47 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
             np.savez_compressed(tape, **payload)
 
             with self.assertRaisesRegex(ValueError, "reparameterized"):
+                validate_early_learning_artifacts(run)
+
+    def test_early_learning_validator_rejects_nonzero_seed(self):
+        from tools.run_g1_rmr_action_space_parity import (
+            validate_early_learning_artifacts,
+        )
+
+        with TemporaryDirectory() as directory:
+            run = Path(directory)
+            _write_early_learning_fixture(run)
+            hparams_path = run / "hparams.json"
+            hparams = json.loads(hparams_path.read_text())
+            hparams["seed"] = 1
+            hparams_path.write_text(json.dumps(hparams))
+
+            with self.assertRaisesRegex(ValueError, "seed"):
+                validate_early_learning_artifacts(run)
+
+    def test_early_learning_validator_reconstructs_clean_survival(self):
+        from tools.run_g1_rmr_action_space_parity import (
+            validate_early_learning_artifacts,
+        )
+
+        with TemporaryDirectory() as directory:
+            run = Path(directory)
+            _write_early_learning_fixture(run)
+            clean = (
+                run
+                / "early_learning_evidence"
+                / "checkpoint_step_098304"
+                / "clean"
+            )
+            with np.load(clean / "evaluation.npz") as archive:
+                columns = archive["columns"]
+            np.savez_compressed(
+                clean / "evaluation.npz",
+                columns=columns,
+                values=np.zeros((39, 3)),
+            )
+
+            with self.assertRaisesRegex(ValueError, "clean trajectory"):
                 validate_early_learning_artifacts(run)
 
     def test_decoupled_early_learning_kwargs_change_only_bounded_budget(self):
@@ -579,6 +650,27 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
                     "--early-learning-gate",
                 ]
             )
+
+    def test_early_learning_mode_rejects_nonzero_seed_before_training(self):
+        from tools.run_g1_rmr_action_space_parity import (
+            build_parser,
+            validate_mode_args,
+        )
+
+        args = build_parser().parse_args(
+            [
+                "--solver-profile",
+                "g1-4x5",
+                "--code-commit",
+                "0" * 40,
+                "--early-learning-gate",
+                "--decoupled-exploration",
+                "--seed",
+                "1",
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "seed zero"):
+            validate_mode_args(args)
 
     def test_preflight_binds_clean_code_reference_and_runtime_assets(self):
         from tools.run_g1_rmr_action_space_parity import (

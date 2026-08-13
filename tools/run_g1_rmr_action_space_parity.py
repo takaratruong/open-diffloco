@@ -181,6 +181,8 @@ def validate_mode_args(args: argparse.Namespace) -> None:
         raise ValueError(
             "--early-learning-gate requires --decoupled-exploration"
         )
+    if getattr(args, "early_learning_gate", False) and args.seed != 0:
+        raise ValueError("--early-learning-gate requires seed zero")
 
 
 def validate_preflight(
@@ -423,6 +425,14 @@ def _require_early_learning_hparams(hparams: dict[str, object]) -> None:
         "actor_reference_lookahead_steps": [4, 8, 12],
         "reference_stride": 1,
         "solver_profile": "g1-4x5",
+        "seed": 0,
+        "effort_limit_scale": 1.0,
+        "terrain": False,
+        "torso_wrench_assistance": False,
+        "actor_observe_torso_wrench_assistance": False,
+        "actor_torso_wrench_assistance_conditioning": False,
+        "curriculum_grace": 98_304,
+        "curriculum_steps": 1,
     }
     for key, expected_value in expected.items():
         if hparams.get(key) != expected_value:
@@ -435,7 +445,7 @@ def _first_episode_survival(path: Path, *, expected_steps: int) -> int:
     with np.load(path, allow_pickle=False) as archive:
         columns = tuple(map(str, archive["columns"]))
         values = np.asarray(archive["values"], dtype=np.float64)
-    if values.shape[0] != expected_steps or values.ndim != 2:
+    if values.ndim != 2 or values.shape[0] != expected_steps:
         raise ValueError("noisy rollout records must contain exactly 120 rows")
     try:
         done = values[:, columns.index("done")]
@@ -446,6 +456,23 @@ def _first_episode_survival(path: Path, *, expected_steps: int) -> int:
         raise ValueError("noisy rollout records are nonfinite")
     ended = np.flatnonzero((done > 0.5) | (terminal > 0.5))
     return int(ended[0] + 1) if ended.size else expected_steps
+
+
+def _clean_trajectory_survival(path: Path, *, summary_steps: int) -> int:
+    with np.load(path, allow_pickle=False) as archive:
+        columns = tuple(map(str, archive["columns"]))
+        values = np.asarray(archive["values"], dtype=np.float64)
+    if (
+        values.ndim != 2
+        or values.shape[0] != summary_steps
+        or values.shape[0] < 1
+        or len(columns) != values.shape[1]
+        or "done" not in columns
+        or "terminal" not in columns
+        or not np.isfinite(values).all()
+    ):
+        raise ValueError("clean trajectory is incomplete or inconsistent")
+    return int(values.shape[0])
 
 
 def validate_early_learning_artifacts(
@@ -490,15 +517,18 @@ def validate_early_learning_artifacts(
     diagnostics = json.loads(
         (run_directory / "diag_log.json").read_text(encoding="utf-8")
     )
-    if not isinstance(diagnostics, list) or not diagnostics:
+    if not isinstance(diagnostics, list) or [
+        entry.get("step") for entry in diagnostics
+    ] != [6_144, 67_584]:
         raise ValueError("early-learning diagnostics are missing")
     final = diagnostics[-1]
-    if final.get("step") != 98_304:
-        raise ValueError("early-learning diagnostic endpoint is invalid")
-    for key in ("actor_grad", "actor_update_norm"):
-        value = float(final.get(key, math.nan))
-        if not math.isfinite(value) or value <= 0.0:
-            raise ValueError(f"early-learning {key} is not finite and positive")
+    for entry in diagnostics:
+        for key in ("actor_grad", "actor_update_norm"):
+            value = float(entry.get(key, math.nan))
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(
+                    f"early-learning {key} is not finite and positive"
+                )
 
     evidence = (
         run_directory
@@ -588,7 +618,12 @@ def validate_early_learning_artifacts(
     noisy_survival = _first_episode_survival(
         noisy / "evaluation.npz", expected_steps=120
     )
-    clean_survival = int(clean_summary.get("steps", -1))
+    clean_summary_steps = int(clean_summary.get("steps", -1))
+    clean_trajectory = clean / "evaluation.npz"
+    clean_survival = _clean_trajectory_survival(
+        clean_trajectory,
+        summary_steps=clean_summary_steps,
+    )
     if clean_survival < 40:
         raise ValueError("clean phase-zero survival is below 40 transitions")
     return {
@@ -607,6 +642,7 @@ def validate_early_learning_artifacts(
         "clean_phase_zero_survival": clean_survival,
         "training_action_noise_sha256": sha256_file(tape_path),
         "training_rollout_sha256": sha256_file(noisy / "evaluation.npz"),
+        "clean_rollout_sha256": sha256_file(clean_trajectory),
     }
 
 
