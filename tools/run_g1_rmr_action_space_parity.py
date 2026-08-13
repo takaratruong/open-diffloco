@@ -145,6 +145,8 @@ def build_decoupled_early_learning_kwargs(
         curriculum_steps=1,
         actor_lr=5e-3,
         action_noise_std_start=np.asarray(RMR_ACTION_STD).tolist(),
+        clip_sampled_actor_actions=True,
+        reference_residual_scale=0.5,
     )
     return kwargs
 
@@ -404,11 +406,11 @@ def _require_early_learning_hparams(hparams: dict[str, object]) -> None:
         "env_variant": "g1_tracking_rmr_50hz_decoupled_exploration",
         "squash_actor_actions": False,
         "squash_actor_mean": True,
-        "clip_sampled_actor_actions": False,
+        "clip_sampled_actor_actions": True,
         "actor_observation_noise": False,
         "reference_reset_noise_scale": 0.0,
         "reference_residual_control": True,
-        "reference_residual_scale": 1.0,
+        "reference_residual_scale": 0.5,
         "kp_range": [35.0, 35.0],
         "kd_range": [0.5, 0.5],
         "friction_range": [1.0, 1.0],
@@ -603,10 +605,15 @@ def validate_early_learning_artifacts(
     if not np.allclose(action_std, expected_std, rtol=0.0, atol=1e-12):
         raise ValueError("early-learning action std does not match training")
     reconstructed = action_mean + arrays["epsilon"] * action_std
+    expected_effective = (
+        np.clip(reconstructed, -1.0, 1.0)
+        if hparams["clip_sampled_actor_actions"]
+        else reconstructed
+    )
     if not np.allclose(
         arrays["noisy_action"], reconstructed, rtol=0.0, atol=1e-12
-    ) or not np.array_equal(
-        arrays["effective_action"], arrays["noisy_action"]
+    ) or not np.allclose(
+        arrays["effective_action"], expected_effective, rtol=0.0, atol=1e-12
     ):
         raise ValueError("early-learning reparameterized action tape is invalid")
     validate_training_action_mean(action_mean)

@@ -17,11 +17,11 @@ def _write_early_learning_fixture(run: Path) -> None:
         "env_variant": "g1_tracking_rmr_50hz_decoupled_exploration",
         "squash_actor_actions": False,
         "squash_actor_mean": True,
-        "clip_sampled_actor_actions": False,
+        "clip_sampled_actor_actions": True,
         "actor_observation_noise": False,
         "reference_reset_noise_scale": 0.0,
         "reference_residual_control": True,
-        "reference_residual_scale": 1.0,
+        "reference_residual_scale": 0.5,
         "kp_range": [35.0, 35.0],
         "kd_range": [0.5, 0.5],
         "friction_range": [1.0, 1.0],
@@ -124,7 +124,7 @@ def _write_early_learning_fixture(run: Path) -> None:
         )
     )
     mean = np.full((120, 29), 0.1)
-    epsilon = np.ones((120, 29))
+    epsilon = np.full((120, 29), 10.0)
     std = np.asarray(RMR_ACTION_STD, dtype=np.float64)
     np.savez_compressed(
         noisy / "training_action_noise.npz",
@@ -132,7 +132,7 @@ def _write_early_learning_fixture(run: Path) -> None:
         epsilon=epsilon,
         action_std=std,
         noisy_action=mean + epsilon * std,
-        effective_action=mean + epsilon * std,
+        effective_action=np.clip(mean + epsilon * std, -1.0, 1.0),
     )
     columns = np.asarray(["step", "done", "terminal"])
     values = np.zeros((120, 3))
@@ -208,7 +208,9 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
                 payload["action_mean"]
                 + payload["epsilon"] * payload["action_std"]
             )
-            payload["effective_action"] = payload["noisy_action"].copy()
+            payload["effective_action"] = np.clip(
+                payload["noisy_action"], -1.0, 1.0
+            )
             np.savez_compressed(noisy / "training_action_noise.npz", **payload)
             with self.assertRaisesRegex(ValueError, "saturation"):
                 validate_early_learning_artifacts(run)
@@ -327,7 +329,7 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "clean trajectory"):
                 validate_early_learning_artifacts(run)
 
-    def test_decoupled_early_learning_kwargs_use_fixed_rmr_target_noise(self):
+    def test_early_learning_kwargs_restore_upstream_action_boundary(self):
         from src.core.rmr_action_noise import RMR_ACTION_STD
         from tools.run_g1_rmr_action_space_parity import (
             build_decoupled_early_learning_kwargs,
@@ -343,8 +345,10 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
 
         differing = {
             key
-            for key in full
-            if not np.array_equal(np.asarray(full[key]), np.asarray(early[key]))
+            for key in set(full) | set(early)
+            if key not in full
+            or key not in early
+            or not np.array_equal(np.asarray(full[key]), np.asarray(early[key]))
         }
         self.assertEqual(
             differing,
@@ -353,6 +357,8 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
                 "curriculum_grace",
                 "curriculum_steps",
                 "action_noise_std_start",
+                "clip_sampled_actor_actions",
+                "reference_residual_scale",
             },
         )
         self.assertEqual(early["total_steps"], 98_304)
@@ -366,6 +372,8 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
         np.testing.assert_array_equal(
             early["action_noise_std_end"], RMR_ACTION_STD
         )
+        self.assertTrue(early["clip_sampled_actor_actions"])
+        self.assertEqual(early["reference_residual_scale"], 0.5)
 
     def test_decoupled_kwargs_bound_mean_without_clipping_noise(self):
         from tools.run_g1_rmr_action_space_parity import (
