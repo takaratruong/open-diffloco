@@ -773,6 +773,40 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
             ],
         )
         self.assertEqual(result["kp_range"], [35.0, 35.0])
+
+    def test_preflight_reports_upstream_penalty_boundary_truthfully(self):
+        from tools.run_g1_rmr_action_space_parity import (
+            EXPECTED_REFERENCE_SHA256,
+            validate_preflight,
+        )
+
+        with (
+            mock.patch(
+                "tools.run_g1_rmr_action_space_parity._git_output",
+                side_effect=("a" * 40, ""),
+            ),
+            mock.patch.object(Path, "is_file", return_value=True),
+            mock.patch(
+                "tools.run_g1_rmr_action_space_parity.sha256_file",
+                return_value=EXPECTED_REFERENCE_SHA256,
+            ),
+            mock.patch(
+                "tools.run_g1_rmr_action_space_parity.validate_runtime_assets",
+                return_value={},
+            ),
+        ):
+            result = validate_preflight(
+                repository=Path("/tmp/repository"),
+                reference_path=Path("/tmp/dance.npz"),
+                code_commit="a" * 40,
+                env_variant=(
+                    "g1_tracking_rmr_50hz_upstream_action_penalty"
+                ),
+            )
+
+        self.assertEqual(result["reference_residual_scale"], 0.5)
+        self.assertTrue(result["normalized_action_clip"])
+        self.assertEqual(result["action_magnitude_weight"], 0.05)
         self.assertEqual(result["kd_range"], [0.5, 0.5])
 
     def test_preflight_rejects_a_dirty_worktree(self):

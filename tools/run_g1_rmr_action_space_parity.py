@@ -216,6 +216,15 @@ def validate_preflight(
     env_variant: str = "g1_tracking_rmr_50hz_action_parity",
 ) -> dict[str, object]:
     """Bind a fresh parity run to clean code and immutable runtime assets."""
+    upstream_boundary = env_variant in {
+        "g1_tracking_rmr_50hz_upstream_boundary",
+        "g1_tracking_rmr_50hz_upstream_action_penalty",
+    }
+    action_magnitude_weight = (
+        0.05
+        if env_variant == "g1_tracking_rmr_50hz_upstream_action_penalty"
+        else 0.0
+    )
     head = _git_output(repository, "rev-parse", "HEAD")
     if len(code_commit) != 40 or head != code_commit:
         raise ValueError("runtime code commit does not match registration")
@@ -238,7 +247,7 @@ def validate_preflight(
         **assets,
         "fresh_initialization": True,
         "environment_variant": env_variant,
-        "normalized_action_clip": False,
+        "normalized_action_clip": upstream_boundary,
         "joint_velocity_observation_noise": 0.0,
         "exact_reference_resets": True,
         "randomization_com_body_name": "torso_link",
@@ -246,7 +255,8 @@ def validate_preflight(
         "domain_randomization": False,
         "com_offset_range": [0.0, 0.0, 0.0],
         "push_velocity_range": [0.0, 0.0],
-        "reference_residual_scale": 1.0,
+        "reference_residual_scale": 0.5 if upstream_boundary else 1.0,
+        "action_magnitude_weight": action_magnitude_weight,
         "kp_range": [35.0, 35.0],
         "kd_range": [0.5, 0.5],
         "remaining_rmr_randomization_gaps": [
