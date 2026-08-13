@@ -297,6 +297,20 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         self.assertEqual(robust.mj_model.opt.iterations, 10)
         self.assertEqual(robust.mj_model.opt.ls_iterations, 20)
 
+    def test_action_parity_evaluation_preserves_unbounded_actor(self):
+        env = make_evaluation_env(
+            "g1_tracking_rmr_50hz_action_parity",
+            actor_history_len=10,
+            actor_reference_lookahead_steps=(4, 8, 12),
+            actor_reference_preview_mode="delta",
+            reference_residual_control=True,
+            reference_residual_scale=1.0,
+        )
+
+        self.assertFalse(env.squash_actor_actions)
+        self.assertEqual(env.actor_history_len, 10)
+        self.assertEqual(env.reference_residual_scale, 1.0)
+
     def test_source_step_evaluator_can_screen_solver_budgets(self):
         candidate = make_evaluation_env(
             "g1_tracking_rmr_50hz_source_step",
