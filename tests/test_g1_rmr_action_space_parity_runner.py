@@ -25,6 +25,94 @@ class G1RmrActionSpaceParityRunnerTest(unittest.TestCase):
         self.assertEqual(kwargs["reference_residual_scale"], 1.0)
         self.assertEqual(kwargs["action_noise_std_start"], 1.0)
 
+    def test_decoupled_gate_validator_requires_bounded_h12_action_tape(self):
+        from src.core.rmr_action_noise import RMR_ACTION_STD
+        from tools.run_g1_rmr_action_space_parity import validate_gate_artifacts
+
+        with TemporaryDirectory() as directory:
+            run = Path(directory)
+            hparams = {
+                "total_steps": 6_144,
+                "env_variant": "g1_tracking_rmr_50hz_decoupled_exploration",
+                "squash_actor_actions": False,
+                "squash_actor_mean": True,
+                "clip_sampled_actor_actions": False,
+                "actor_observation_noise": False,
+                "reference_reset_noise_scale": 0.0,
+                "reference_residual_control": True,
+                "reference_residual_scale": 1.0,
+                "kp_range": [35.0, 35.0],
+                "kd_range": [0.5, 0.5],
+                "friction_range": [1.0, 1.0],
+                "mass_range": [1.0, 1.0],
+                "com_offset_range": [0.0, 0.0, 0.0],
+                "domain_randomization": False,
+                "randomization_com_body_name": "torso_link",
+                "randomization_uses_curriculum": False,
+                "push_velocity_range": [0.0, 0.0],
+                "action_noise_std_start": 1.0,
+                "action_noise_std_end": np.asarray(RMR_ACTION_STD).tolist(),
+                "actor_cagrad": True,
+                "gradient_accumulation_steps": 2,
+            }
+            (run / "hparams.json").write_text(json.dumps(hparams))
+            (run / "checkpoint_step_006144.pkl").write_bytes(b"checkpoint")
+            (run / "checkpoint_phase_metrics.json").write_text(
+                json.dumps([{"step": 6_144, "actor_cagrad_valid": True,
+                             "actor_cagrad_bin_counts": [1, 1, 1, 1, 1],
+                             "actor_cagrad_combined_norm": 2.0}])
+            )
+            (run / "diag_log.json").write_text(
+                json.dumps([{"actor_grad": 2.0, "actor_update_norm": 0.1}])
+            )
+            tape = run / "gate_training_rollout"
+            tape.mkdir()
+            np.savez_compressed(
+                tape / "training_action_noise.npz",
+                action_mean=np.zeros((12, 29)),
+                epsilon=np.ones((12, 29)),
+                action_std=np.ones(29),
+                noisy_action=np.ones((12, 29)),
+                effective_action=np.ones((12, 29)),
+            )
+            from tools.prepare_g1_rmr_reference import sha256_file
+
+            (tape / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "training_distribution_rollout": True,
+                        "training_checkpoint_step": 6_144,
+                        "training_exact_reset_phase": 0,
+                        "checkpoint_sha256": sha256_file(
+                            run / "checkpoint_step_006144.pkl"
+                        ),
+                        "steps": 12,
+                    }
+                )
+            )
+
+            result = validate_gate_artifacts(
+                run,
+                env_variant="g1_tracking_rmr_50hz_decoupled_exploration",
+            )
+            self.assertTrue(result["bounded_mean_rollout_valid"])
+
+            np.savez_compressed(
+                tape / "training_action_noise.npz",
+                action_mean=np.full((12, 29), 1.1),
+                epsilon=np.ones((12, 29)),
+                action_std=np.ones(29),
+                noisy_action=np.ones((12, 29)),
+                effective_action=np.ones((12, 29)),
+            )
+            with self.assertRaisesRegex(ValueError, "actor mean"):
+                validate_gate_artifacts(
+                    run,
+                    env_variant=(
+                        "g1_tracking_rmr_50hz_decoupled_exploration"
+                    ),
+                )
+
     def test_fresh_parity_kwargs_use_linear_full_scale_nominal_gains(self):
         from src.core.rmr_action_noise import RMR_ACTION_STD
         from tools.run_g1_rmr_action_space_parity import (

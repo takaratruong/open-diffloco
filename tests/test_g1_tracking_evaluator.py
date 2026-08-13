@@ -37,6 +37,16 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "actor mean"):
             validate_training_action_mean(np.array([[1.01, 0.0, 0.0]]))
 
+    def test_training_mean_is_validated_before_artifact_writes(self):
+        source = Path("tools/evaluate_g1_tracking.py").read_text()
+        validation = source.index(
+            "validate_training_action_mean(np.asarray(action_means))"
+        )
+        first_write = source.index(
+            "np.savez_compressed(\n        args.output_dir / \"evaluation.npz\""
+        )
+        self.assertLess(validation, first_write)
+
     def test_prepare_evaluation_action_matches_training_squash_boundary(self):
         from tools import evaluate_g1_tracking
 

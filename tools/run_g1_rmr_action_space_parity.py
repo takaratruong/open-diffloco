@@ -6,6 +6,8 @@ import argparse
 import json
 import math
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +24,7 @@ from src.envs.g1_tracking.solver_profiles import (
     get_solver_profile,
     solver_context,
 )
+from tools.evaluate_g1_tracking import validate_training_action_mean
 from tools.prepare_g1_rmr_reference import sha256_file
 from tools.run_canonical_g1_shac import build_canonical_kwargs
 from tools.run_g1_root_recovery_continuation import validate_runtime_assets
@@ -268,7 +271,7 @@ def validate_gate_artifacts(
         value = float(final.get(key, math.nan))
         if not math.isfinite(value) or value <= 0.0:
             raise ValueError(f"gate {key} is not finite and positive")
-    return {
+    result = {
         "protocol": "g1-rmr-action-space-parity-gate-validation-v1",
         "valid": True,
         "step": 6_144,
@@ -276,6 +279,55 @@ def validate_gate_artifacts(
         "actor_grad": float(final["actor_grad"]),
         "actor_update_norm": float(final["actor_update_norm"]),
     }
+    if env_variant == "g1_tracking_rmr_50hz_decoupled_exploration":
+        rollout = run_directory / "gate_training_rollout"
+        summary = json.loads(
+            (rollout / "summary.json").read_text(encoding="utf-8")
+        )
+        checkpoint_sha = sha256_file(checkpoint)
+        if (
+            summary.get("training_distribution_rollout") is not True
+            or summary.get("training_checkpoint_step") != 6_144
+            or summary.get("training_exact_reset_phase") != 0
+            or summary.get("checkpoint_sha256") != checkpoint_sha
+            or summary.get("steps") != 12
+        ):
+            raise ValueError("bounded-mean gate rollout provenance is invalid")
+        with np.load(rollout / "training_action_noise.npz") as archive:
+            action_mean = np.asarray(archive["action_mean"])
+            if action_mean.shape != (12, 29):
+                raise ValueError("bounded-mean gate action tape must be H12x29")
+            validate_training_action_mean(action_mean)
+        result.update(
+            bounded_mean_rollout_valid=True,
+            bounded_mean_max_abs=float(np.max(np.abs(action_mean))),
+            bounded_mean_checkpoint_sha256=checkpoint_sha,
+        )
+    return result
+
+
+def render_decoupled_gate_rollout(
+    *, repository: Path, run_directory: Path
+) -> None:
+    """Replay one checkpoint-loaded H12 slice before gate publication."""
+    checkpoint = run_directory / "checkpoint_step_006144.pkl"
+    command = [
+        sys.executable,
+        str(repository / "tools/evaluate_g1_tracking.py"),
+        "--checkpoint",
+        str(checkpoint),
+        "--output-dir",
+        str(run_directory / "gate_training_rollout"),
+        "--training-distribution-rollout",
+        "--disable-training-observation-noise",
+        "--exact-training-reset-phase",
+        "0",
+        "--max-steps",
+        "12",
+        "--seed",
+        "0",
+    ]
+    subprocess.run(command, cwd=repository, check=True)
 
 
 def execute(args: argparse.Namespace) -> Path:
@@ -325,6 +377,10 @@ def execute(args: argparse.Namespace) -> Path:
     run_directory = (output_root / relative_save_dir).resolve()
     if args.gate_only:
         if getattr(args, "decoupled_exploration", False):
+            render_decoupled_gate_rollout(
+                repository=repository,
+                run_directory=run_directory,
+            )
             gate_validation = validate_gate_artifacts(
                 run_directory,
                 env_variant=kwargs["env_variant"],

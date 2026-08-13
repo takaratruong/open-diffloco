@@ -867,6 +867,12 @@ def main() -> None:
         "termination_distal_z_error",
     )
     values = np.asarray(records, dtype=np.float64)
+    if args.training_distribution_rollout and getattr(
+        env,
+        "squash_actor_mean",
+        getattr(env, "squash_actor_actions", True),
+    ):
+        validate_training_action_mean(np.asarray(action_means))
     np.savez_compressed(
         args.output_dir / "evaluation.npz",
         columns=np.asarray(columns),
@@ -884,12 +890,6 @@ def main() -> None:
         quality=8,
     )
     if args.training_distribution_rollout:
-        if getattr(
-            env,
-            "squash_actor_mean",
-            getattr(env, "squash_actor_actions", True),
-        ):
-            validate_training_action_mean(np.asarray(action_means))
         imageio.mimsave(
             args.output_dir / "training_slice_h12.mp4",
             frames[: min(12, len(frames))],
