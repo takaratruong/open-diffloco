@@ -31,7 +31,6 @@ from tools.run_g1_zero_assistance_consolidation import (
     _write_json_atomically,
 )
 
-
 EXPECTED_REFERENCE_SHA256 = (
     "bf8c8b407062d1b309440f4c1787c345b04d79501ea75f615e5b41c0c5ebb6db"
 )
