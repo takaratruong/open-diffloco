@@ -73,6 +73,16 @@ def test_flax_phase_grid_parser_defaults_absolute_and_accepts_delta():
     )
     assert residual.actor_residual_preview_adapter is True
     assert residual.actor_residual_preview_hidden == 256
+    upstream = parser.parse_args(
+        [
+            *required,
+            "--env-variant",
+            "g1_tracking_rmr_50hz_upstream_action_penalty",
+        ]
+    )
+    assert upstream.env_variant == (
+        "g1_tracking_rmr_50hz_upstream_action_penalty"
+    )
 
 
 def test_evaluator_residual_action_matches_training_composition():

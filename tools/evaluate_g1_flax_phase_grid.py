@@ -27,6 +27,7 @@ from src.envs.g1_tracking.solver_profiles import (
 from tools.compare_g1_tracking_residual import rollout
 from tools.evaluate_g1_rmr_phase_grid import build_phase_grid_summary
 from tools.evaluate_g1_tracking import (
+    EVALUATION_ENV_VARIANTS,
     _load_policy,
     configure_jax,
     make_evaluation_env,
@@ -129,6 +130,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phases", type=int, nargs=5, default=DEFAULT_PHASES)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
+        "--env-variant",
+        choices=EVALUATION_ENV_VARIANTS,
+        default="g1_tracking_rmr_50hz_source_step",
+    )
+    parser.add_argument(
         "--actor-reference-preview-mode",
         choices=("absolute", "delta"),
         default="absolute",
@@ -157,7 +163,7 @@ def main() -> None:
             raise FileNotFoundError(path)
     profile = get_solver_profile(args.solver_profile)
     env = make_evaluation_env(
-        "g1_tracking_rmr_50hz_source_step",
+        args.env_variant,
         solver_iterations=profile.iterations,
         solver_ls_iterations=profile.ls_iterations,
         reference_path=reference_path,
