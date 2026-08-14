@@ -127,3 +127,14 @@ def test_rmr_policy_interpolation_alpha_one_is_bit_exact_candidate():
     selected = interpolate_rmr_policy(source, candidate, alpha=1.0)
 
     assert jnp.array_equal(selected.weights[0], candidate.weights[0])
+
+
+def test_alpha_one_accepts_an_expanded_preview_candidate_unchanged():
+    from tools.evaluate_g1_rmr_phase_grid import interpolate_rmr_policy
+
+    source = _policy(3)
+    candidate = _policy(5)
+
+    selected = interpolate_rmr_policy(source, candidate, alpha=1.0)
+
+    assert selected is candidate

@@ -71,6 +71,8 @@ def interpolate_rmr_policy(
     """Interpolate candidate network parameters toward an exact source."""
     if not np.isfinite(alpha) or not 0.0 < alpha <= 1.0:
         raise ValueError("interpolation alpha must be between zero and one")
+    if alpha == 1.0:
+        return candidate
     if not (
         np.array_equal(np.asarray(source.mean), np.asarray(candidate.mean))
         and np.array_equal(np.asarray(source.std), np.asarray(candidate.std))
@@ -80,9 +82,6 @@ def interpolate_rmr_policy(
         source.biases
     ) != len(candidate.biases):
         raise ValueError("source and candidate network structures differ")
-    if alpha == 1.0:
-        return candidate
-
     def blend(source_leaf, candidate_leaf):
         if source_leaf.shape != candidate_leaf.shape:
             raise ValueError("source and candidate network structures differ")
