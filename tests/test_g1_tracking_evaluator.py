@@ -1,6 +1,7 @@
 import pickle
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -17,6 +18,7 @@ from tools.evaluate_g1_tracking import (
     load_rmr_policy,
     make_evaluation_env,
     remaining_reference_transitions,
+    reset_evaluation_state,
     scale_policy_action,
     select_full_rmr_actor_observation,
     summarize_action_diagnostics,
@@ -34,6 +36,40 @@ RMR_ACTIONS = Path(
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    def test_evaluation_reset_runs_inside_solver_context(self):
+        active = False
+
+        @contextmanager
+        def fake_solver_context(profile):
+            nonlocal active
+            self.assertEqual(profile, "profile")
+            active = True
+            try:
+                yield
+            finally:
+                active = False
+
+        class FakeEnv:
+            def reset_at_phase(inner_self, key, difficulty, phase):
+                self.assertTrue(active)
+                return key, difficulty, phase
+
+        with mock.patch(
+            "tools.evaluate_g1_tracking.solver_context",
+            fake_solver_context,
+        ):
+            result = reset_evaluation_state(
+                FakeEnv(),
+                reset_key="key",
+                difficulty="difficulty",
+                phase=7,
+                sample_training_reset=False,
+                profile="profile",
+            )
+
+        self.assertEqual(result, ("key", "difficulty", 7))
+        self.assertFalse(active)
+
     def test_action_diagnostics_distinguish_mean_boundary_from_clipping(self):
         action_mean = np.asarray(
             [[0.0, 0.96, -1.2], [0.5, -0.95, 0.2]], dtype=np.float64

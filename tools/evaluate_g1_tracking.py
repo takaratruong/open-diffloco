@@ -132,6 +132,29 @@ def configure_jax() -> None:
     jax.config.update("jax_enable_x64", True)
 
 
+def reset_evaluation_state(
+    env,
+    *,
+    reset_key,
+    difficulty,
+    phase: int,
+    sample_training_reset: bool,
+    profile,
+):
+    """Reset under the same scoped MJX solver boundary as rollout steps."""
+    reset_scope = (
+        nullcontext() if profile is None else solver_context(profile)
+    )
+    with reset_scope:
+        if sample_training_reset:
+            return env.reset(reset_key, difficulty)
+        return env.reset_at_phase(
+            reset_key,
+            difficulty,
+            jnp.asarray(phase),
+        )
+
+
 def make_evaluation_env(
     variant: str,
     *,
@@ -757,28 +780,30 @@ def main() -> None:
             actor_zero_output=not args.random_actor_output_head,
             training_initialization=args.training_initialization,
         )
-    reset_key, action_noise_key = jax.random.split(
-        jax.random.PRNGKey(args.seed)
-    )
-    if (
+    evaluation_key = jax.random.PRNGKey(args.seed)
+    reset_key, action_noise_key = jax.random.split(evaluation_key)
+    if not args.training_distribution_rollout:
+        reset_key = evaluation_key
+    sample_training_reset = (
         args.training_distribution_rollout
         and visualization_controls.exact_reset_phase is None
-    ):
-        state = env.reset(
-            reset_key,
-            jnp.asarray(training_difficulty, dtype=jnp.float64),
-        )
-    else:
-        reset_phase = (
-            args.phase
-            if visualization_controls.exact_reset_phase is None
-            else visualization_controls.exact_reset_phase
-        )
-        state = env.reset_at_phase(
-            reset_key,
-            jnp.array(0.0),
-            jnp.array(reset_phase),
-        )
+    )
+    reset_phase = (
+        args.phase
+        if visualization_controls.exact_reset_phase is None
+        else visualization_controls.exact_reset_phase
+    )
+    state = reset_evaluation_state(
+        env,
+        reset_key=reset_key,
+        difficulty=jnp.asarray(
+            training_difficulty if sample_training_reset else 0.0,
+            dtype=jnp.float64,
+        ),
+        phase=reset_phase,
+        sample_training_reset=sample_training_reset,
+        profile=profile,
+    )
     start_phase = int(state.info["phase"])
     compiled_step = build_compiled_step(env)
 
