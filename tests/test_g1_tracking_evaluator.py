@@ -19,6 +19,7 @@ from tools.evaluate_g1_tracking import (
     remaining_reference_transitions,
     scale_policy_action,
     select_full_rmr_actor_observation,
+    summarize_action_diagnostics,
     summarize_stability_errors,
     validate_training_action_mean,
 )
@@ -33,6 +34,41 @@ RMR_ACTIONS = Path(
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    def test_action_diagnostics_distinguish_mean_boundary_from_clipping(self):
+        action_mean = np.asarray(
+            [[0.0, 0.96, -1.2], [0.5, -0.95, 0.2]], dtype=np.float64
+        )
+        effective = np.clip(action_mean, -1.0, 1.0)
+
+        summary = summarize_action_diagnostics(action_mean, effective)
+
+        self.assertAlmostEqual(
+            summary["actor_action_rms"],
+            float(np.sqrt(np.mean(np.square(action_mean)))),
+        )
+        self.assertEqual(summary["actor_action_max_abs"], 1.2)
+        self.assertEqual(
+            summary["actor_action_near_boundary_fraction"], 3.0 / 6.0
+        )
+        self.assertEqual(
+            summary["actor_action_outside_boundary_fraction"], 1.0 / 6.0
+        )
+        self.assertEqual(
+            summary["effective_action_clipped_fraction"], 1.0 / 6.0
+        )
+        self.assertEqual(summary["effective_action_max_abs"], 1.0)
+
+    def test_action_diagnostics_do_not_count_unclipped_noise_as_clipping(self):
+        action_mean = np.zeros((1, 2), dtype=np.float64)
+        sampled = np.asarray([[0.2, 1.3]], dtype=np.float64)
+        effective = np.asarray([[0.2, 1.0]], dtype=np.float64)
+
+        summary = summarize_action_diagnostics(
+            action_mean, effective, sampled_action=sampled
+        )
+
+        self.assertEqual(summary["effective_action_clipped_fraction"], 0.5)
+
     def test_full_rmr_actor_selects_checkpoint_observation_prefix(self):
         policy = SimpleNamespace(mean=jnp.zeros((154,)))
         observation = jnp.arange(328.0)

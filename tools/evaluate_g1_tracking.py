@@ -222,6 +222,49 @@ def summarize_stability_errors(
     return summary
 
 
+def summarize_action_diagnostics(
+    action_mean: np.ndarray,
+    effective_action: np.ndarray,
+    *,
+    sampled_action: np.ndarray | None = None,
+) -> dict[str, float]:
+    """Report policy boundary crowding separately from sampled clipping."""
+    mean = np.asarray(action_mean, dtype=np.float64)
+    effective = np.asarray(effective_action, dtype=np.float64)
+    sampled = (
+        mean
+        if sampled_action is None
+        else np.asarray(sampled_action, dtype=np.float64)
+    )
+    if (
+        mean.ndim != 2
+        or effective.shape != mean.shape
+        or sampled.shape != mean.shape
+        or mean.size == 0
+        or not np.isfinite(mean).all()
+        or not np.isfinite(effective).all()
+        or not np.isfinite(sampled).all()
+    ):
+        raise ValueError("action diagnostics require matching finite 2D arrays")
+    return {
+        "actor_action_rms": float(np.sqrt(np.mean(np.square(mean)))),
+        "actor_action_max_abs": float(np.max(np.abs(mean))),
+        "actor_action_near_boundary_fraction": float(
+            np.mean(np.abs(mean) >= 0.95)
+        ),
+        "actor_action_outside_boundary_fraction": float(
+            np.mean(np.abs(mean) > 1.0)
+        ),
+        "effective_action_rms": float(
+            np.sqrt(np.mean(np.square(effective)))
+        ),
+        "effective_action_max_abs": float(np.max(np.abs(effective))),
+        "effective_action_clipped_fraction": float(
+            np.mean(np.abs(sampled - effective) > 1e-12)
+        ),
+    }
+
+
 def load_rmr_policy(checkpoint: Path):
     """Load the source RSL-RL actor without importing Isaac Lab."""
     import torch
@@ -748,6 +791,7 @@ def main() -> None:
     action_means = []
     action_epsilons = []
     noisy_actions = []
+    sampled_actions = []
     effective_actions = []
 
     try:
@@ -822,6 +866,7 @@ def main() -> None:
                 args.action_gain,
             )
         action_mean = action
+        action_means.append(np.asarray(action_mean))
         if args.training_distribution_rollout:
             epsilon = jax.random.normal(
                 jax.random.fold_in(action_noise_key, step),
@@ -831,9 +876,9 @@ def main() -> None:
             action = action_mean + epsilon * jnp.asarray(
                 current_training_noise, dtype=jnp.float64
             )
-            action_means.append(np.asarray(action_mean))
             action_epsilons.append(np.asarray(epsilon))
             noisy_actions.append(np.asarray(action))
+        sampled_actions.append(np.asarray(action))
         action = prepare_evaluation_action(
             action,
             squash=getattr(
@@ -842,8 +887,7 @@ def main() -> None:
                 getattr(env, "squash_actor_actions", True),
             ),
         )
-        if args.training_distribution_rollout:
-            effective_actions.append(np.asarray(action))
+        effective_actions.append(np.asarray(action))
         step_scope = (
             nullcontext() if profile is None else solver_context(profile)
         )
@@ -908,6 +952,9 @@ def main() -> None:
         args.output_dir / "evaluation.npz",
         columns=np.asarray(columns),
         values=values,
+        action_mean=np.asarray(action_means),
+        sampled_action=np.asarray(sampled_actions),
+        effective_action=np.asarray(effective_actions),
     )
     rollout_name = (
         "training_rollout.mp4"
@@ -945,6 +992,11 @@ def main() -> None:
             "gravity_z_error": values[:, 14],
             "distal_z_error": values[:, 15],
         }
+    )
+    action_summary = summarize_action_diagnostics(
+        np.asarray(action_means),
+        np.asarray(effective_actions),
+        sampled_action=np.asarray(sampled_actions),
     )
     reference_path = Path(env.reference_path).resolve()
     true_terminal = bool(np.any(values[:, 4] > 0.5))
@@ -1026,6 +1078,7 @@ def main() -> None:
             if isinstance(actor_params, FrozenPreviewResidualParams)
             else None
         ),
+        **action_summary,
         **stability_summary,
     }
     (args.output_dir / "summary.json").write_text(
