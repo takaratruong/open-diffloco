@@ -272,15 +272,6 @@ def test_train_wires_native_rmr_preview_migration_and_parent_action():
         (
             {
                 "actor_cagrad": True,
-                "gradient_accumulation_steps": 2,
-                "env_variant": "g1_tracking_rmr",
-                "actor_per_env_grad_clip": 1.0,
-            },
-            "cannot combine with per-env clipping",
-        ),
-        (
-            {
-                "actor_cagrad": True,
                 "gradient_accumulation_steps": 1,
                 "env_variant": "g1_tracking_rmr",
             },
@@ -302,6 +293,22 @@ def test_train_rejects_invalid_cagrad_contracts(kwargs, message):
 
     with pytest.raises(ValueError, match=message):
         train(**kwargs)
+
+
+def test_cagrad_accepts_positive_per_environment_gradient_clipping():
+    from src.algorithms.shac.algorithm import validate_actor_cagrad_configuration
+
+    validate_actor_cagrad_configuration(
+        actor_cagrad=True,
+        alpha=0.5,
+        iterations=32,
+        adaptive_phase_sampling=False,
+        actor_phase_robust_weighting=False,
+        env_variant="g1_tracking_rmr",
+        actor_per_env_grad_clip=1.0,
+        gradient_accumulation_steps=2,
+        actor_phase_bin_count=5,
+    )
 
 
 def test_resume_restores_cagrad_but_legacy_hparams_allow_treatment_start():

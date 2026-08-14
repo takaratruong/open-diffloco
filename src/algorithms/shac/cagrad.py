@@ -5,6 +5,8 @@ from typing import Any, NamedTuple
 import jax
 import jax.numpy as jp
 
+from src.algorithms.shac.gradients import per_env_gradient_statistics
+
 PyTree = Any
 
 
@@ -35,6 +37,7 @@ def accumulate_phase_gradients(
     *,
     phase_count: int,
     bin_count: int,
+    per_env_max_norm: float | None = None,
 ) -> PhaseGradientAccumulator:
     """Accumulate finite gradient elements by reference-phase bin."""
     if phase_count < 1 or bin_count < 1:
@@ -49,6 +52,28 @@ def accumulate_phase_gradients(
     ):
         raise ValueError("all gradient leaves must share the phase axis")
 
+    finite_by_env = None
+    if per_env_max_norm is not None:
+        if per_env_max_norm <= 0.0:
+            raise ValueError("per-env gradient max norm must be positive")
+        stats = per_env_gradient_statistics(per_env_gradients)
+        finite_by_env = stats["finite_by_env"]
+        raw_norm = stats["raw_norm_by_env"]
+        scale = jp.minimum(
+            1.0, per_env_max_norm / jp.maximum(raw_norm, 1e-12)
+        )
+        scale = jp.where(finite_by_env, scale, 0.0)
+
+        def sanitize_and_clip(leaf):
+            broadcast_shape = (num_envs,) + (1,) * (leaf.ndim - 1)
+            return jp.where(jp.isfinite(leaf), leaf, 0.0) * scale.reshape(
+                broadcast_shape
+            )
+
+        per_env_gradients = jax.tree_util.tree_map(
+            sanitize_and_clip, per_env_gradients
+        )
+
     bins = jp.minimum((phases * bin_count) // phase_count, bin_count - 1)
 
     def finite_sum(leaf):
@@ -59,7 +84,16 @@ def accumulate_phase_gradients(
         )
 
     def finite_count(leaf):
-        finite = jp.isfinite(leaf)
+        finite = (
+            jp.broadcast_to(
+                finite_by_env.reshape(
+                    (num_envs,) + (1,) * (leaf.ndim - 1)
+                ),
+                leaf.shape,
+            )
+            if finite_by_env is not None
+            else jp.isfinite(leaf)
+        )
         shape = (bin_count,) + leaf.shape[1:]
         return jp.zeros(shape, dtype=jp.int32).at[bins].add(
             finite.astype(jp.int32)
@@ -67,7 +101,14 @@ def accumulate_phase_gradients(
 
     sums = jax.tree_util.tree_map(finite_sum, per_env_gradients)
     finite_counts = jax.tree_util.tree_map(finite_count, per_env_gradients)
-    env_counts = jp.zeros((bin_count,), dtype=jp.int32).at[bins].add(1)
+    env_contributors = (
+        finite_by_env.astype(jp.int32)
+        if finite_by_env is not None
+        else jp.ones((num_envs,), dtype=jp.int32)
+    )
+    env_counts = jp.zeros((bin_count,), dtype=jp.int32).at[bins].add(
+        env_contributors
+    )
     return PhaseGradientAccumulator(sums, finite_counts, env_counts)
 
 

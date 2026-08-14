@@ -105,7 +105,7 @@ def test_frozen_preview_recovery_supports_a_short_anchored_discriminator():
     assert args.checkpoint_updates == 8
 
 
-def test_frozen_preview_recovery_can_pin_short_lr_decay_in_long_run():
+def test_frozen_preview_recovery_can_clip_contact_gradient_outliers():
     from tools.run_g1_rmr_frozen_preview_recovery import (
         build_parser,
         build_rmr_frozen_preview_recovery_kwargs,
@@ -116,22 +116,19 @@ def test_frozen_preview_recovery_can_pin_short_lr_decay_in_long_run():
         Path("/tmp/walk.npz"),
         seed=0,
         source_actor=object(),
-        actor_policy_anchor_weight=1.0,
-        total_updates=128,
-        checkpoint_updates=8,
-        lr_decay_updates=16,
+        actor_per_env_grad_clip=1.0,
     )
 
-    assert candidate["total_steps"] == 393_216
-    assert candidate["lr_decay_updates"] == 16
+    assert candidate["actor_cagrad"] is True
+    assert candidate["actor_per_env_grad_clip"] == 1.0
     args = build_parser().parse_args(
         [
             "--solver-profile",
             "g1-4x5",
             "--source-policy-checkpoint",
             "/tmp/source.pt",
-            "--lr-decay-updates",
-            "16",
+            "--actor-per-env-grad-clip",
+            "1.0",
         ]
     )
-    assert args.lr_decay_updates == 16
+    assert args.actor_per_env_grad_clip == 1.0

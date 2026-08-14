@@ -102,6 +102,34 @@ def test_missing_phase_bin_marks_finalized_gradients_invalid():
     assert not bool(valid)
 
 
+def test_phase_accumulator_clips_each_environment_before_bin_mean():
+    gradients = {
+        "w": jnp.array(
+            [
+                [3.0, 4.0],
+                [300.0, 400.0],
+                [jnp.nan, 1.0],
+                [0.0, 2.0],
+            ]
+        )
+    }
+    accumulator = accumulate_phase_gradients(
+        gradients,
+        jnp.array([0, 0, 100, 100]),
+        phase_count=200,
+        bin_count=2,
+        per_env_max_norm=10.0,
+    )
+
+    tasks, counts, valid = finalize_phase_gradients(accumulator)
+
+    # Bin zero averages [3,4] with the clipped [6,8]. The nonfinite rollout
+    # in bin one is removed as a whole, leaving only [0,2].
+    np.testing.assert_allclose(tasks["w"], np.array([[4.5, 6.0], [0.0, 2.0]]))
+    np.testing.assert_array_equal(counts, np.array([2, 1]))
+    assert bool(valid)
+
+
 def test_identical_task_gradients_produce_collinear_combined_direction():
     task = jnp.array([2.0, -3.0, 4.0])
     task_gradients = {"w": jnp.broadcast_to(task, (5, task.size))}
