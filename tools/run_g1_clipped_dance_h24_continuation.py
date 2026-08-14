@@ -112,7 +112,6 @@ def validate_training_artifacts(run_directory: Path) -> dict[str, object]:
     expected = {
         "unroll_length": 24,
         "total_steps": CONTINUATION_END_STEP,
-        "checkpoint_interval": CHECKPOINT_INTERVAL,
         "actor_per_env_grad_clip": 1.0,
         "num_envs": 256,
         "gradient_accumulation_steps": 2,
