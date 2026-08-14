@@ -2354,7 +2354,7 @@ def train(
 
             if actor_policy_anchor_weight > 0.0:
                 anchor_obs = jax.lax.stop_gradient(actor_obs)
-                if actor_residual_preview_adapter:
+                if actor_residual_preview_adapter or actor_preview_adapter:
                     (
                         anchor_candidate_action,
                         anchor_parent_action,
