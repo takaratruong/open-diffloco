@@ -1005,6 +1005,34 @@ def resolve_root_reset_noise_resume_settings(
     return requested
 
 
+def resolve_actor_per_env_grad_clip_resume_setting(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested: float | None,
+    allow_change: bool,
+) -> float | None:
+    """Restore a resumed clip unless an experiment explicitly changes it."""
+    if not isinstance(allow_change, bool):
+        raise ValueError(
+            "allow_resume_actor_per_env_grad_clip_change must be boolean"
+        )
+    if (
+        resumed_hparams is None
+        or "actor_per_env_grad_clip" not in resumed_hparams
+    ):
+        raise ValueError(
+            "actor_per_env_grad_clip requires complete resume metadata"
+        )
+    resumed = resumed_hparams["actor_per_env_grad_clip"]
+    if requested is None and not allow_change:
+        return resumed
+    if requested != resumed and not allow_change:
+        raise ValueError(
+            "changing actor_per_env_grad_clip requires explicit resume authority"
+        )
+    return requested if allow_change else resumed
+
+
 def resolve_cagrad_resume_settings(
     resumed_hparams: dict[str, object] | None,
     *,
@@ -1287,6 +1315,7 @@ def train(
     actor_residual_preview_optimizer: str = "adam",
     env_variant: str = "blind_nolinvel_nokinref",
     actor_per_env_grad_clip: float = None,
+    allow_resume_actor_per_env_grad_clip_change: bool = False,
     critic_per_env_grad_clip: float = None,
     actor_phase_robust_weighting: bool = False,
     actor_phase_bin_count: int = 5,
@@ -1563,6 +1592,10 @@ def train(
         raise ValueError(
             "allow_resume_reference_root_reset_noise_change must be boolean"
         )
+    if not isinstance(allow_resume_actor_per_env_grad_clip_change, bool):
+        raise ValueError(
+            "allow_resume_actor_per_env_grad_clip_change must be boolean"
+        )
     if not isinstance(allow_resume_torso_wrench_assistance_change, bool):
         raise ValueError(
             "allow_resume_torso_wrench_assistance_change must be boolean"
@@ -1747,6 +1780,13 @@ def train(
             requested_probability=reference_root_reset_noise_probability,
             allow_change=allow_resume_reference_root_reset_noise_change,
         )
+        actor_per_env_grad_clip = (
+            resolve_actor_per_env_grad_clip_resume_setting(
+                resumed_hparams,
+                requested=actor_per_env_grad_clip,
+                allow_change=allow_resume_actor_per_env_grad_clip_change,
+            )
+        )
         (
             torso_wrench_assistance,
             torso_wrench_assistance_start_step,
@@ -1854,10 +1894,6 @@ def train(
             if "actor_observation_noise" in resumed_hparams:
                 actor_observation_noise = resumed_hparams[
                     "actor_observation_noise"
-                ]
-            if "actor_per_env_grad_clip" in resumed_hparams:
-                actor_per_env_grad_clip = resumed_hparams[
-                    "actor_per_env_grad_clip"
                 ]
             if "critic_per_env_grad_clip" in resumed_hparams:
                 critic_per_env_grad_clip = resumed_hparams[
@@ -3778,6 +3814,9 @@ def train(
             else None
         ),
         "actor_per_env_grad_clip": actor_per_env_grad_clip,
+        "allow_resume_actor_per_env_grad_clip_change": (
+            allow_resume_actor_per_env_grad_clip_change
+        ),
         "critic_per_env_grad_clip": critic_per_env_grad_clip,
         "actor_phase_robust_weighting": actor_phase_robust_weighting,
         "actor_phase_bin_count": actor_phase_bin_count,
