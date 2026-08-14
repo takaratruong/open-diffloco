@@ -22,7 +22,7 @@ def build_rmr_full_actor_recovery_kwargs(
     seed: int,
     source_actor,
 ) -> dict:
-    """Build the immutable 16-update full-policy recovery treatment."""
+    """Build the memory-safe 16-update full-policy recovery treatment."""
     kwargs = build_canonical_kwargs(
         profile_name,
         reference_path,
@@ -30,8 +30,9 @@ def build_rmr_full_actor_recovery_kwargs(
         resume_from=None,
     )
     kwargs.update(
-        total_steps=98_304,
-        checkpoint_interval=49_152,
+        total_steps=49_152,
+        checkpoint_interval=24_576,
+        num_envs=128,
         gradient_accumulation_steps=2,
         actor_lr=1e-4,
         actor_bootstrap_scale=0.0,
@@ -52,7 +53,7 @@ def build_rmr_full_actor_recovery_kwargs(
         push_velocity_range=(0.0, 0.0),
         push_interval_s=1e9,
         zero_difficulty_frac=1.0,
-        curriculum_grace=98_304,
+        curriculum_grace=49_152,
         curriculum_steps=1,
         actor_cagrad=True,
         actor_cagrad_alpha=0.5,

@@ -15,11 +15,20 @@ def test_full_actor_recovery_runner_has_exact_bounded_contract():
         source_actor=source_actor,
     )
 
-    assert candidate["total_steps"] == 98_304
-    assert candidate["checkpoint_interval"] == 49_152
-    assert candidate["num_envs"] == 256
+    assert candidate["total_steps"] == 49_152
+    assert candidate["checkpoint_interval"] == 24_576
+    assert candidate["num_envs"] == 128
     assert candidate["gradient_accumulation_steps"] == 2
     assert candidate["unroll_length"] == 12
+    assert (
+        candidate["total_steps"]
+        // (
+            candidate["num_envs"]
+            * candidate["gradient_accumulation_steps"]
+            * candidate["unroll_length"]
+        )
+        == 16
+    )
     assert candidate["actor_lr"] == 1e-4
     assert candidate["actor_bootstrap_scale"] == 0.0
     assert candidate["action_noise_std_start"] == 0.05
