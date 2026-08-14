@@ -69,6 +69,14 @@ def test_train_wires_policy_anchor_into_rollout_loss_and_hparams():
     assert '"actor_policy_anchor_weight": actor_policy_anchor_weight' in source
 
 
+def test_residual_preview_anchor_reuses_expanded_candidate_and_parent_actions():
+    """The 154-wide frozen parent must never receive the 328-wide preview obs."""
+    from src.algorithms.shac.algorithm import train
+
+    source = inspect.getsource(train)
+    assert "if actor_residual_preview_adapter:\n                    (\n                        anchor_candidate_action,\n                        anchor_parent_action,\n                    ) = (action, parent_action)" in source
+
+
 def test_policy_anchor_checkpoint_telemetry_is_finite_and_explicit():
     from src.algorithms.shac.algorithm import build_policy_anchor_telemetry
 

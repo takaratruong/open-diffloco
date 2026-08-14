@@ -2354,12 +2354,18 @@ def train(
 
             if actor_policy_anchor_weight > 0.0:
                 anchor_obs = jax.lax.stop_gradient(actor_obs)
-                anchor_candidate_action = apply_trainable_rmr_policy(
-                    actor_params, anchor_obs
-                ).astype(jp.float64)
-                anchor_parent_action = apply_trainable_rmr_policy(
-                    initial_full_actor_policy, anchor_obs
-                ).astype(jp.float64)
+                if actor_residual_preview_adapter:
+                    (
+                        anchor_candidate_action,
+                        anchor_parent_action,
+                    ) = (action, parent_action)
+                else:
+                    anchor_candidate_action = apply_trainable_rmr_policy(
+                        actor_params, anchor_obs
+                    ).astype(jp.float64)
+                    anchor_parent_action = apply_trainable_rmr_policy(
+                        initial_full_actor_policy, anchor_obs
+                    ).astype(jp.float64)
                 actor_policy_anchor_squared_error = jp.mean(
                     jp.square(
                         anchor_candidate_action
