@@ -622,6 +622,17 @@ def select_initial_training_state(*, initialized_state, resumed_state):
     return resumed_state if resumed_state is not None else initialized_state
 
 
+def migrate_env_state_metrics(resumed_env_state, initialized_env_state):
+    """Align diagnostic metric leaves without changing physical state."""
+    resumed_metrics = resumed_env_state.metrics
+    initialized_metrics = initialized_env_state.metrics
+    metrics = {
+        name: resumed_metrics.get(name, initial_value)
+        for name, initial_value in initialized_metrics.items()
+    }
+    return resumed_env_state.replace(metrics=metrics)
+
+
 def update_adaptive_phase_state(
     *,
     failed_count: jax.Array,
@@ -3384,6 +3395,12 @@ def train(
             "Restoring complete training state from step "
             f"{resumed_step} (PRNG, environments, parameters, optimizers, "
             "and normalizers)"
+        )
+        resumed_state = resumed_state.replace(
+            env_state=migrate_env_state_metrics(
+                resumed_state.env_state,
+                initialized_state.env_state,
+            )
         )
         if future_reference_upgrade:
             legacy_resumed_state = resumed_state

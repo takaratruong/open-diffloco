@@ -3,6 +3,18 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from dataclasses import dataclass, replace
+
+import jax.numpy as jnp
+
+
+@dataclass(frozen=True)
+class _EnvState:
+    qpos: object
+    metrics: dict
+
+    def replace(self, **changes):
+        return replace(self, **changes)
 
 
 class ShacExactResumeTest(unittest.TestCase):
@@ -454,6 +466,37 @@ class ShacExactResumeTest(unittest.TestCase):
                 resumed_state=None,
             ),
             initialized,
+        )
+
+    def test_resume_migrates_environment_metric_schema_only(self):
+        from src.algorithms.shac.algorithm import migrate_env_state_metrics
+
+        qpos = jnp.asarray([[1.0, 2.0]])
+        resumed = _EnvState(
+            qpos=qpos,
+            metrics={
+                "rew_action_rate": jnp.asarray([3.0]),
+                "legacy_removed_metric": jnp.asarray([9.0]),
+            },
+        )
+        initialized = _EnvState(
+            qpos=jnp.zeros_like(qpos),
+            metrics={
+                "rew_action_rate": jnp.asarray([0.0]),
+                "rew_action_magnitude": jnp.asarray([0.0]),
+            },
+        )
+
+        migrated = migrate_env_state_metrics(resumed, initialized)
+
+        self.assertIs(migrated.qpos, qpos)
+        self.assertEqual(
+            set(migrated.metrics),
+            {"rew_action_rate", "rew_action_magnitude"},
+        )
+        self.assertEqual(float(migrated.metrics["rew_action_rate"][0]), 3.0)
+        self.assertEqual(
+            float(migrated.metrics["rew_action_magnitude"][0]), 0.0
         )
 
 
