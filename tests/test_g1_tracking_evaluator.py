@@ -18,6 +18,7 @@ from tools.evaluate_g1_tracking import (
     make_evaluation_env,
     remaining_reference_transitions,
     scale_policy_action,
+    select_full_rmr_actor_observation,
     summarize_stability_errors,
     validate_training_action_mean,
 )
@@ -32,6 +33,15 @@ RMR_ACTIONS = Path(
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    def test_full_rmr_actor_selects_checkpoint_observation_prefix(self):
+        policy = SimpleNamespace(mean=jnp.zeros((154,)))
+        observation = jnp.arange(328.0)
+
+        selected = select_full_rmr_actor_observation(policy, observation)
+
+        self.assertEqual(selected.shape, (154,))
+        np.testing.assert_array_equal(selected, observation[:154])
+
     def test_training_action_tape_rejects_an_unbounded_mean(self):
         validate_training_action_mean(np.array([[1.0, -1.0, 0.0]]))
         with self.assertRaisesRegex(ValueError, "actor mean"):

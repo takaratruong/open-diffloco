@@ -268,6 +268,20 @@ def scale_policy_action(action: jax.Array, gain: float) -> jax.Array:
     return action * gain
 
 
+def select_full_rmr_actor_observation(
+    policy: object, observation: jax.Array
+) -> jax.Array:
+    """Select the observation prefix encoded by a full RMR checkpoint."""
+    input_dim = int(policy.mean.shape[0])
+    observation_dim = int(observation.shape[-1])
+    if input_dim > observation_dim:
+        raise ValueError(
+            f"policy input width {input_dim} exceeds evaluator observation "
+            f"width {observation_dim}"
+        )
+    return observation[..., :input_dim]
+
+
 def prepare_evaluation_action(
     action: jax.Array, *, squash: bool
 ) -> jax.Array:
@@ -772,7 +786,10 @@ def main() -> None:
             policy_obs = env._apply_obs_noise(state.obs, obs_rng)
         if full_rmr_actor is not None:
             action = apply_trainable_rmr_policy(
-                full_rmr_actor, policy_obs
+                full_rmr_actor,
+                select_full_rmr_actor_observation(
+                    full_rmr_actor, policy_obs
+                ),
             ).astype(jnp.float64)
         elif action_tape is not None:
             # The logged RMR controller runs at 50 Hz; the grounded reference
