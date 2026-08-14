@@ -29,6 +29,20 @@ DEFAULT_PHASES = (0, 24, 48, 72, 96)
 LOOKAHEAD_STEPS = (4, 8, 12)
 
 
+def phase_grid_action_contract(
+    reference_residual_scale: float,
+) -> dict[str, object]:
+    """Return the exact source-order action boundary used by evaluation."""
+    if reference_residual_scale not in (0.5, 1.0):
+        raise ValueError("reference residual scale must be 0.5 or 1.0")
+    return {
+        "environment_variant": "g1_tracking_rmr_50hz_source_step",
+        "reference_residual_control": True,
+        "reference_residual_scale": reference_residual_scale,
+        "squash_actor_actions": False,
+    }
+
+
 def select_rmr_policy_observation(
     policy: RmrPolicy,
     observation: jnp.ndarray,
@@ -104,6 +118,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phases", type=int, nargs=5, default=DEFAULT_PHASES)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
+        "--reference-residual-scale",
+        type=float,
+        choices=(0.5, 1.0),
+        default=0.5,
+    )
+    parser.add_argument(
         "--solver-profile",
         choices=tuple(sorted(SOLVER_PROFILES)),
         default="g1-4x5",
@@ -129,16 +149,23 @@ def main() -> None:
         raise FileNotFoundError(f"checkpoint does not exist: {checkpoint_path}")
 
     profile = get_solver_profile(args.solver_profile)
+    action_contract = phase_grid_action_contract(
+        args.reference_residual_scale
+    )
     env = make_evaluation_env(
-        "g1_tracking_rmr_50hz_source_step",
+        str(action_contract["environment_variant"]),
         solver_iterations=profile.iterations,
         solver_ls_iterations=profile.ls_iterations,
         reference_path=reference_path,
         reference_stride=1,
         actor_history_len=1,
         actor_reference_lookahead_steps=LOOKAHEAD_STEPS,
-        reference_residual_control=True,
-        reference_residual_scale=0.5,
+        reference_residual_control=bool(
+            action_contract["reference_residual_control"]
+        ),
+        reference_residual_scale=float(
+            action_contract["reference_residual_scale"]
+        ),
     )
     phases = tuple(args.phases)
     reference_transitions = int(env.reference_transitions)
@@ -198,6 +225,7 @@ def main() -> None:
         "source_policy_path": str(source_path),
         "source_policy_sha256": _sha256(source_path),
         "solver_profile": args.solver_profile,
+        "action_contract": action_contract,
         "actor_reference_lookahead_steps": list(LOOKAHEAD_STEPS),
         "source": {
             "results": source_results,

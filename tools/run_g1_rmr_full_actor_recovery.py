@@ -21,8 +21,11 @@ def build_rmr_full_actor_recovery_kwargs(
     reference_path: str | Path,
     seed: int,
     source_actor,
+    reference_residual_scale: float = 0.5,
 ) -> dict:
     """Build the memory-safe 16-update full-policy recovery treatment."""
+    if reference_residual_scale not in (0.5, 1.0):
+        raise ValueError("reference residual scale must be 0.5 or 1.0")
     kwargs = build_canonical_kwargs(
         profile_name,
         reference_path,
@@ -41,6 +44,7 @@ def build_rmr_full_actor_recovery_kwargs(
         env_variant="g1_tracking_rmr_50hz_action_parity",
         actor_history_len=1,
         actor_reference_lookahead_steps=(),
+        reference_residual_scale=reference_residual_scale,
         initial_full_actor_policy=source_actor,
         domain_randomization=False,
         actor_observation_noise=False,
@@ -76,6 +80,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path(DEFAULT_REFERENCE_PATH),
     )
     parser.add_argument("--source-policy-checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--reference-residual-scale",
+        type=float,
+        choices=(0.5, 1.0),
+        default=0.5,
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--output-root",
@@ -96,6 +106,7 @@ def main() -> None:
         args.reference_path.resolve(),
         args.seed,
         source_actor,
+        reference_residual_scale=args.reference_residual_scale,
     )
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)

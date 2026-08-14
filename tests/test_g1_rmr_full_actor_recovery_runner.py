@@ -1,6 +1,53 @@
 from pathlib import Path
 
 
+def test_full_scale_phase_grid_contract_is_explicit_and_legacy_safe():
+    from tools.evaluate_g1_rmr_phase_grid import (
+        build_parser as build_phase_grid_parser,
+        phase_grid_action_contract,
+    )
+
+    parser = build_phase_grid_parser()
+    required = [
+        "--source-policy-checkpoint",
+        "/tmp/source.pt",
+        "--output",
+        "/tmp/grid.json",
+    ]
+    assert parser.parse_args(required).reference_residual_scale == 0.5
+    args = parser.parse_args(
+        [*required, "--reference-residual-scale", "1.0"]
+    )
+    assert args.reference_residual_scale == 1.0
+    assert phase_grid_action_contract(1.0) == {
+        "environment_variant": "g1_tracking_rmr_50hz_source_step",
+        "reference_residual_control": True,
+        "reference_residual_scale": 1.0,
+        "squash_actor_actions": False,
+    }
+
+
+def test_full_scale_phase_grid_rejects_an_unregistered_scale():
+    from tools.evaluate_g1_rmr_phase_grid import build_parser
+
+    parser = build_parser()
+    try:
+        parser.parse_args(
+            [
+                "--source-policy-checkpoint",
+                "/tmp/source.pt",
+                "--output",
+                "/tmp/grid.json",
+                "--reference-residual-scale",
+                "0.75",
+            ]
+        )
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("phase grid accepted an unregistered scale")
+
+
 def test_full_actor_recovery_runner_has_exact_bounded_contract():
     from tools.run_g1_rmr_full_actor_recovery import (
         build_rmr_full_actor_recovery_kwargs,
@@ -73,3 +120,39 @@ def test_full_actor_recovery_parser_requires_source_and_hides_tuning():
             pass
         else:
             raise AssertionError(f"parser unexpectedly accepted {argv}")
+
+
+def test_full_scale_recovery_is_explicit_and_preserves_action_parity():
+    from tools.run_g1_rmr_full_actor_recovery import (
+        build_rmr_full_actor_recovery_kwargs,
+    )
+
+    candidate = build_rmr_full_actor_recovery_kwargs(
+        "g1-4x5",
+        Path("/tmp/exact-rmr-motion.npz"),
+        seed=0,
+        source_actor=object(),
+        reference_residual_scale=1.0,
+    )
+
+    assert candidate["reference_residual_scale"] == 1.0
+    assert candidate["env_variant"] == "g1_tracking_rmr_50hz_action_parity"
+
+
+def test_full_scale_recovery_parser_is_choices_constrained():
+    from tools.run_g1_rmr_full_actor_recovery import build_parser
+
+    parser = build_parser()
+    required = [
+        "--solver-profile",
+        "g1-4x5",
+        "--source-policy-checkpoint",
+        "/tmp/source.pt",
+    ]
+    assert parser.parse_args(required).reference_residual_scale == 0.5
+    assert (
+        parser.parse_args(
+            [*required, "--reference-residual-scale", "1.0"]
+        ).reference_residual_scale
+        == 1.0
+    )
