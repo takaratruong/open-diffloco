@@ -26,6 +26,7 @@ def build_rmr_frozen_preview_recovery_kwargs(
     actor_policy_anchor_weight: float = 0.0,
     total_updates: int = 128,
     checkpoint_updates: int = 16,
+    lr_decay_updates: int | None = None,
 ) -> dict:
     """Build the frozen-parent, zero-preview-column walking treatment."""
     kwargs = build_rmr_full_actor_recovery_kwargs(
@@ -41,6 +42,7 @@ def build_rmr_frozen_preview_recovery_kwargs(
     kwargs.update(
         actor_reference_lookahead_steps=(4, 8, 12),
         actor_preview_adapter=True,
+        lr_decay_updates=lr_decay_updates,
     )
     return kwargs
 
@@ -63,6 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--total-updates", type=int, default=128)
     parser.add_argument("--checkpoint-updates", type=int, default=16)
+    parser.add_argument("--lr-decay-updates", type=int)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--output-root",
@@ -86,6 +89,7 @@ def main() -> None:
         actor_policy_anchor_weight=args.actor_policy_anchor_weight,
         total_updates=args.total_updates,
         checkpoint_updates=args.checkpoint_updates,
+        lr_decay_updates=args.lr_decay_updates,
     )
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)

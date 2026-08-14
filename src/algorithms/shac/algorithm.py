@@ -1220,6 +1220,27 @@ def validate_actor_policy_anchor_configuration(
         raise ValueError("actor policy anchoring currently requires a fresh run")
 
 
+def resolve_lr_decay_updates(
+    *,
+    total_steps: int,
+    steps_per_actor_update: int,
+    requested_updates: int | None,
+) -> int:
+    """Resolve an optional optimizer-schedule horizon independently of budget."""
+    if requested_updates is not None and (
+        isinstance(requested_updates, bool)
+        or not isinstance(requested_updates, int)
+        or requested_updates <= 0
+    ):
+        raise ValueError("lr decay updates must be a positive integer")
+    if steps_per_actor_update <= 0:
+        raise ValueError("steps per actor update must be positive")
+    default_updates = total_steps // steps_per_actor_update
+    if default_updates <= 0:
+        raise ValueError("total steps must include at least one actor update")
+    return default_updates if requested_updates is None else requested_updates
+
+
 def train(
     # General
     total_steps: int = 100_000,
@@ -1233,6 +1254,7 @@ def train(
     target_update_rate: float = 0.01,
     critic_iterations: int = 16,
     use_lr_decay: bool = False,
+    lr_decay_updates: int | None = None,
     xml_path: str = "src/envs/go2/models/scene_mjx.xml",
     action_scale: float = 0.5,
     # Commands
@@ -1343,7 +1365,9 @@ def train(
         gamma: Discount factor
         target_update_rate: Soft update rate for target critic (1-alpha)
         critic_iterations: Number of critic gradient steps per actor update
-        use_lr_decay: Linear LR decay to 62.5% over training
+        use_lr_decay: Linear LR decay to 62% over the configured horizon.
+        lr_decay_updates: Optional actor-update horizon for LR decay, independent
+            of the total training budget. Defaults to the full declared budget.
         action_scale: Scale factor for actions
         cmd_vel_x_range: (min, max) for forward velocity command (m/s)
         cmd_vel_y_range: (min, max) for lateral velocity command (m/s)
@@ -2162,7 +2186,11 @@ def train(
 
     # Linear LR decay
     if use_lr_decay:
-        total_iters = total_steps // steps_per_actor_update
+        total_iters = resolve_lr_decay_updates(
+            total_steps=total_steps,
+            steps_per_actor_update=steps_per_actor_update,
+            requested_updates=lr_decay_updates,
+        )
         lr_floor = 0.62
         actor_schedule = optax.linear_schedule(
             init_value=actor_lr,
@@ -2176,11 +2204,13 @@ def train(
             transition_steps=total_iters * critic_iterations,
         )
         print(
-            f"LR decay: linear over {total_iters} iters, "
+            f"LR decay: linear over {total_iters} actor updates, "
             f"actor {actor_lr:.1e} --> {actor_lr * lr_floor:.1e} ({total_iters} steps), "
             f"critic {critic_lr:.1e} --> {critic_lr * lr_floor:.1e} ({total_iters * critic_iterations} steps)"
         )
     else:
+        if lr_decay_updates is not None:
+            raise ValueError("lr decay updates require use_lr_decay=True")
         actor_schedule = actor_lr
         critic_schedule = critic_lr
 
@@ -3635,6 +3665,16 @@ def train(
         "gae_lambda": gae_lambda,
         "target_update_rate": target_update_rate,
         "critic_iterations": critic_iterations,
+        "use_lr_decay": use_lr_decay,
+        "lr_decay_updates": (
+            resolve_lr_decay_updates(
+                total_steps=total_steps,
+                steps_per_actor_update=steps_per_actor_update,
+                requested_updates=lr_decay_updates,
+            )
+            if use_lr_decay
+            else None
+        ),
         "xml_path": xml_path,
         "action_scale": action_scale,
         "cmd_vel_x_range": list(cmd_vel_x_range),
