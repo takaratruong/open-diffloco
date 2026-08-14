@@ -137,7 +137,14 @@ def _validate_cagrad_row(row: dict[str, Any], *, step: int) -> None:
     )
 
 
-def validate_training_artifacts(run_directory: Path) -> dict[str, Any]:
+def validate_training_artifacts(
+    run_directory: Path,
+    *,
+    expected_kwargs: dict[str, Any] | None = None,
+    expected_steps: tuple[int, ...] | None = None,
+    total_steps: int = TOTAL_STEPS,
+    protocol: str = "g1-fresh-ppo-action-contract-walk-training-v1",
+) -> dict[str, Any]:
     """Fail closed on drift, incomplete checkpoints, or nonfinite learning."""
     run_directory = run_directory.resolve()
     hparams_path = run_directory / "hparams.json"
@@ -151,18 +158,23 @@ def validate_training_artifacts(run_directory: Path) -> dict[str, Any]:
     if any(hparams.get(key) != value for key, value in contract.items()):
         raise ValueError("persisted action contract does not match treatment")
 
-    expected = build_fresh_ppo_action_contract_kwargs(
-        "g1-4x5", Path(hparams["reference_path"]), int(hparams["seed"])
-    )
+    if expected_kwargs is None:
+        expected_kwargs = build_fresh_ppo_action_contract_kwargs(
+            "g1-4x5", Path(hparams["reference_path"]), int(hparams["seed"])
+        )
     unpersisted = {"checkpoint_interval", "diagnose", "resume_from"}
-    for key in sorted(set(expected) - unpersisted):
-        expected_value = expected[key]
+    for key in sorted(set(expected_kwargs) - unpersisted):
+        expected_value = expected_kwargs[key]
         if isinstance(expected_value, tuple):
             expected_value = list(expected_value)
         if hparams.get(key) != expected_value:
             raise ValueError(f"training hparams drifted at {key}")
 
-    expected_steps = list(expected_checkpoint_steps())
+    if expected_steps is None:
+        expected_steps = expected_checkpoint_steps()
+    expected_steps = list(expected_steps)
+    if not expected_steps or expected_steps[-1] != total_steps:
+        raise ValueError("checkpoint steps must end at total_steps")
     expected_names = {
         f"checkpoint_step_{step:06d}.pkl" for step in expected_steps
     }
@@ -178,13 +190,13 @@ def validate_training_artifacts(run_directory: Path) -> dict[str, Any]:
         )
         for step in expected_steps
     }
-    final_sha256 = checkpoint_sha256_by_step[str(TOTAL_STEPS)]
+    final_sha256 = checkpoint_sha256_by_step[str(total_steps)]
     for name in ("checkpoint_latest.pkl", "policy_final.pkl"):
         path = run_directory / name
         if (
             path.is_symlink()
             or not path.is_file()
-            or _validate_checkpoint(path, TOTAL_STEPS) != final_sha256
+            or _validate_checkpoint(path, total_steps) != final_sha256
         ):
             raise ValueError(f"{name} does not match the final checkpoint")
 
@@ -223,7 +235,7 @@ def validate_training_artifacts(run_directory: Path) -> dict[str, Any]:
         raise ValueError("actor gradient/update diagnostics are invalid")
 
     return {
-        "protocol": "g1-fresh-ppo-action-contract-walk-training-v1",
+        "protocol": protocol,
         "valid": True,
         "run_directory": str(run_directory),
         "hparams_sha256": sha256_file(hparams_path),
