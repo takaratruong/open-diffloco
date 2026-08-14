@@ -227,7 +227,7 @@ def test_collector_stops_simulator_gradients_and_preserves_transition_bits() -> 
             horizon=2,
         )
 
-    rollout, final_state, _ = run(actor)
+    rollout, final_state, _, actor_norm, critic_norm = run(actor)
     assert rollout.actions.shape == (2, 2, 1)
     assert rollout.dones.shape == (2, 2)
     assert rollout.terminals.shape == (2, 2)
@@ -237,6 +237,18 @@ def test_collector_stops_simulator_gradients_and_preserves_transition_bits() -> 
         final_state.data,
         _toy_batched_state().data + jnp.sum(rollout.actions[..., 0], axis=0),
     )
+    raw_second_observation = (
+        _toy_batched_state().obs + rollout.actions[0]
+    )
+    expected_norm_after_first = normalizer.update(norm_state, raw_second_observation)
+    expected_second_observation = normalizer.normalize(
+        expected_norm_after_first, raw_second_observation
+    )
+    np.testing.assert_allclose(
+        rollout.observations[1], expected_second_observation, rtol=1e-6, atol=1e-6
+    )
+    assert float(actor_norm.count) > float(norm_state.count)
+    assert float(critic_norm.count) > float(norm_state.count)
 
     gradients = jax.grad(lambda params: jnp.sum(run(params)[0].rewards))(actor)
     assert all(
@@ -281,8 +293,6 @@ def test_one_ppo_update_is_finite_and_changes_policy_parameters() -> None:
     updated, metrics = update_ppo(
         train_state,
         rollout,
-        actor_normalizer=normalizer,
-        critic_normalizer=normalizer,
         actor_optimizer=actor_optimizer,
         critic_optimizer=critic_optimizer,
         gamma=0.99,

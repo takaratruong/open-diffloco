@@ -221,7 +221,7 @@ def collect_rollout(
     critic_norm_state: NormState,
     key: jax.Array,
     horizon: int,
-) -> tuple[PPORollout, Any, jax.Array]:
+) -> tuple[PPORollout, Any, jax.Array, NormState, NormState]:
     """Collects a vmapped rollout and cuts every simulator derivative."""
 
     if horizon < 1:
@@ -231,26 +231,33 @@ def collect_rollout(
     initial_state = jax.tree_util.tree_map(jax.lax.stop_gradient, env_state)
 
     def step(carry, _):
-        state, current_key = carry
+        state, current_key, actor_norm, critic_norm = carry
         current_key, noise_key = jax.random.split(current_key)
-        observations = state.obs
-        critic_observations = vector_critic_obs(state.data, state.info)
-        normalized_observations = actor_normalizer.normalize(
-            actor_norm_state, observations
+        raw_observations = state.obs
+        raw_critic_observations = vector_critic_obs(state.data, state.info)
+        observations = actor_normalizer.normalize(
+            actor_norm, raw_observations
         ).astype(jnp.float32)
-        normalized_critic_observations = critic_normalizer.normalize(
-            critic_norm_state, critic_observations
+        critic_observations = critic_normalizer.normalize(
+            critic_norm, raw_critic_observations
         ).astype(jnp.float32)
-        means = apply_rmr_mlp(actor_params.mlp, normalized_observations)
+        means = apply_rmr_mlp(actor_params.mlp, observations)
         noise = jax.random.normal(noise_key, means.shape, dtype=means.dtype)
         actions = means + jnp.exp(actor_params.log_std) * noise
         log_probs = gaussian_log_prob(actions, means, actor_params.log_std)
-        values = _critic_value(critic_params, normalized_critic_observations)
+        values = _critic_value(critic_params, critic_observations)
 
         next_state = vector_step(state, actions)
+        next_actor_norm = actor_normalizer.update(actor_norm, next_state.obs)
+        next_critic_observations = vector_critic_obs(
+            next_state.data, next_state.info
+        )
+        next_critic_norm = critic_normalizer.update(
+            critic_norm, next_critic_observations
+        )
         bootstrap_observations = next_state.info["bootstrap_critic_obs"]
         normalized_bootstrap = critic_normalizer.normalize(
-            critic_norm_state, bootstrap_observations
+            next_critic_norm, bootstrap_observations
         ).astype(jnp.float32)
         bootstrap_values = _critic_value(critic_params, normalized_bootstrap)
         stopped_next_state = jax.tree_util.tree_map(
@@ -269,23 +276,42 @@ def collect_rollout(
             means=means,
         )
         transition = jax.tree_util.tree_map(jax.lax.stop_gradient, transition)
-        return (stopped_next_state, current_key), transition
+        return (
+            stopped_next_state,
+            current_key,
+            next_actor_norm,
+            next_critic_norm,
+        ), transition
 
-    (final_state, final_key), rollout = jax.lax.scan(
+    (
+        final_state,
+        final_key,
+        final_actor_norm,
+        final_critic_norm,
+    ), rollout = jax.lax.scan(
         step,
-        (initial_state, key),
+        (
+            initial_state,
+            key,
+            actor_norm_state,
+            critic_norm_state,
+        ),
         None,
         length=horizon,
     )
-    return rollout, final_state, final_key
+    return (
+        rollout,
+        final_state,
+        final_key,
+        final_actor_norm,
+        final_critic_norm,
+    )
 
 
 def update_ppo(
     state: PPOTrainState,
     rollout: PPORollout,
     *,
-    actor_normalizer: Normalizer,
-    critic_normalizer: Normalizer,
     actor_optimizer: optax.GradientTransformation,
     critic_optimizer: optax.GradientTransformation,
     gamma: float,
@@ -343,12 +369,8 @@ def update_ppo(
         actor_params, critic_params, actor_opt, critic_opt = carry
 
         def objective(candidate_actor, candidate_critic):
-            actor_obs = actor_normalizer.normalize(
-                state.actor_norm, observations[indices]
-            ).astype(jnp.float32)
-            critic_obs = critic_normalizer.normalize(
-                state.critic_norm, critic_observations[indices]
-            ).astype(jnp.float32)
+            actor_obs = observations[indices].astype(jnp.float32)
+            critic_obs = critic_observations[indices].astype(jnp.float32)
             means = apply_rmr_mlp(candidate_actor.mlp, actor_obs)
             new_log_probs = gaussian_log_prob(
                 actions[indices], means, candidate_actor.log_std
@@ -400,10 +422,6 @@ def update_ppo(
         minibatches,
     )
     actor_params, critic_params, actor_opt, critic_opt = final_carry
-    actor_norm = actor_normalizer.update(state.actor_norm, observations)
-    critic_norm = critic_normalizer.update(
-        state.critic_norm, critic_observations
-    )
     metrics = jax.tree_util.tree_map(jnp.mean, metric_history)
     metrics = {
         **metrics,
@@ -419,8 +437,6 @@ def update_ppo(
             critic_params=critic_params,
             actor_opt=actor_opt,
             critic_opt=critic_opt,
-            actor_norm=actor_norm,
-            critic_norm=critic_norm,
             key=key,
             step=state.step + 1,
         ),
@@ -550,8 +566,6 @@ def train(
     update = jax.jit(
         functools.partial(
             update_ppo,
-            actor_normalizer=actor_normalizer,
-            critic_normalizer=critic_normalizer,
             actor_optimizer=actor_optimizer,
             critic_optimizer=critic_optimizer,
             gamma=gamma,
@@ -588,7 +602,13 @@ def train(
 
     for iteration in range(1, total_iterations + 1):
         started = time.monotonic()
-        rollout, env_state, rollout_key = collect(
+        (
+            rollout,
+            env_state,
+            rollout_key,
+            actor_norm,
+            critic_norm,
+        ) = collect(
             env_state=env_state,
             actor_params=state.actor_params,
             critic_params=state.critic_params,
@@ -596,7 +616,11 @@ def train(
             critic_norm_state=state.critic_norm,
             key=state.key,
         )
-        state = state.replace(key=rollout_key)
+        state = state.replace(
+            key=rollout_key,
+            actor_norm=actor_norm,
+            critic_norm=critic_norm,
+        )
         state, metrics = update(state, rollout)
         jax.block_until_ready(metrics)
         finite = _tree_is_finite(state) and _tree_is_finite(metrics)
