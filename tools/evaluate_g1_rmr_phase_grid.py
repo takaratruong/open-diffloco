@@ -62,6 +62,50 @@ def select_rmr_policy_observation(
     return observation[..., :input_dim]
 
 
+def interpolate_rmr_policy(
+    source: RmrPolicy,
+    candidate: RmrPolicy,
+    *,
+    alpha: float,
+) -> RmrPolicy:
+    """Interpolate candidate network parameters toward an exact source."""
+    if not np.isfinite(alpha) or not 0.0 < alpha <= 1.0:
+        raise ValueError("interpolation alpha must be between zero and one")
+    if not (
+        np.array_equal(np.asarray(source.mean), np.asarray(candidate.mean))
+        and np.array_equal(np.asarray(source.std), np.asarray(candidate.std))
+    ):
+        raise ValueError("source and candidate normalization must match exactly")
+    if len(source.weights) != len(candidate.weights) or len(
+        source.biases
+    ) != len(candidate.biases):
+        raise ValueError("source and candidate network structures differ")
+    if alpha == 1.0:
+        return candidate
+
+    def blend(source_leaf, candidate_leaf):
+        if source_leaf.shape != candidate_leaf.shape:
+            raise ValueError("source and candidate network structures differ")
+        return source_leaf + alpha * (candidate_leaf - source_leaf)
+
+    return RmrPolicy(
+        mean=source.mean,
+        std=source.std,
+        weights=tuple(
+            blend(source_leaf, candidate_leaf)
+            for source_leaf, candidate_leaf in zip(
+                source.weights, candidate.weights, strict=True
+            )
+        ),
+        biases=tuple(
+            blend(source_leaf, candidate_leaf)
+            for source_leaf, candidate_leaf in zip(
+                source.biases, candidate.biases, strict=True
+            )
+        ),
+    )
+
+
 def build_phase_grid_summary(
     results: list[dict],
     *,
@@ -127,6 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(0.5, 1.0),
         default=0.5,
     )
+    parser.add_argument("--interpolation-alpha", type=float, default=1.0)
     parser.add_argument(
         "--solver-profile",
         choices=tuple(sorted(SOLVER_PROFILES)),
@@ -186,6 +231,11 @@ def main() -> None:
             candidate_actor = pickle.load(stream).actor_params
         if not isinstance(candidate_actor, RmrPolicy):
             raise ValueError("candidate checkpoint does not contain an RMR actor")
+        candidate_actor = interpolate_rmr_policy(
+            source_actor,
+            candidate_actor,
+            alpha=args.interpolation_alpha,
+        )
 
     def source_action(state):
         return apply_trainable_rmr_policy(
@@ -246,6 +296,7 @@ def main() -> None:
     if candidate_actor is not None:
         payload["checkpoint_path"] = str(checkpoint_path)
         payload["checkpoint_sha256"] = _sha256(checkpoint_path)
+        payload["interpolation_alpha"] = args.interpolation_alpha
         payload["candidate"] = {
             "results": candidate_results,
             "summary": build_phase_grid_summary(

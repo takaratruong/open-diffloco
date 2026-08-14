@@ -81,3 +81,49 @@ def test_phase_grid_routes_rollouts_through_one_compiled_step():
 
     assert "compiled_step = build_compiled_step(env)" in source
     assert source.count("step_fn=compiled_step") == 2
+
+
+def test_rmr_policy_interpolation_preserves_normalizer_and_blends_network():
+    from tools.evaluate_g1_rmr_phase_grid import interpolate_rmr_policy
+
+    source = _policy(3)
+    candidate = source._replace(
+        weights=(jnp.full((29, 3), 4.0),),
+        biases=(jnp.full(29, 2.0),),
+    )
+
+    midpoint = interpolate_rmr_policy(source, candidate, alpha=0.25)
+
+    assert jnp.array_equal(midpoint.mean, source.mean)
+    assert jnp.array_equal(midpoint.std, source.std)
+    assert jnp.all(midpoint.weights[0] == 1.0)
+    assert jnp.all(midpoint.biases[0] == 0.5)
+
+
+def test_rmr_policy_interpolation_fails_closed_on_contract_drift():
+    from tools.evaluate_g1_rmr_phase_grid import interpolate_rmr_policy
+
+    source = _policy(3)
+    with pytest.raises(ValueError, match="normalization"):
+        interpolate_rmr_policy(
+            source,
+            source._replace(mean=jnp.ones(3)),
+            alpha=0.5,
+        )
+    with pytest.raises(ValueError, match="between zero and one"):
+        interpolate_rmr_policy(source, source, alpha=0.0)
+
+
+def test_rmr_policy_interpolation_alpha_one_is_bit_exact_candidate():
+    from tools.evaluate_g1_rmr_phase_grid import interpolate_rmr_policy
+
+    source = _policy(3)._replace(
+        weights=(jnp.full((29, 3), 1e10, dtype=jnp.float32),)
+    )
+    candidate = _policy(3)._replace(
+        weights=(jnp.ones((29, 3), dtype=jnp.float32),)
+    )
+
+    selected = interpolate_rmr_policy(source, candidate, alpha=1.0)
+
+    assert jnp.array_equal(selected.weights[0], candidate.weights[0])
