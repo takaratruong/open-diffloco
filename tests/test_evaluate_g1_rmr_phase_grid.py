@@ -1,4 +1,7 @@
 import pytest
+import jax.numpy as jnp
+
+from src.core.rmr_policy import RmrPolicy
 
 
 def _result(phase, steps, terminal=False):
@@ -46,3 +49,27 @@ def test_phase_grid_rejects_duplicate_or_invalid_phases():
             reference_transitions=120,
         )
 
+
+def _policy(input_dim: int) -> RmrPolicy:
+    return RmrPolicy(
+        mean=jnp.zeros(input_dim),
+        std=jnp.ones(input_dim),
+        weights=(jnp.zeros((29, input_dim)),),
+        biases=(jnp.zeros(29),),
+    )
+
+
+def test_candidate_observation_uses_checkpoint_input_width():
+    from tools.evaluate_g1_rmr_phase_grid import (
+        select_rmr_policy_observation,
+    )
+
+    observation = jnp.arange(174, dtype=jnp.float32)
+    assert select_rmr_policy_observation(_policy(154), observation).shape == (
+        154,
+    )
+    assert select_rmr_policy_observation(_policy(174), observation).shape == (
+        174,
+    )
+    with pytest.raises(ValueError, match="exceeds evaluator observation"):
+        select_rmr_policy_observation(_policy(175), observation)

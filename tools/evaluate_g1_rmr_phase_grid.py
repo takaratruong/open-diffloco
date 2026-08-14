@@ -27,7 +27,21 @@ from tools.run_g1_tracking_rmr50_shac import load_source_actor_policy
 
 DEFAULT_PHASES = (0, 24, 48, 72, 96)
 LOOKAHEAD_STEPS = (4, 8, 12)
-LEGACY_OBS_DIM = 154
+
+
+def select_rmr_policy_observation(
+    policy: RmrPolicy,
+    observation: jnp.ndarray,
+) -> jnp.ndarray:
+    """Select the evaluator prefix encoded by an RMR checkpoint."""
+    input_dim = int(policy.mean.shape[0])
+    observation_dim = int(observation.shape[-1])
+    if input_dim > observation_dim:
+        raise ValueError(
+            f"policy input width {input_dim} exceeds evaluator observation "
+            f"width {observation_dim}"
+        )
+    return observation[..., :input_dim]
 
 
 def build_phase_grid_summary(
@@ -143,12 +157,14 @@ def main() -> None:
 
     def source_action(state):
         return apply_trainable_rmr_policy(
-            source_actor, state.obs[..., :LEGACY_OBS_DIM]
+            source_actor,
+            select_rmr_policy_observation(source_actor, state.obs),
         ).astype(jnp.float64)
 
     def candidate_action(state):
         return apply_trainable_rmr_policy(
-            candidate_actor, state.obs
+            candidate_actor,
+            select_rmr_policy_observation(candidate_actor, state.obs),
         ).astype(jnp.float64)
 
     source_results = []
@@ -221,4 +237,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
