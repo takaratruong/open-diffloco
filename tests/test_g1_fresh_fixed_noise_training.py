@@ -1,7 +1,9 @@
 import json
+import hashlib
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 def test_fresh_fixed_noise_builder_is_exact_and_has_dense_checkpoints() -> None:
@@ -65,6 +67,75 @@ def test_fresh_fixed_noise_builder_accepts_low_actor_lr_recipe() -> None:
     )
 
     assert kwargs["actor_lr"] == 1e-3
+
+
+def test_fresh_builder_binds_per_environment_gradient_clip() -> None:
+    from tools.run_g1_fresh_fixed_noise_training import (
+        build_fresh_fixed_noise_kwargs,
+    )
+
+    kwargs = build_fresh_fixed_noise_kwargs(
+        "g1-4x5",
+        Path("/tmp/walk.npz"),
+        seed=0,
+        actor_lr=1e-3,
+        actor_per_env_grad_clip=1.0,
+    )
+
+    assert kwargs["actor_per_env_grad_clip"] == 1.0
+    assert kwargs["actor_lr"] == 1e-3
+
+
+def test_preflight_uses_registered_reference_hash(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from tools.run_g1_fresh_fixed_noise_training import validate_preflight
+
+    reference = tmp_path / "walk.npz"
+    reference.write_bytes(b"walk")
+    expected = hashlib.sha256(b"walk").hexdigest()
+    monkeypatch.setattr(
+        "tools.run_g1_fresh_fixed_noise_training._git_output",
+        lambda repository, *args: "a" * 40 if args[-1] == "HEAD" else "",
+    )
+    monkeypatch.setattr(
+        "tools.run_g1_fresh_fixed_noise_training.validate_runtime_assets",
+        lambda model, controller: {},
+    )
+
+    report = validate_preflight(
+        repository=tmp_path,
+        reference_path=reference,
+        code_commit="a" * 40,
+        expected_reference_sha256=expected,
+        actor_lr=1e-3,
+        actor_per_env_grad_clip=1.0,
+    )
+
+    assert report["reference_sha256"] == expected
+    assert report["actor_per_env_grad_clip"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "norms",
+    (
+        [float("nan"), 0.2, 0.3, 0.4, 0.5],
+        [1.01, 0.2, 0.3, 0.4, 0.5],
+    ),
+)
+def test_per_environment_clip_telemetry_fails_closed(norms) -> None:
+    from tools.run_g1_fresh_fixed_noise_training import (
+        validate_per_env_gradient_clip_telemetry,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="per-environment gradient clip telemetry is invalid",
+    ):
+        validate_per_env_gradient_clip_telemetry(
+            {"actor_cagrad_bin_gradient_norms": norms},
+            actor_per_env_grad_clip=1.0,
+        )
 
 
 def test_episode_action_diagnostics_expose_saturation() -> None:

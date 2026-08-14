@@ -42,6 +42,7 @@ def build_fresh_fixed_noise_kwargs(
     seed: int,
     *,
     actor_lr: float = 5e-3,
+    actor_per_env_grad_clip: float | None = None,
 ) -> dict[str, Any]:
     """Build the immutable fresh actor diagnostic contract."""
     kwargs = build_canonical_kwargs(profile_name, reference_path, seed)
@@ -90,6 +91,7 @@ def build_fresh_fixed_noise_kwargs(
         actor_bootstrap_scale=0.0,
         actor_bootstrap_delay_steps=0,
         actor_lr=actor_lr,
+        actor_per_env_grad_clip=actor_per_env_grad_clip,
     )
     return kwargs
 
@@ -100,10 +102,15 @@ def build_gate_kwargs(
     seed: int,
     *,
     actor_lr: float = 5e-3,
+    actor_per_env_grad_clip: float | None = None,
 ) -> dict[str, Any]:
     """Use the exact contract for one effective-512 H12 update."""
     kwargs = build_fresh_fixed_noise_kwargs(
-        profile_name, reference_path, seed, actor_lr=actor_lr
+        profile_name,
+        reference_path,
+        seed,
+        actor_lr=actor_lr,
+        actor_per_env_grad_clip=actor_per_env_grad_clip,
     )
     kwargs.update(
         total_steps=6_144,
@@ -119,7 +126,9 @@ def validate_preflight(
     repository: Path,
     reference_path: Path,
     code_commit: str,
+    expected_reference_sha256: str = EXPECTED_REFERENCE_SHA256,
     actor_lr: float = 5e-3,
+    actor_per_env_grad_clip: float | None = None,
 ) -> dict[str, Any]:
     """Bind code and runtime assets before allocating a GPU."""
     head = _git_output(repository, "rev-parse", "HEAD")
@@ -130,7 +139,16 @@ def validate_preflight(
     reference_path = reference_path.resolve()
     if not reference_path.is_file():
         raise ValueError("reference file is missing")
-    if sha256_file(reference_path) != EXPECTED_REFERENCE_SHA256:
+    if (
+        len(expected_reference_sha256) != 64
+        or expected_reference_sha256.lower() != expected_reference_sha256
+        or any(
+            character not in "0123456789abcdef"
+            for character in expected_reference_sha256
+        )
+    ):
+        raise ValueError("registered reference SHA-256 is invalid")
+    if sha256_file(reference_path) != expected_reference_sha256:
         raise ValueError("reference SHA-256 does not match")
     assets = validate_runtime_assets(
         Path(DEFAULT_MODEL_PATH), Path(DEFAULT_CONTROLLER_PATH)
@@ -139,11 +157,12 @@ def validate_preflight(
         "protocol": "g1-fresh-fixed-020-preflight-v1",
         "code_commit": head,
         "reference_path": str(reference_path),
-        "reference_sha256": EXPECTED_REFERENCE_SHA256,
+        "reference_sha256": expected_reference_sha256,
         **assets,
         "fresh_initialization": True,
         "action_noise_std": ACTION_NOISE_STD,
         "actor_lr": actor_lr,
+        "actor_per_env_grad_clip": actor_per_env_grad_clip,
         "observation_noise": False,
         "reset_noise": False,
         "domain_randomization": False,
@@ -152,8 +171,32 @@ def validate_preflight(
     }
 
 
+def validate_per_env_gradient_clip_telemetry(
+    row: dict[str, Any], *, actor_per_env_grad_clip: float
+) -> None:
+    """Require five finite post-clip phase-bin norms within the contract."""
+    norms = row.get("actor_cagrad_bin_gradient_norms")
+    if (
+        not isinstance(norms, list)
+        or len(norms) != 5
+        or any(
+            not math.isfinite(float(value))
+            or float(value) < 0.0
+            or float(value) > actor_per_env_grad_clip + 1e-6
+            for value in norms
+        )
+    ):
+        raise ValueError(
+            "per-environment gradient clip telemetry is invalid"
+        )
+
+
 def validate_training_artifacts(
-    run_directory: Path, *, gate_only: bool, actor_lr: float = 5e-3
+    run_directory: Path,
+    *,
+    gate_only: bool,
+    actor_lr: float = 5e-3,
+    actor_per_env_grad_clip: float | None = None,
 ) -> dict[str, Any]:
     """Reject incomplete, nonfinite, or contract-drifting training output."""
     run_directory = run_directory.resolve()
@@ -165,11 +208,13 @@ def validate_training_artifacts(
         hparams["reference_path"],
         int(hparams["seed"]),
         actor_lr=actor_lr,
+        actor_per_env_grad_clip=actor_per_env_grad_clip,
     ) if gate_only else build_fresh_fixed_noise_kwargs(
         "g1-4x5",
         hparams["reference_path"],
         int(hparams["seed"]),
         actor_lr=actor_lr,
+        actor_per_env_grad_clip=actor_per_env_grad_clip,
     )
     persisted = {
         "total_steps",
@@ -202,6 +247,7 @@ def validate_training_artifacts(
         "actor_reference_preview_mode",
         "actor_bootstrap_scale",
         "actor_lr",
+        "actor_per_env_grad_clip",
     }
     for key in persisted:
         expected_value = expected[key]
@@ -236,6 +282,11 @@ def validate_training_artifacts(
             )
         ):
             raise ValueError("CAGrad telemetry is invalid")
+        if actor_per_env_grad_clip is not None:
+            validate_per_env_gradient_clip_telemetry(
+                row,
+                actor_per_env_grad_clip=actor_per_env_grad_clip,
+            )
     return {
         "protocol": "g1-fresh-fixed-020-training-validation-v1",
         "valid": True,
@@ -255,10 +306,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-root", type=Path, default=Path("g1_fresh_fixed_020_runs")
     )
     parser.add_argument("--code-commit", required=True)
+    parser.add_argument(
+        "--expected-reference-sha256",
+        default=EXPECTED_REFERENCE_SHA256,
+    )
     parser.add_argument("--gate-only", action="store_true")
     parser.add_argument(
         "--actor-lr", type=float, choices=(1e-3, 5e-3), default=5e-3
     )
+    parser.add_argument("--actor-per-env-grad-clip", type=float)
     return parser
 
 
@@ -270,7 +326,9 @@ def execute(args: argparse.Namespace) -> Path:
         repository=repository,
         reference_path=args.reference_path,
         code_commit=args.code_commit,
+        expected_reference_sha256=args.expected_reference_sha256,
         actor_lr=args.actor_lr,
+        actor_per_env_grad_clip=args.actor_per_env_grad_clip,
     )
     _write_json_atomically(output_root / "fresh_fixed_020_preflight.json", preflight)
     configure_jax()
@@ -280,6 +338,7 @@ def execute(args: argparse.Namespace) -> Path:
         args.reference_path.resolve(),
         args.seed,
         actor_lr=args.actor_lr,
+        actor_per_env_grad_clip=args.actor_per_env_grad_clip,
     )
     profile = get_solver_profile(args.solver_profile)
     previous_directory = Path.cwd()
@@ -291,7 +350,10 @@ def execute(args: argparse.Namespace) -> Path:
         os.chdir(previous_directory)
     run_directory = (output_root / relative_save_dir).resolve()
     validation = validate_training_artifacts(
-        run_directory, gate_only=args.gate_only, actor_lr=args.actor_lr
+        run_directory,
+        gate_only=args.gate_only,
+        actor_lr=args.actor_lr,
+        actor_per_env_grad_clip=args.actor_per_env_grad_clip,
     )
     _write_json_atomically(
         output_root / "fresh_fixed_020_training_validation.json", validation
