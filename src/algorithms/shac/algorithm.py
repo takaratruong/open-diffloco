@@ -301,6 +301,20 @@ def build_checkpoint_cagrad_telemetry(metrics) -> dict[str, object]:
     }
 
 
+def build_policy_anchor_telemetry(
+    metrics, *, weight: float
+) -> dict[str, object]:
+    """Serialize and validate checkpoint-aligned proximal-policy evidence."""
+    error = float(metrics["actor_policy_anchor_squared_error"])
+    if not math.isfinite(error) or error < 0.0:
+        raise ValueError("actor policy anchor error must be finite")
+    return {
+        "actor_policy_anchor_weight": weight,
+        "actor_policy_anchor_squared_error": error,
+        "actor_policy_anchor_valid": True,
+    }
+
+
 def should_persist_checkpoint_metrics(
     checkpoint_path: Path | None,
     *,
@@ -1173,6 +1187,39 @@ def validate_residual_preview_adapter_configuration(
         raise ValueError("residual preview adapter requires G1 tracking")
 
 
+def policy_anchor_penalty(
+    candidate_action: jax.Array,
+    parent_action: jax.Array,
+    *,
+    weight: float,
+) -> jax.Array:
+    """Quadratic proximal penalty around a frozen parent policy action."""
+    return weight * jp.mean(
+        jp.square(candidate_action - jax.lax.stop_gradient(parent_action))
+    )
+
+
+def validate_actor_policy_anchor_configuration(
+    *,
+    weight: float,
+    initial_full_actor_policy,
+    resume_from,
+) -> None:
+    """Fail closed unless proximal anchoring has an immutable fresh parent."""
+    if (
+        isinstance(weight, bool)
+        or not math.isfinite(weight)
+        or weight < 0.0
+    ):
+        raise ValueError(
+            "actor policy anchor weight must be non-negative and finite"
+        )
+    if weight > 0.0 and initial_full_actor_policy is None:
+        raise ValueError("actor policy anchoring requires a full actor parent")
+    if weight > 0.0 and resume_from is not None:
+        raise ValueError("actor policy anchoring currently requires a fresh run")
+
+
 def train(
     # General
     total_steps: int = 100_000,
@@ -1255,6 +1302,7 @@ def train(
     actor_zero_output: bool = True,
     source_actor_policy=None,
     initial_full_actor_policy=None,
+    actor_policy_anchor_weight: float = 0.0,
     residual_action_scale: float = 0.0,
     differentiate_source_feedback: bool = True,
     effort_limit_scale: float = 1.0,
@@ -1373,6 +1421,11 @@ def train(
             "source_actor_policy and initial_full_actor_policy are "
             "mutually exclusive"
         )
+    validate_actor_policy_anchor_configuration(
+        weight=actor_policy_anchor_weight,
+        initial_full_actor_policy=initial_full_actor_policy,
+        resume_from=resume_from,
+    )
     if initial_full_actor_policy is not None and residual_action_scale != 0.0:
         raise ValueError(
             "initial_full_actor_policy is standalone and cannot use "
@@ -2299,6 +2352,33 @@ def train(
                     ),
                 ).astype(jp.float64)
 
+            if actor_policy_anchor_weight > 0.0:
+                anchor_obs = jax.lax.stop_gradient(actor_obs)
+                anchor_candidate_action = apply_trainable_rmr_policy(
+                    actor_params, anchor_obs
+                ).astype(jp.float64)
+                anchor_parent_action = apply_trainable_rmr_policy(
+                    initial_full_actor_policy, anchor_obs
+                ).astype(jp.float64)
+                actor_policy_anchor_squared_error = jp.mean(
+                    jp.square(
+                        anchor_candidate_action
+                        - jax.lax.stop_gradient(anchor_parent_action)
+                    )
+                )
+                actor_policy_anchor_step_penalty = policy_anchor_penalty(
+                    anchor_candidate_action,
+                    anchor_parent_action,
+                    weight=actor_policy_anchor_weight,
+                )
+            else:
+                actor_policy_anchor_squared_error = jp.asarray(
+                    0.0, dtype=jp.float64
+                )
+                actor_policy_anchor_step_penalty = jp.asarray(
+                    0.0, dtype=jp.float64
+                )
+
             # Reparameterized action noise
             noisy_action = action + noise_t.astype(jp.float64) * current_noise_std
             if clip_sampled_actor_actions:
@@ -2332,6 +2412,12 @@ def train(
                 "foot_normal_FR": next_state.metrics["foot_normal_FR"],
                 "foot_normal_RL": next_state.metrics["foot_normal_RL"],
                 "foot_normal_RR": next_state.metrics["foot_normal_RR"],
+                "actor_policy_anchor_squared_error": (
+                    actor_policy_anchor_squared_error
+                ),
+                "actor_policy_anchor_penalty": (
+                    actor_policy_anchor_step_penalty
+                ),
             }
             if adaptive_phase_sampling:
                 transition["transition_phase"] = transition_phase
@@ -2405,7 +2491,8 @@ def train(
 
         total_ret = total_ret + running + final_bootstrap
 
-        return -total_ret / unroll_length, (traj, final_state)
+        anchor_loss = jp.mean(traj["actor_policy_anchor_penalty"])
+        return -total_ret / unroll_length + anchor_loss, (traj, final_state)
 
     def critic_loss_from_data(
         critic_params,
@@ -3019,6 +3106,9 @@ def train(
             ],
             "critic_grad_raw_max": critic_update_metrics["raw_norm_max"][-1],
             "actor_loss": jp.mean(losses),
+            "actor_policy_anchor_squared_error": jp.mean(
+                trajs["actor_policy_anchor_squared_error"]
+            ),
             "actor_bootstrap_scale_current": current_actor_bootstrap_scale,
             "action_noise_current": current_noise_std,
             "track_vx": jp.mean(jp.abs(trajs["vel_x"] - trajs["cmd_x"])),
@@ -3697,6 +3787,7 @@ def train(
         "actor_layer_norm": actor_layer_norm,
         "actor_zero_output": actor_zero_output,
         "source_actor_policy": source_actor_policy is not None,
+        "actor_policy_anchor_weight": actor_policy_anchor_weight,
         "actor_kind": (
             "flax_residual_preview"
             if actor_residual_preview_adapter
@@ -3734,6 +3825,10 @@ def train(
             metrics["torso_wrench_assistance_valid"]
         ):
             raise RuntimeError("torso wrench assistance telemetry is invalid")
+        if actor_policy_anchor_weight > 0.0 and not np.isfinite(
+            float(metrics["actor_policy_anchor_squared_error"])
+        ):
+            raise RuntimeError("actor policy anchor telemetry is invalid")
 
         if should_log_training_iteration(i, start_iteration=start_iter):
             jax.block_until_ready(state.step)
@@ -3837,6 +3932,12 @@ def train(
                         metrics["critic_grad_finite_fraction"]
                     ),
                 }
+                if actor_policy_anchor_weight > 0.0:
+                    diag_entry.update(
+                        build_policy_anchor_telemetry(
+                            metrics, weight=actor_policy_anchor_weight
+                        )
+                    )
                 if actor_phase_robust_weighting:
                     diag_entry.update(
                         {
@@ -4091,6 +4192,12 @@ def train(
                 ),
                 **build_checkpoint_cagrad_telemetry(metrics),
             }
+            if actor_policy_anchor_weight > 0.0:
+                checkpoint_metrics.update(
+                    build_policy_anchor_telemetry(
+                        metrics, weight=actor_policy_anchor_weight
+                    )
+                )
             if frozen_preview_treatment:
                 checkpoint_metrics.update(
                     {

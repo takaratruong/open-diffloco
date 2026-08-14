@@ -22,6 +22,7 @@ def build_rmr_full_actor_recovery_kwargs(
     seed: int,
     source_actor,
     reference_residual_scale: float = 0.5,
+    actor_policy_anchor_weight: float = 0.0,
 ) -> dict:
     """Build the memory-safe 16-update full-policy recovery treatment."""
     if reference_residual_scale not in (0.5, 1.0):
@@ -46,6 +47,7 @@ def build_rmr_full_actor_recovery_kwargs(
         actor_reference_lookahead_steps=(),
         reference_residual_scale=reference_residual_scale,
         initial_full_actor_policy=source_actor,
+        actor_policy_anchor_weight=actor_policy_anchor_weight,
         domain_randomization=False,
         actor_observation_noise=False,
         reference_reset_noise_scale=0.0,
@@ -86,6 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(0.5, 1.0),
         default=0.5,
     )
+    parser.add_argument(
+        "--actor-policy-anchor-weight", type=float, default=0.0
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--output-root",
@@ -107,6 +112,7 @@ def main() -> None:
         args.seed,
         source_actor,
         reference_residual_scale=args.reference_residual_scale,
+        actor_policy_anchor_weight=args.actor_policy_anchor_weight,
     )
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)

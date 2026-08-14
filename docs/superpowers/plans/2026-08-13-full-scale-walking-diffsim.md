@@ -111,3 +111,39 @@ Run `uv run python -m tools.runexp E-20260813-023`. Require all five suffixes to
 - [ ] **Step 5: Register and execute E024 only if E023 passes**
 
 Use the exact E020 actor and full-scale recovery runner for 16 H12 DiffSim updates. Select only a checkpoint that preserves every completed parent suffix and improves the minimum-first survival key; otherwise record a failure and move to the separately controlled assistance treatment.
+
+### Task 4: Proximal Full-Actor Drift Constraint
+
+**Files:**
+- Modify: `src/algorithms/shac/algorithm.py`
+- Modify: `tools/run_g1_rmr_full_actor_recovery.py`
+- Create: `tests/test_shac_full_actor_policy_anchor.py`
+- Modify: `tests/test_g1_rmr_full_actor_recovery_runner.py`
+
+**Interfaces:**
+- Consumes: the immutable `initial_full_actor_policy` already used to initialize the trainable full actor.
+- Produces: default-off `actor_policy_anchor_weight`, per-transition mean-squared action deviation from the stopped-gradient frozen parent, persisted hparams, and finite checkpoint telemetry.
+
+- [x] **Step 1: Write failing unit and runner tests**
+
+Require exact zero penalty for equal actions, quadratic positive penalty and finite gradients for changed actions, default-off legacy behavior, fail-closed use without a full actor, and an explicit recovery-runner anchor weight.
+
+- [x] **Step 2: Verify RED**
+
+Run: `/home/ubuntu/miniconda3/envs/diffsim/bin/python -m pytest -q tests/test_shac_full_actor_policy_anchor.py tests/test_g1_rmr_full_actor_recovery_runner.py -k policy_anchor`
+
+Expected: FAIL because the helper and training option do not exist.
+
+- [x] **Step 3: Implement the minimal proximal objective**
+
+On each rollout observation compute the trainable full-actor action and the stopped-gradient frozen-parent action. Add `weight * mean(square(candidate-parent))` to each environment's existing DiffSim actor loss. Permit only finite nonnegative weights; positive weight requires a standalone full RMR actor and a fresh run. Persist the treatment and checkpoint diagnostics without changing the default-off path.
+
+- [x] **Step 4: Verify focused and neighbor suites**
+
+Run: `/home/ubuntu/miniconda3/envs/diffsim/bin/python -m pytest -q tests/test_shac_full_actor_policy_anchor.py tests/test_g1_rmr_full_actor_recovery_runner.py tests/test_g1_rmr_full_actor_h24_recovery_runner.py tests/test_shac_cagrad_integration.py tests/test_shac_gradient_accumulation.py`
+
+Run Ruff, py_compile, and `git diff --check` on the touched files. Expected: PASS.
+
+- [ ] **Step 5: Register the anchored successor**
+
+Run one bounded successor from the same E020 parent with the sole added treatment `actor_policy_anchor_weight = 1.0`. Require all five suffixes to remain complete before any tracking improvement can be selected.

@@ -156,3 +156,19 @@ def test_full_scale_recovery_parser_is_choices_constrained():
         ).reference_residual_scale
         == 1.0
     )
+
+
+def test_full_actor_recovery_forwards_explicit_policy_anchor():
+    from tools.run_g1_rmr_full_actor_recovery import (
+        build_rmr_full_actor_recovery_kwargs,
+    )
+
+    candidate = build_rmr_full_actor_recovery_kwargs(
+        "g1-4x5",
+        Path("/tmp/exact-rmr-motion.npz"),
+        seed=0,
+        source_actor=object(),
+        actor_policy_anchor_weight=1.0,
+    )
+
+    assert candidate["actor_policy_anchor_weight"] == 1.0
