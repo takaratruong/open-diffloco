@@ -31,6 +31,7 @@ from tools.evaluate_g1_tracking import (
     _load_policy,
     configure_jax,
     make_evaluation_env,
+    prepare_evaluation_action,
     scale_policy_action,
 )
 
@@ -54,6 +55,7 @@ def build_payload(
     actor_residual_preview_adapter: bool = False,
     actor_residual_preview_hidden: int = 256,
     actor_residual_preview_trainable_parameter_count: int = 0,
+    post_policy_action_clip: bool = True,
 ) -> dict[str, object]:
     """Build the immutable no-render phase-grid artifact."""
     return {
@@ -73,6 +75,7 @@ def build_payload(
             actor_residual_preview_trainable_parameter_count
         ),
         "actor_assistance_conditioning_scale": 0.0,
+        "post_policy_action_clip": post_policy_action_clip,
         "results": results,
         "summary": build_phase_grid_summary(
             results,
@@ -120,6 +123,15 @@ def evaluate_actor_action(
         treatment_frame_dim=treatment_frame_dim,
     )
     return candidate
+
+
+def prepare_phase_grid_action(
+    action: jax.Array, *, clip_sampled_actor_actions: bool
+) -> jax.Array:
+    """Apply the exact post-policy boundary used during SHAC training."""
+    return prepare_evaluation_action(
+        action, squash=clip_sampled_actor_actions
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -211,16 +223,23 @@ def main() -> None:
         normalized = env.normalize_actor_obs(
             normalizer, normalizer_state, state.obs
         ).astype(jnp.float32)
-        return scale_policy_action(
-            evaluate_actor_action(
-                actor,
-                actor_params,
-                normalized,
-                residual_actor=residual_actor,
-                history_len=ACTOR_HISTORY_LEN,
-                treatment_frame_dim=env.actor_frame_obs_dim,
+        return prepare_phase_grid_action(
+            scale_policy_action(
+                evaluate_actor_action(
+                    actor,
+                    actor_params,
+                    normalized,
+                    residual_actor=residual_actor,
+                    history_len=ACTOR_HISTORY_LEN,
+                    treatment_frame_dim=env.actor_frame_obs_dim,
+                ),
+                1.0,
             ),
-            1.0,
+            clip_sampled_actor_actions=getattr(
+                env,
+                "clip_sampled_actor_actions",
+                getattr(env, "squash_actor_actions", True),
+            ),
         ).astype(jnp.float64)
 
     results = []
@@ -255,6 +274,13 @@ def main() -> None:
             )
             if args.actor_residual_preview_adapter
             else 0
+        ),
+        post_policy_action_clip=bool(
+            getattr(
+                env,
+                "clip_sampled_actor_actions",
+                getattr(env, "squash_actor_actions", True),
+            )
         ),
     )
     _write_json(args.output.resolve(), payload)

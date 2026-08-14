@@ -43,6 +43,7 @@ def test_flax_phase_grid_payload_records_exact_suffix_completion():
     assert payload["actor_residual_preview_hidden"] == 256
     assert payload["actor_residual_preview_trainable_parameter_count"] == 91_677
     assert payload["actor_assistance_conditioning_scale"] == 0.0
+    assert payload["post_policy_action_clip"] is True
 
 
 def test_flax_phase_grid_parser_defaults_absolute_and_accepts_delta():
@@ -132,3 +133,21 @@ def test_evaluator_residual_action_matches_training_composition():
     )
 
     np.testing.assert_array_equal(evaluation_action, training_action)
+
+
+def test_phase_grid_applies_training_post_policy_boundary():
+    import jax.numpy as jnp
+    import numpy as np
+
+    from tools.evaluate_g1_flax_phase_grid import prepare_phase_grid_action
+
+    raw = jnp.asarray([-1.4, -0.2, 1.7])
+
+    np.testing.assert_array_equal(
+        prepare_phase_grid_action(raw, clip_sampled_actor_actions=True),
+        jnp.asarray([-1.0, -0.2, 1.0]),
+    )
+    np.testing.assert_array_equal(
+        prepare_phase_grid_action(raw, clip_sampled_actor_actions=False),
+        raw,
+    )
