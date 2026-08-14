@@ -59,10 +59,7 @@ def test_flax_phase_grid_parser_defaults_absolute_and_accepts_delta():
     ]
     parser = build_parser()
 
-    assert (
-        parser.parse_args(required).actor_reference_preview_mode
-        == "absolute"
-    )
+    assert parser.parse_args(required).actor_reference_preview_mode is None
     assert (
         parser.parse_args(
             [*required, "--actor-reference-preview-mode", "delta"]
@@ -84,6 +81,50 @@ def test_flax_phase_grid_parser_defaults_absolute_and_accepts_delta():
     assert upstream.env_variant == (
         "g1_tracking_rmr_50hz_upstream_action_penalty"
     )
+
+
+def test_phase_grid_loads_environment_contract_from_checkpoint_hparams(
+    tmp_path,
+):
+    import json
+
+    from tools.evaluate_g1_flax_phase_grid import (
+        load_checkpoint_environment_contract,
+    )
+
+    checkpoint = tmp_path / "checkpoint_step_098304.pkl"
+    checkpoint.write_bytes(b"checkpoint")
+    (tmp_path / "hparams.json").write_text(
+        json.dumps(
+            {
+                "env_variant": "g1_tracking_rmr_50hz_action_parity",
+                "reference_stride": 1,
+                "actor_history_len": 10,
+                "actor_reference_lookahead_steps": [4, 8, 12],
+                "actor_reference_preview_mode": "delta",
+                "reference_residual_control": True,
+                "reference_residual_scale": 1.0,
+                "solver_profile": "g1-4x5",
+                "squash_actor_mean": False,
+                "clip_sampled_actor_actions": False,
+            }
+        )
+    )
+
+    contract = load_checkpoint_environment_contract(checkpoint)
+
+    assert contract == {
+        "env_variant": "g1_tracking_rmr_50hz_action_parity",
+        "reference_stride": 1,
+        "actor_history_len": 10,
+        "actor_reference_lookahead_steps": (4, 8, 12),
+        "actor_reference_preview_mode": "delta",
+        "reference_residual_control": True,
+        "reference_residual_scale": 1.0,
+        "solver_profile": "g1-4x5",
+        "squash_actor_mean": False,
+        "clip_sampled_actor_actions": False,
+    }
 
 
 def test_evaluator_residual_action_matches_training_composition():

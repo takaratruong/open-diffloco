@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import pickle
 from pathlib import Path
@@ -101,6 +102,74 @@ def _write_json(path: Path, payload: dict) -> None:
     os.replace(temporary, path)
 
 
+def load_checkpoint_environment_contract(checkpoint_path: Path) -> dict:
+    """Load the training-identical observation and action boundary."""
+    hparams_path = checkpoint_path.resolve().with_name("hparams.json")
+    if not hparams_path.is_file():
+        raise ValueError("phase-grid checkpoint requires sibling hparams.json")
+    hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
+    required = {
+        "env_variant",
+        "reference_stride",
+        "actor_history_len",
+        "actor_reference_lookahead_steps",
+        "actor_reference_preview_mode",
+        "reference_residual_control",
+        "reference_residual_scale",
+        "solver_profile",
+        "squash_actor_mean",
+        "clip_sampled_actor_actions",
+    }
+    if not isinstance(hparams, dict) or not required.issubset(hparams):
+        raise ValueError("checkpoint hparams omit the evaluation contract")
+    lookahead = tuple(hparams["actor_reference_lookahead_steps"])
+    contract = {
+        "env_variant": hparams["env_variant"],
+        "reference_stride": hparams["reference_stride"],
+        "actor_history_len": hparams["actor_history_len"],
+        "actor_reference_lookahead_steps": lookahead,
+        "actor_reference_preview_mode": hparams[
+            "actor_reference_preview_mode"
+        ],
+        "reference_residual_control": hparams[
+            "reference_residual_control"
+        ],
+        "reference_residual_scale": hparams["reference_residual_scale"],
+        "solver_profile": hparams["solver_profile"],
+        "squash_actor_mean": hparams["squash_actor_mean"],
+        "clip_sampled_actor_actions": hparams[
+            "clip_sampled_actor_actions"
+        ],
+    }
+    if (
+        contract["env_variant"] not in EVALUATION_ENV_VARIANTS
+        or isinstance(contract["reference_stride"], bool)
+        or not isinstance(contract["reference_stride"], int)
+        or contract["reference_stride"] < 1
+        or isinstance(contract["actor_history_len"], bool)
+        or not isinstance(contract["actor_history_len"], int)
+        or contract["actor_history_len"] < 1
+        or not lookahead
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 1
+            for value in lookahead
+        )
+        or tuple(sorted(set(lookahead))) != lookahead
+        or contract["actor_reference_preview_mode"] not in {"absolute", "delta"}
+        or not isinstance(contract["reference_residual_control"], bool)
+        or isinstance(contract["reference_residual_scale"], bool)
+        or not math.isfinite(float(contract["reference_residual_scale"]))
+        or float(contract["reference_residual_scale"]) <= 0.0
+        or contract["solver_profile"] not in SOLVER_PROFILES
+        or not isinstance(contract["squash_actor_mean"], bool)
+        or not isinstance(contract["clip_sampled_actor_actions"], bool)
+    ):
+        raise ValueError("checkpoint evaluation contract is invalid")
+    return contract
+
+
 def evaluate_actor_action(
     parent_actor,
     actor_params,
@@ -145,12 +214,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--env-variant",
         choices=EVALUATION_ENV_VARIANTS,
-        default="g1_tracking_rmr_50hz_source_step",
+        default=None,
     )
     parser.add_argument(
         "--actor-reference-preview-mode",
         choices=("absolute", "delta"),
-        default="absolute",
+        default=None,
     )
     parser.add_argument(
         "--actor-residual-preview-adapter", action="store_true"
@@ -161,7 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--solver-profile",
         choices=tuple(sorted(SOLVER_PROFILES)),
-        default="g1-4x5",
+        default=None,
     )
     return parser
 
@@ -174,19 +243,39 @@ def main() -> None:
     for path in (checkpoint_path, reference_path):
         if not path.is_file():
             raise FileNotFoundError(path)
-    profile = get_solver_profile(args.solver_profile)
+    contract = load_checkpoint_environment_contract(checkpoint_path)
+    requested = {
+        "env_variant": args.env_variant,
+        "actor_reference_preview_mode": args.actor_reference_preview_mode,
+        "solver_profile": args.solver_profile,
+    }
+    for key, value in requested.items():
+        if value is not None and value != contract[key]:
+            raise ValueError(f"requested {key} conflicts with checkpoint hparams")
+    profile = get_solver_profile(contract["solver_profile"])
     env = make_evaluation_env(
-        args.env_variant,
+        contract["env_variant"],
         solver_iterations=profile.iterations,
         solver_ls_iterations=profile.ls_iterations,
         reference_path=reference_path,
-        reference_stride=1,
-        actor_history_len=ACTOR_HISTORY_LEN,
-        actor_reference_lookahead_steps=LOOKAHEAD_STEPS,
-        actor_reference_preview_mode=args.actor_reference_preview_mode,
-        reference_residual_control=True,
-        reference_residual_scale=0.5,
+        reference_stride=contract["reference_stride"],
+        actor_history_len=contract["actor_history_len"],
+        actor_reference_lookahead_steps=contract[
+            "actor_reference_lookahead_steps"
+        ],
+        actor_reference_preview_mode=contract[
+            "actor_reference_preview_mode"
+        ],
+        reference_residual_control=contract["reference_residual_control"],
+        reference_residual_scale=contract["reference_residual_scale"],
     )
+    if (
+        getattr(env, "squash_actor_mean", None)
+        != contract["squash_actor_mean"]
+        or getattr(env, "clip_sampled_actor_actions", None)
+        != contract["clip_sampled_actor_actions"]
+    ):
+        raise ValueError("environment action boundary conflicts with hparams")
     compiled_step = build_compiled_step(env)
     phases = tuple(args.phases)
     reference_transitions = int(env.reference_transitions)
@@ -264,8 +353,10 @@ def main() -> None:
         checkpoint_sha256=_sha256(checkpoint_path),
         reference_path=str(reference_path),
         reference_sha256=_sha256(reference_path),
-        solver_profile=args.solver_profile,
-        actor_reference_preview_mode=args.actor_reference_preview_mode,
+        solver_profile=contract["solver_profile"],
+        actor_reference_preview_mode=contract[
+            "actor_reference_preview_mode"
+        ],
         actor_residual_preview_adapter=(
             args.actor_residual_preview_adapter
         ),
