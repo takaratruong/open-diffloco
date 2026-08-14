@@ -65,3 +65,41 @@ def test_frozen_preview_recovery_parser_requires_source_and_hides_tuning():
             pass
         else:
             raise AssertionError(f"parser unexpectedly accepted {argv}")
+
+
+def test_frozen_preview_recovery_supports_a_short_anchored_discriminator():
+    from tools.run_g1_rmr_frozen_preview_recovery import (
+        build_parser,
+        build_rmr_frozen_preview_recovery_kwargs,
+    )
+
+    candidate = build_rmr_frozen_preview_recovery_kwargs(
+        "g1-4x5",
+        Path("/tmp/walk.npz"),
+        seed=0,
+        source_actor=object(),
+        actor_policy_anchor_weight=1.0,
+        total_updates=16,
+        checkpoint_updates=8,
+    )
+
+    assert candidate["actor_policy_anchor_weight"] == 1.0
+    assert candidate["total_steps"] == 49_152
+    assert candidate["checkpoint_interval"] == 24_576
+    args = build_parser().parse_args(
+        [
+            "--solver-profile",
+            "g1-4x5",
+            "--source-policy-checkpoint",
+            "/tmp/source.pt",
+            "--actor-policy-anchor-weight",
+            "1.0",
+            "--total-updates",
+            "16",
+            "--checkpoint-updates",
+            "8",
+        ]
+    )
+    assert args.actor_policy_anchor_weight == 1.0
+    assert args.total_updates == 16
+    assert args.checkpoint_updates == 8
