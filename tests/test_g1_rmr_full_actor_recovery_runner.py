@@ -172,3 +172,36 @@ def test_full_actor_recovery_forwards_explicit_policy_anchor():
     )
 
     assert candidate["actor_policy_anchor_weight"] == 1.0
+
+
+def test_full_actor_recovery_supports_a_preregistered_longer_update_budget():
+    from tools.run_g1_rmr_full_actor_recovery import (
+        build_parser,
+        build_rmr_full_actor_recovery_kwargs,
+    )
+
+    candidate = build_rmr_full_actor_recovery_kwargs(
+        "g1-4x5",
+        Path("/tmp/exact-rmr-motion.npz"),
+        seed=0,
+        source_actor=object(),
+        total_updates=128,
+        checkpoint_updates=16,
+    )
+
+    assert candidate["total_steps"] == 393_216
+    assert candidate["checkpoint_interval"] == 49_152
+    args = build_parser().parse_args(
+        [
+            "--solver-profile",
+            "g1-4x5",
+            "--source-policy-checkpoint",
+            "/tmp/source.pt",
+            "--total-updates",
+            "128",
+            "--checkpoint-updates",
+            "16",
+        ]
+    )
+    assert args.total_updates == 128
+    assert args.checkpoint_updates == 16

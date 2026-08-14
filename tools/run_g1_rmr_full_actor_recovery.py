@@ -23,19 +23,29 @@ def build_rmr_full_actor_recovery_kwargs(
     source_actor,
     reference_residual_scale: float = 0.5,
     actor_policy_anchor_weight: float = 0.0,
+    total_updates: int = 16,
+    checkpoint_updates: int = 8,
 ) -> dict:
-    """Build the memory-safe 16-update full-policy recovery treatment."""
+    """Build a memory-safe full-policy recovery treatment."""
     if reference_residual_scale not in (0.5, 1.0):
         raise ValueError("reference residual scale must be 0.5 or 1.0")
+    if total_updates <= 0 or checkpoint_updates <= 0:
+        raise ValueError("update counts must be positive")
+    if total_updates % checkpoint_updates:
+        raise ValueError("checkpoint updates must divide total updates")
     kwargs = build_canonical_kwargs(
         profile_name,
         reference_path,
         seed,
         resume_from=None,
     )
+    transitions_per_update = (
+        128 * 2 * int(kwargs["unroll_length"])
+    )
+    total_steps = total_updates * transitions_per_update
     kwargs.update(
-        total_steps=49_152,
-        checkpoint_interval=24_576,
+        total_steps=total_steps,
+        checkpoint_interval=checkpoint_updates * transitions_per_update,
         num_envs=128,
         gradient_accumulation_steps=2,
         actor_lr=1e-4,
@@ -59,7 +69,7 @@ def build_rmr_full_actor_recovery_kwargs(
         push_velocity_range=(0.0, 0.0),
         push_interval_s=1e9,
         zero_difficulty_frac=1.0,
-        curriculum_grace=49_152,
+        curriculum_grace=total_steps,
         curriculum_steps=1,
         actor_cagrad=True,
         actor_cagrad_alpha=0.5,
@@ -91,6 +101,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--actor-policy-anchor-weight", type=float, default=0.0
     )
+    parser.add_argument("--total-updates", type=int, default=16)
+    parser.add_argument("--checkpoint-updates", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--output-root",
@@ -113,6 +125,8 @@ def main() -> None:
         source_actor,
         reference_residual_scale=args.reference_residual_scale,
         actor_policy_anchor_weight=args.actor_policy_anchor_weight,
+        total_updates=args.total_updates,
+        checkpoint_updates=args.checkpoint_updates,
     )
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
