@@ -151,3 +151,12 @@ def test_phase_grid_applies_training_post_policy_boundary():
         prepare_phase_grid_action(raw, clip_sampled_actor_actions=False),
         raw,
     )
+
+
+def test_flax_phase_grid_routes_rollouts_through_one_compiled_step():
+    from pathlib import Path
+
+    source = Path("tools/evaluate_g1_flax_phase_grid.py").read_text()
+
+    assert "compiled_step = build_compiled_step(env)" in source
+    assert source.count("step_fn=compiled_step") == 1

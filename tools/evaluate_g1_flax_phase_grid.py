@@ -29,6 +29,7 @@ from tools.evaluate_g1_rmr_phase_grid import build_phase_grid_summary
 from tools.evaluate_g1_tracking import (
     EVALUATION_ENV_VARIANTS,
     _load_policy,
+    build_compiled_step,
     configure_jax,
     make_evaluation_env,
     prepare_evaluation_action,
@@ -186,6 +187,7 @@ def main() -> None:
         reference_residual_control=True,
         reference_residual_scale=0.5,
     )
+    compiled_step = build_compiled_step(env)
     phases = tuple(args.phases)
     reference_transitions = int(env.reference_transitions)
     if len(phases) != 5 or len(set(phases)) != 5 or any(
@@ -251,6 +253,7 @@ def main() -> None:
                 phase=phase,
                 seed=args.seed,
                 max_steps=reference_transitions - phase,
+                step_fn=compiled_step,
             )
             results.append({"phase": phase, **result})
     payload = build_payload(
