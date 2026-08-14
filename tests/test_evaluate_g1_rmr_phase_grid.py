@@ -138,3 +138,38 @@ def test_alpha_one_accepts_an_expanded_preview_candidate_unchanged():
     selected = interpolate_rmr_policy(source, candidate, alpha=1.0)
 
     assert selected is candidate
+
+
+def test_zero_residual_action_is_exact_zero():
+    from tools.evaluate_g1_rmr_phase_grid import zero_residual_action
+
+    action = zero_residual_action(action_size=29)
+
+    assert jnp.array_equal(action, jnp.zeros_like(action))
+
+
+def test_parser_rejects_two_source_authorities():
+    from tools.evaluate_g1_rmr_phase_grid import build_parser
+
+    parser = build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "--source-policy-checkpoint",
+                "source.pt",
+                "--zero-residual-source",
+                "--output",
+                "result.json",
+            ]
+        )
+
+
+def test_action_magnitude_requires_finite_nonempty_actions():
+    from tools.evaluate_g1_rmr_phase_grid import summarize_action_magnitude
+
+    assert summarize_action_magnitude([jnp.ones(29), jnp.zeros(29)]) == pytest.approx(
+        2.0**-0.5
+    )
+    with pytest.raises(ValueError, match="nonempty finite action matrix"):
+        summarize_action_magnitude([])

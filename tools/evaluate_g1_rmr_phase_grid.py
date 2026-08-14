@@ -10,6 +10,7 @@ import pickle
 from pathlib import Path
 from statistics import median
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -45,6 +46,22 @@ def phase_grid_action_contract(
         "reference_residual_scale": reference_residual_scale,
         "squash_actor_actions": False,
     }
+
+
+def zero_residual_action(*, action_size: int) -> jnp.ndarray:
+    """Return the exact learned-action baseline for the 29-DoF G1."""
+    if action_size != 29:
+        raise ValueError("zero-residual G1 source requires 29 actions")
+    dtype = jnp.float64 if jax.config.x64_enabled else jnp.float32
+    return jnp.zeros((action_size,), dtype=dtype)
+
+
+def summarize_action_magnitude(actions: list[jnp.ndarray]) -> float:
+    """Return RMS learned residual action over the paired phase grid."""
+    values = np.asarray(actions, dtype=np.float64)
+    if values.ndim != 2 or values.shape[0] == 0 or not np.isfinite(values).all():
+        raise ValueError("expected a nonempty finite action matrix")
+    return float(np.sqrt(np.mean(np.square(values))))
 
 
 def select_rmr_policy_observation(
@@ -154,7 +171,9 @@ def _write_json(path: Path, payload: dict) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-policy-checkpoint", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--source-policy-checkpoint", type=Path)
+    source.add_argument("--zero-residual-source", action="store_true")
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument(
         "--reference-path",
@@ -182,12 +201,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     configure_jax()
-    source_path = args.source_policy_checkpoint.resolve()
+    source_path = (
+        None
+        if args.source_policy_checkpoint is None
+        else args.source_policy_checkpoint.resolve()
+    )
     reference_path = args.reference_path.resolve()
-    for label, path in (
-        ("source policy", source_path),
-        ("reference", reference_path),
-    ):
+    required_paths = [("reference", reference_path)]
+    if source_path is not None:
+        required_paths.append(("source policy", source_path))
+    for label, path in required_paths:
         if not path.is_file():
             raise FileNotFoundError(f"{label} does not exist: {path}")
     checkpoint_path = (
@@ -223,30 +246,39 @@ def main() -> None:
     ):
         raise ValueError("phase grid requires five unique valid phases")
 
-    source_actor = load_source_actor_policy(source_path)
+    source_actor = (
+        None if source_path is None else load_source_actor_policy(source_path)
+    )
     candidate_actor = None
     if checkpoint_path is not None:
         with checkpoint_path.open("rb") as stream:
             candidate_actor = pickle.load(stream).actor_params
         if not isinstance(candidate_actor, RmrPolicy):
             raise ValueError("candidate checkpoint does not contain an RMR actor")
-        candidate_actor = interpolate_rmr_policy(
-            source_actor,
-            candidate_actor,
-            alpha=args.interpolation_alpha,
-        )
+        if source_actor is not None:
+            candidate_actor = interpolate_rmr_policy(
+                source_actor,
+                candidate_actor,
+                alpha=args.interpolation_alpha,
+            )
 
     def source_action(state):
+        if source_actor is None:
+            return zero_residual_action(action_size=env.action_size)
         return apply_trainable_rmr_policy(
             source_actor,
             select_rmr_policy_observation(source_actor, state.obs),
         ).astype(jnp.float64)
 
+    candidate_actions = []
+
     def candidate_action(state):
-        return apply_trainable_rmr_policy(
+        action = apply_trainable_rmr_policy(
             candidate_actor,
             select_rmr_policy_observation(candidate_actor, state.obs),
         ).astype(jnp.float64)
+        candidate_actions.append(np.asarray(action, dtype=np.float64))
+        return action
 
     source_results = []
     candidate_results = []
@@ -278,8 +310,9 @@ def main() -> None:
         "reference_path": str(reference_path),
         "reference_sha256": _sha256(reference_path),
         "reference_transitions": reference_transitions,
-        "source_policy_path": str(source_path),
-        "source_policy_sha256": _sha256(source_path),
+        "source_controller": (
+            "zero_residual" if source_path is None else "rmr_policy"
+        ),
         "solver_profile": args.solver_profile,
         "action_contract": action_contract,
         "actor_reference_lookahead_steps": list(LOOKAHEAD_STEPS),
@@ -292,6 +325,9 @@ def main() -> None:
             ),
         },
     }
+    if source_path is not None:
+        payload["source_policy_path"] = str(source_path)
+        payload["source_policy_sha256"] = _sha256(source_path)
     if candidate_actor is not None:
         payload["checkpoint_path"] = str(checkpoint_path)
         payload["checkpoint_sha256"] = _sha256(checkpoint_path)
@@ -315,6 +351,9 @@ def main() -> None:
                     strict=True,
                 )
             ],
+            "action_root_mean_square": summarize_action_magnitude(
+                candidate_actions
+            ),
         }
     _write_json(args.output, payload)
     print(json.dumps(payload, indent=2, sort_keys=True))
