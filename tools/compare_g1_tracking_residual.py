@@ -84,6 +84,7 @@ def rollout(
     phase: int,
     seed: int,
     max_steps: int,
+    step_fn: Callable | None = None,
 ) -> dict:
     """Run one strict closed-loop rollout without rendering or replay."""
     state = env.reset_at_phase(
@@ -91,9 +92,10 @@ def rollout(
         jnp.array(0.0),
         jnp.array(phase),
     )
+    resolved_step = env.step if step_fn is None else step_fn
     records = []
     for _ in range(max_steps):
-        state = env.step(state, action_fn(state))
+        state = resolved_step(state, action_fn(state))
         records.append(
             (
                 float(state.reward),

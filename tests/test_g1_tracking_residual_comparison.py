@@ -1,9 +1,48 @@
 import unittest
+from types import SimpleNamespace
 
+import jax.numpy as jnp
 import numpy as np
 
 
 class G1TrackingResidualComparisonTest(unittest.TestCase):
+    def test_rollout_uses_an_explicit_compiled_step(self):
+        from tools.compare_g1_tracking_residual import rollout
+
+        initial = SimpleNamespace()
+        final = SimpleNamespace(
+            reward=jnp.array(1.0),
+            info={"terminal": jnp.array(0.0)},
+            metrics={
+                "anchor_position_error": jnp.array(0.1),
+                "anchor_orientation_error": jnp.array(0.2),
+                "body_position_error": jnp.array(0.3),
+                "body_orientation_error": jnp.array(0.4),
+                "body_linear_velocity_error": jnp.array(0.5),
+                "body_angular_velocity_error": jnp.array(0.6),
+            },
+            done=jnp.array(1.0),
+        )
+        env = SimpleNamespace(
+            reset_at_phase=lambda *_: initial,
+            step=lambda *_: (_ for _ in ()).throw(
+                AssertionError("raw env.step must not be called")
+            ),
+        )
+        calls = []
+
+        summary = rollout(
+            env,
+            lambda _state: jnp.zeros(1),
+            phase=0,
+            seed=0,
+            max_steps=1,
+            step_fn=lambda state, action: calls.append((state, action)) or final,
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(summary["steps"], 1)
+
     def test_action_delta_summary_reports_scale_and_saturation(self):
         from tools.compare_g1_tracking_residual import (
             summarize_action_deltas,

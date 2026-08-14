@@ -1,5 +1,6 @@
 import pytest
 import jax.numpy as jnp
+from pathlib import Path
 
 from src.core.rmr_policy import RmrPolicy
 
@@ -73,3 +74,10 @@ def test_candidate_observation_uses_checkpoint_input_width():
     )
     with pytest.raises(ValueError, match="exceeds evaluator observation"):
         select_rmr_policy_observation(_policy(175), observation)
+
+
+def test_phase_grid_routes_rollouts_through_one_compiled_step():
+    source = Path("tools/evaluate_g1_rmr_phase_grid.py").read_text()
+
+    assert "compiled_step = build_compiled_step(env)" in source
+    assert source.count("step_fn=compiled_step") == 2

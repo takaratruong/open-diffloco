@@ -21,7 +21,11 @@ from src.envs.g1_tracking.solver_profiles import (
     solver_context,
 )
 from tools.compare_g1_tracking_residual import rollout, summary_delta
-from tools.evaluate_g1_tracking import configure_jax, make_evaluation_env
+from tools.evaluate_g1_tracking import (
+    build_compiled_step,
+    configure_jax,
+    make_evaluation_env,
+)
 from tools.run_g1_tracking_rmr50_shac import load_source_actor_policy
 
 
@@ -167,6 +171,7 @@ def main() -> None:
             action_contract["reference_residual_scale"]
         ),
     )
+    compiled_step = build_compiled_step(env)
     phases = tuple(args.phases)
     reference_transitions = int(env.reference_transitions)
     if len(phases) != 5 or len(set(phases)) != 5 or any(
@@ -205,6 +210,7 @@ def main() -> None:
                 phase=phase,
                 seed=args.seed,
                 max_steps=remaining,
+                step_fn=compiled_step,
             )
             source_results.append({"phase": phase, **source})
             if candidate_actor is not None:
@@ -214,6 +220,7 @@ def main() -> None:
                     phase=phase,
                     seed=args.seed,
                     max_steps=remaining,
+                    step_fn=compiled_step,
                 )
                 candidate_results.append({"phase": phase, **candidate})
 
