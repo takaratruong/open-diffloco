@@ -15,6 +15,7 @@ from tools.evaluate_g1_tracking import (
     _load_policy,
     build_parser,
     configure_jax,
+    extract_joint_action_diagnostics,
     load_rmr_policy,
     make_evaluation_env,
     remaining_reference_transitions,
@@ -36,6 +37,35 @@ RMR_ACTIONS = Path(
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    def test_joint_action_diagnostics_use_actor_order_and_effective_target(self):
+        class FakeEnv:
+            actor_to_model_permutation = jnp.asarray([1, 2, 0])
+            model_to_actor_permutation = jnp.asarray([2, 0, 1])
+            qpos_reference = jnp.asarray(
+                [[0.0] * 7 + [10.0, 20.0, 30.0]]
+            )
+
+            def position_target(self, state, action):
+                del state
+                return jnp.asarray([100.0, 200.0, 300.0]) + action
+
+        state = SimpleNamespace(
+            data=SimpleNamespace(
+                qpos=jnp.asarray([0.0] * 7 + [1.0, 2.0, 3.0]),
+                qvel=jnp.asarray([0.0] * 6 + [4.0, 5.0, 6.0]),
+            ),
+            info={"phase": jnp.asarray(0)},
+        )
+
+        actual, velocity, reference, target = extract_joint_action_diagnostics(
+            FakeEnv(), state, jnp.asarray([0.1, 0.2, 0.3])
+        )
+
+        np.testing.assert_array_equal(actual, [3.0, 1.0, 2.0])
+        np.testing.assert_array_equal(velocity, [6.0, 4.0, 5.0])
+        np.testing.assert_array_equal(reference, [30.0, 10.0, 20.0])
+        np.testing.assert_allclose(target, [300.3, 100.1, 200.2])
+
     def test_evaluation_reset_runs_inside_solver_context(self):
         active = False
 

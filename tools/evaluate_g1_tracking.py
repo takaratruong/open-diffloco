@@ -288,6 +288,21 @@ def summarize_action_diagnostics(
     }
 
 
+def extract_joint_action_diagnostics(
+    env: object,
+    state: object,
+    action: jax.Array,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Capture the pre-step joint state and PD target in actor joint order."""
+    actor_order = np.asarray(env.model_to_actor_permutation, dtype=np.int64)
+    phase = int(state.info["phase"])
+    actual = np.asarray(state.data.qpos[7:])[actor_order]
+    velocity = np.asarray(state.data.qvel[6:])[actor_order]
+    reference = np.asarray(env.qpos_reference[phase, 7:])[actor_order]
+    target = np.asarray(env.position_target(state, action))[actor_order]
+    return actual, velocity, reference, target
+
+
 def load_rmr_policy(checkpoint: Path):
     """Load the source RSL-RL actor without importing Isaac Lab."""
     import torch
@@ -818,6 +833,10 @@ def main() -> None:
     noisy_actions = []
     sampled_actions = []
     effective_actions = []
+    joint_positions = []
+    joint_velocities = []
+    reference_joint_positions = []
+    position_targets = []
 
     try:
         remaining = remaining_reference_transitions(
@@ -913,6 +932,13 @@ def main() -> None:
             ),
         )
         effective_actions.append(np.asarray(action))
+        actual, velocity, reference, target = extract_joint_action_diagnostics(
+            env, state, action
+        )
+        joint_positions.append(actual)
+        joint_velocities.append(velocity)
+        reference_joint_positions.append(reference)
+        position_targets.append(target)
         step_scope = (
             nullcontext() if profile is None else solver_context(profile)
         )
@@ -980,6 +1006,11 @@ def main() -> None:
         action_mean=np.asarray(action_means),
         sampled_action=np.asarray(sampled_actions),
         effective_action=np.asarray(effective_actions),
+        actor_joint_names=np.asarray(env.actor_joint_names),
+        joint_position=np.asarray(joint_positions),
+        joint_velocity=np.asarray(joint_velocities),
+        reference_joint_position=np.asarray(reference_joint_positions),
+        position_target=np.asarray(position_targets),
     )
     rollout_name = (
         "training_rollout.mp4"
