@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from tools.run_g1_action_sequence_recovery_oracle import (
     build_parser,
@@ -65,3 +66,27 @@ def test_parser_accepts_independent_state_tape_treatment():
     assert build_parser().parse_args(
         [*required, "--independent-tapes", "--worst-margin-objective"]
     ).worst_margin_objective is True
+
+
+def test_parser_validates_recovery_oracle_update_budget():
+    required = [
+        "--checkpoint",
+        "/tmp/e023.pkl",
+        "--hparams",
+        "/tmp/hparams.json",
+        "--reference-path",
+        "/tmp/reference.npz",
+        "--source-bank",
+        "/tmp/bank.npz",
+        "--output-directory",
+        "/tmp/output",
+        "--code-commit",
+        "a" * 40,
+    ]
+
+    assert build_parser().parse_args(required).updates == 64
+    assert build_parser().parse_args([*required, "--updates", "256"]).updates == 256
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([*required, "--updates", "0"])
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([*required, "--updates", "-1"])

@@ -40,6 +40,13 @@ SOURCE_PHASE = 0
 SOURCE_ROWS = 24
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
+
+
 def phase_tape_correction(
     tape: jax.Array, phases: jax.Array, *, phase_min: int
 ) -> jax.Array:
@@ -147,6 +154,7 @@ def run_oracle(
     seed: int,
     independent_tapes: bool = False,
     worst_margin_objective: bool = False,
+    updates: int = UPDATES,
 ) -> dict[str, object]:
     """Optimize and evaluate one shared phase-indexed action correction tape."""
     hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
@@ -296,7 +304,7 @@ def run_oracle(
         return next_tape, next_state, jnp.mean(losses), norms, gradient
 
     curve = []
-    for update_index in range(1, UPDATES + 1):
+    for update_index in range(1, updates + 1):
         tape_logits, optimizer_state, loss, gradient_norms, gradient = update(
             tape_logits, optimizer_state
         )
@@ -396,7 +404,7 @@ def run_oracle(
         ),
         "outcome": outcome,
         "horizon": HORIZON,
-        "updates": UPDATES,
+        "updates": updates,
         "correction_bound": CORRECTION_BOUND,
         "learning_rate": LEARNING_RATE,
         "phase_min": phase_min,
@@ -432,6 +440,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--independent-tapes", action="store_true")
     parser.add_argument("--worst-margin-objective", action="store_true")
+    parser.add_argument("--updates", type=_positive_int, default=UPDATES)
     return parser
 
 
@@ -458,6 +467,7 @@ def main() -> None:
             seed=args.seed,
             independent_tapes=args.independent_tapes,
             worst_margin_objective=args.worst_margin_objective,
+            updates=args.updates,
         )
     print(json.dumps(summary, indent=2, sort_keys=True))
 
