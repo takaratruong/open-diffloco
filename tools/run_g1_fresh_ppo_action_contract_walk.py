@@ -85,7 +85,12 @@ def validate_preflight(
     }
 
 
-def _validate_cagrad_row(row: dict[str, Any], *, step: int) -> None:
+def _validate_cagrad_row(
+    row: dict[str, Any],
+    *,
+    step: int,
+    expected_action_noise: Any = 0.2,
+) -> None:
     vectors = {
         key: np.asarray(row.get(key), dtype=np.float64)
         for key in (
@@ -108,6 +113,13 @@ def _validate_cagrad_row(row: dict[str, Any], *, step: int) -> None:
         "actor_cagrad_uniform_combined_cosine",
         "actor_cagrad_combined_norm",
     )
+    actual_noise = np.asarray(row.get("action_noise_current"), dtype=np.float64)
+    expected_noise = np.asarray(expected_action_noise, dtype=np.float64)
+    action_noise_valid = (
+        actual_noise.shape == expected_noise.shape
+        and np.isfinite(actual_noise).all()
+        and np.allclose(actual_noise, expected_noise, rtol=0.0, atol=1e-7)
+    )
     if (
         row.get("actor_cagrad_valid") is not True
         or any(value.shape != (5,) for value in vectors.values())
@@ -129,7 +141,7 @@ def _validate_cagrad_row(row: dict[str, Any], *, step: int) -> None:
         )
         or float(row["actor_cagrad_combined_norm"]) <= 0.0
         or row.get("actor_bootstrap_scale_current") != 0.0
-        or row.get("action_noise_current") != 0.2
+        or not action_noise_valid
     ):
         raise ValueError(f"checkpoint {step} CAGrad telemetry is invalid")
     validate_per_env_gradient_clip_telemetry(
@@ -167,6 +179,8 @@ def validate_training_artifacts(
         expected_value = expected_kwargs[key]
         if isinstance(expected_value, tuple):
             expected_value = list(expected_value)
+        elif hasattr(expected_value, "shape"):
+            expected_value = np.asarray(expected_value).tolist()
         if hparams.get(key) != expected_value:
             raise ValueError(f"training hparams drifted at {key}")
 
@@ -210,8 +224,30 @@ def validate_training_artifacts(
     rows_by_step = {int(row["step"]): row for row in rows}
     if len(rows_by_step) != len(expected_steps) or sorted(rows_by_step) != expected_steps:
         raise ValueError("checkpoint telemetry cadence is incomplete")
+    steps_per_update = (
+        int(expected_kwargs["num_envs"])
+        * int(expected_kwargs["gradient_accumulation_steps"])
+        * int(expected_kwargs["unroll_length"])
+    )
+    noise_start = np.asarray(
+        expected_kwargs["action_noise_std_start"], dtype=np.float64
+    )
+    noise_end = np.asarray(
+        expected_kwargs["action_noise_std_end"], dtype=np.float64
+    )
+    noise_schedule_steps = int(expected_kwargs["action_noise_schedule_steps"])
     for step in expected_steps:
-        _validate_cagrad_row(rows_by_step[step], step=step)
+        noise_progress = min(
+            max((step - steps_per_update) / noise_schedule_steps, 0.0), 1.0
+        )
+        expected_action_noise = noise_start + noise_progress * (
+            noise_end - noise_start
+        )
+        _validate_cagrad_row(
+            rows_by_step[step],
+            step=step,
+            expected_action_noise=expected_action_noise,
+        )
 
     diagnostics = json.loads(
         (run_directory / "diag_log.json").read_text(encoding="utf-8")
