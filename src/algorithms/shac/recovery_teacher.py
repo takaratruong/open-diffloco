@@ -58,6 +58,17 @@ class TeacherGradientMix(NamedTuple):
     valid: jax.Array
 
 
+class RecoveryTeacherGradientResult(NamedTuple):
+    """Teacher loss, adapter-only gradient, and its bounded physics mix."""
+
+    loss: jax.Array
+    teacher_gradient: Any
+    mix: TeacherGradientMix
+    parent_gradient_max_abs: jax.Array
+    enabled: jax.Array
+    valid: jax.Array
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -241,6 +252,82 @@ def mix_conflict_projected_teacher_gradient(
         physics_teacher_dot=dot,
         physics_teacher_cosine=cosine,
         applied_scale=scale,
+        valid=valid,
+    )
+
+
+def mix_recovery_teacher_actor_gradient(
+    physics_gradient: Any,
+    actor_params: Any,
+    *,
+    residual_actor: Any,
+    teacher_frames: jax.Array | None,
+    parent_action: jax.Array | None,
+    teacher_correction: jax.Array | None,
+    teacher_effective_action: jax.Array | None,
+    max_ratio: float,
+) -> RecoveryTeacherGradientResult:
+    """Compute the adapter teacher gradient and safely mix it with physics."""
+    zeros = jax.tree_util.tree_map(jnp.zeros_like, actor_params)
+    if teacher_frames is None:
+        mix = mix_conflict_projected_teacher_gradient(
+            physics_gradient, zeros, max_ratio=0.0
+        )
+        zero = jnp.asarray(0.0, dtype=mix.physics_norm.dtype)
+        return RecoveryTeacherGradientResult(
+            loss=zero,
+            teacher_gradient=zeros,
+            mix=mix,
+            parent_gradient_max_abs=zero,
+            enabled=jnp.asarray(False),
+            valid=mix.valid,
+        )
+    if any(
+        value is None
+        for value in (
+            parent_action,
+            teacher_correction,
+            teacher_effective_action,
+        )
+    ):
+        raise ValueError("enabled recovery teacher tensors are incomplete")
+    if not hasattr(actor_params, "adapter") or not hasattr(actor_params, "parent"):
+        raise ValueError("recovery teacher requires composite residual parameters")
+
+    def teacher_loss_fn(params):
+        predicted = residual_actor.apply(params.adapter, teacher_frames)
+        return recovery_teacher_imitation_loss(
+            predicted,
+            parent_action,
+            teacher_correction,
+            teacher_effective_action,
+        )
+
+    loss, teacher_gradient = jax.value_and_grad(teacher_loss_fn)(actor_params)
+    mix = mix_conflict_projected_teacher_gradient(
+        physics_gradient, teacher_gradient, max_ratio=max_ratio
+    )
+    parent_leaves = jax.tree_util.tree_leaves(teacher_gradient.parent)
+    parent_max = (
+        jnp.max(
+            jnp.stack(
+                [jnp.max(jnp.abs(value)) for value in parent_leaves]
+            )
+        )
+        if parent_leaves
+        else jnp.asarray(0.0)
+    )
+    valid = (
+        jnp.isfinite(loss)
+        & (parent_max == 0.0)
+        & mix.valid
+    )
+    return RecoveryTeacherGradientResult(
+        loss=loss,
+        teacher_gradient=teacher_gradient,
+        mix=mix,
+        parent_gradient_max_abs=parent_max,
+        enabled=jnp.asarray(True),
         valid=valid,
     )
 

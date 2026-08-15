@@ -94,6 +94,12 @@ from src.algorithms.shac.residual_preview_adapter import (
     resolve_zero_head_feature_transfer_resume_setting,
     split_residual_adapter_params,
     transplant_zero_head_recovery_features,
+    current_treatment_frame,
+)
+from src.algorithms.shac.recovery_teacher import (
+    load_recovery_teacher_batch,
+    mix_recovery_teacher_actor_gradient,
+    resolve_recovery_teacher_resume_settings,
 )
 from src.algorithms.shac.progressive_recovery_expert import (
     RecoverySupport,
@@ -334,6 +340,45 @@ def build_checkpoint_cagrad_telemetry(metrics) -> dict[str, object]:
             metrics["actor_cagrad_combined_norm"]
         ),
         "actor_cagrad_valid": bool(metrics["actor_cagrad_valid"]),
+    }
+
+
+def build_checkpoint_recovery_teacher_telemetry(
+    metrics, *, max_ratio: float
+) -> dict[str, object]:
+    """Serialize and fail closed on the recovery-teacher gradient contract."""
+    names = (
+        "loss",
+        "raw_gradient_norm",
+        "projected_gradient_norm",
+        "applied_gradient_norm",
+        "physics_gradient_norm",
+        "combined_gradient_norm",
+        "physics_dot",
+        "physics_cosine",
+        "applied_scale",
+        "parent_gradient_max_abs",
+    )
+    values = {
+        name: float(metrics[f"actor_recovery_teacher_{name}"])
+        for name in names
+    }
+    if not all(math.isfinite(value) for value in values.values()):
+        raise ValueError("recovery teacher telemetry must be finite")
+    if values["parent_gradient_max_abs"] != 0.0:
+        raise ValueError("recovery teacher changed the frozen parent gradient")
+    if values["applied_gradient_norm"] > (
+        max_ratio * values["physics_gradient_norm"] + 1e-7
+    ):
+        raise ValueError("recovery teacher gradient exceeded its norm cap")
+    if not bool(metrics["actor_recovery_teacher_valid"]):
+        raise ValueError("recovery teacher telemetry is invalid")
+    return {
+        **{
+            f"actor_recovery_teacher_{name}": value
+            for name, value in values.items()
+        },
+        "actor_recovery_teacher_valid": True,
     }
 
 
@@ -1591,6 +1636,10 @@ def train(
     allow_resume_actor_residual_preview_adapter_start: bool = False,
     actor_residual_preview_initial_adapter_path: str | None = None,
     actor_residual_preview_initial_adapter_sha256: str | None = None,
+    actor_recovery_teacher_dataset_path: str | None = None,
+    actor_recovery_teacher_dataset_sha256: str | None = None,
+    actor_recovery_teacher_gradient_ratio: float = 0.0,
+    allow_resume_actor_recovery_teacher_change: bool = False,
     actor_state_gated_recovery_support_path: str | None = None,
     actor_state_gated_recovery_support_sha256: str | None = None,
     allow_resume_actor_state_gated_recovery_start: bool = False,
@@ -2334,6 +2383,20 @@ def train(
             is_resume=False,
         )
 
+    (
+        actor_recovery_teacher_dataset_path,
+        actor_recovery_teacher_dataset_sha256,
+        actor_recovery_teacher_gradient_ratio,
+    ) = resolve_recovery_teacher_resume_settings(
+        requested_path=actor_recovery_teacher_dataset_path,
+        requested_sha256=actor_recovery_teacher_dataset_sha256,
+        requested_ratio=actor_recovery_teacher_gradient_ratio,
+        resumed_hparams=resumed_hparams,
+        is_resume=resume_from is not None,
+        allow_change=allow_resume_actor_recovery_teacher_change,
+    )
+    recovery_teacher_enabled = actor_recovery_teacher_dataset_path is not None
+
     if actor_state_gated_recovery_support_path is not None:
         if actor_state_gated_recovery_support_sha256 is None:
             raise ValueError("state-gated recovery support SHA-256 is required")
@@ -2543,6 +2606,32 @@ def train(
         actor_residual_preview_adapter
         and actor_residual_preview_optimizer == "muon"
     )
+    recovery_teacher_batch = None
+    if recovery_teacher_enabled:
+        if not actor_residual_preview_adapter:
+            raise ValueError(
+                "recovery teacher requires the residual preview adapter"
+            )
+        if not actor_cagrad or actor_phase_bin_count != 5:
+            raise ValueError(
+                "recovery teacher requires five-bin actor CAGrad"
+            )
+        if gradient_accumulation_steps != 2:
+            raise ValueError(
+                "recovery teacher requires two actor gradient shards"
+            )
+        if actor_recovery_teacher_gradient_ratio != 0.5:
+            raise ValueError(
+                "recovery teacher gradient ratio must equal 0.5"
+            )
+        recovery_teacher_batch = load_recovery_teacher_batch(
+            actor_recovery_teacher_dataset_path,
+            expected_sha256=actor_recovery_teacher_dataset_sha256,
+        )
+        if recovery_teacher_batch.actor_obs.shape[1] != env.actor_obs_dim:
+            raise ValueError(
+                "recovery teacher observations do not match the actor"
+            )
     if actor_preview_adapter:
         preview_legacy_frame_dim = (
             env.actor_frame_obs_dim - env.actor_future_reference_dim
@@ -2658,6 +2747,25 @@ def train(
     critic_normalizer = canonicalize_normalizer_dtype(
         critic_normalizer, env_state.info["bootstrap_critic_obs"].dtype
     )
+
+    recovery_teacher_actor_obs = None
+    recovery_teacher_parent_action = None
+    recovery_teacher_correction = None
+    recovery_teacher_effective_action = None
+    if recovery_teacher_batch is not None:
+        recovery_teacher_actor_obs = jp.asarray(
+            recovery_teacher_batch.actor_obs, dtype=jp.float64
+        )
+        recovery_teacher_parent_action = jp.asarray(
+            recovery_teacher_batch.parent_action, dtype=jp.float32
+        )
+        recovery_teacher_correction = jp.asarray(
+            recovery_teacher_batch.teacher_correction, dtype=jp.float32
+        )
+        recovery_teacher_effective_action = jp.asarray(
+            recovery_teacher_batch.teacher_effective_action,
+            dtype=jp.float32,
+        )
 
     _push_interval_steps = max(int(round(push_interval_s / env.dt)), 1)
     _push_velocity_lo = jp.array(push_velocity_range[0], dtype=jp.float64)
@@ -3371,6 +3479,35 @@ def train(
                 final_states, completed_failed_count
             )
 
+        physics_actor_grad_norm = compute_grad_norm(grads)
+        recovery_teacher_gradient = None
+        if recovery_teacher_enabled:
+            normalized_teacher_history = env.normalize_actor_obs(
+                actor_norm,
+                state.normalizer,
+                recovery_teacher_actor_obs,
+            ).astype(jp.float32)
+            recovery_teacher_frames = current_treatment_frame(
+                normalized_teacher_history,
+                history_len=actor_history_len,
+                treatment_frame_dim=env.actor_frame_obs_dim,
+            )
+            recovery_teacher_gradient = (
+                mix_recovery_teacher_actor_gradient(
+                    grads,
+                    state.actor_params,
+                    residual_actor=residual_preview_actor,
+                    teacher_frames=recovery_teacher_frames,
+                    parent_action=recovery_teacher_parent_action,
+                    teacher_correction=recovery_teacher_correction,
+                    teacher_effective_action=(
+                        recovery_teacher_effective_action
+                    ),
+                    max_ratio=actor_recovery_teacher_gradient_ratio,
+                )
+            )
+            grads = recovery_teacher_gradient.mix.combined_gradient
+
         actor_grad_norm = compute_grad_norm(grads)
 
         if (
@@ -3705,11 +3842,50 @@ def train(
                     "actor_cagrad_uniform_combined_cosine": (
                         cagrad_result.uniform_combined_cosine
                     ),
-                    "actor_cagrad_combined_norm": actor_grad_norm,
+                    "actor_cagrad_combined_norm": physics_actor_grad_norm,
                     "actor_cagrad_valid": (
                         cagrad_reduction["valid"]
                         & cagrad_loss_diagnostics["valid"]
                         & cagrad_counts_match
+                    ),
+                }
+            )
+        if recovery_teacher_enabled:
+            teacher_mix = recovery_teacher_gradient.mix
+            metrics.update(
+                {
+                    "actor_recovery_teacher_loss": (
+                        recovery_teacher_gradient.loss
+                    ),
+                    "actor_recovery_teacher_raw_gradient_norm": (
+                        teacher_mix.raw_teacher_norm
+                    ),
+                    "actor_recovery_teacher_projected_gradient_norm": (
+                        teacher_mix.projected_teacher_norm
+                    ),
+                    "actor_recovery_teacher_applied_gradient_norm": (
+                        teacher_mix.applied_teacher_norm
+                    ),
+                    "actor_recovery_teacher_physics_gradient_norm": (
+                        teacher_mix.physics_norm
+                    ),
+                    "actor_recovery_teacher_combined_gradient_norm": (
+                        teacher_mix.combined_norm
+                    ),
+                    "actor_recovery_teacher_physics_dot": (
+                        teacher_mix.physics_teacher_dot
+                    ),
+                    "actor_recovery_teacher_physics_cosine": (
+                        teacher_mix.physics_teacher_cosine
+                    ),
+                    "actor_recovery_teacher_applied_scale": (
+                        teacher_mix.applied_scale
+                    ),
+                    "actor_recovery_teacher_parent_gradient_max_abs": (
+                        recovery_teacher_gradient.parent_gradient_max_abs
+                    ),
+                    "actor_recovery_teacher_valid": (
+                        recovery_teacher_gradient.valid
                     ),
                 }
             )
@@ -4361,6 +4537,19 @@ def train(
         "actor_residual_preview_initial_adapter_sha256": (
             actor_residual_preview_initial_adapter_sha256
         ),
+        "actor_recovery_teacher_enabled": recovery_teacher_enabled,
+        "actor_recovery_teacher_dataset_path": (
+            actor_recovery_teacher_dataset_path
+        ),
+        "actor_recovery_teacher_dataset_sha256": (
+            actor_recovery_teacher_dataset_sha256
+        ),
+        "actor_recovery_teacher_gradient_ratio": (
+            actor_recovery_teacher_gradient_ratio
+        ),
+        "allow_resume_actor_recovery_teacher_change": (
+            allow_resume_actor_recovery_teacher_change
+        ),
         "actor_state_gated_recovery": recovery_support is not None,
         "actor_state_gated_recovery_support_path": (
             actor_state_gated_recovery_support_path
@@ -4486,6 +4675,10 @@ def train(
 
         if actor_cagrad and not bool(metrics["actor_cagrad_valid"]):
             raise RuntimeError("actor CAGrad aggregation is invalid")
+        if recovery_teacher_enabled and not bool(
+            metrics["actor_recovery_teacher_valid"]
+        ):
+            raise RuntimeError("actor recovery teacher telemetry is invalid")
         if frozen_preview_treatment and not bool(metrics["actor_preview_valid"]):
             raise RuntimeError("actor preview adapter telemetry is invalid")
         if recovery_support is not None and not bool(
@@ -4671,6 +4864,15 @@ def train(
                                 metrics["actor_cagrad_valid"]
                             ),
                         }
+                    )
+                if recovery_teacher_enabled:
+                    diag_entry.update(
+                        build_checkpoint_recovery_teacher_telemetry(
+                            metrics,
+                            max_ratio=(
+                                actor_recovery_teacher_gradient_ratio
+                            ),
+                        )
                     )
                 if frozen_preview_treatment:
                     diag_entry.update(
@@ -4912,6 +5114,13 @@ def train(
             if actor_cagrad:
                 checkpoint_metrics.update(
                     build_checkpoint_cagrad_telemetry(metrics)
+                )
+            if recovery_teacher_enabled:
+                checkpoint_metrics.update(
+                    build_checkpoint_recovery_teacher_telemetry(
+                        metrics,
+                        max_ratio=actor_recovery_teacher_gradient_ratio,
+                    )
                 )
             if actor_policy_anchor_weight > 0.0:
                 checkpoint_metrics.update(
