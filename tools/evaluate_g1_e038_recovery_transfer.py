@@ -12,7 +12,19 @@ import pickle
 
 import numpy as np
 
+from tools.build_g1_e023_carried_reset_bank import (
+    E023_TOTAL_STEPS,
+    validate_e023_hparams,
+)
 from tools.prepare_g1_rmr_reference import sha256_file
+from tools.run_g1_e023_lafan_anchored_carried_recovery import (
+    EXPECTED_LAFAN_REFERENCE_SHA256,
+)
+from tools.run_g1_progressive_recovery_expert import EXPECTED_SOURCE_BANK_SHA256
+from tools.run_g1_rmr_noise_h24_continuation import (
+    EXPECTED_RESUME_HPARAMS_SHA256,
+    EXPECTED_RESUME_SHA256,
+)
 
 
 SOURCE_PHASES = (0, 100, 200, 300, 400)
@@ -23,6 +35,12 @@ ACTION_DIM = 29
 QPOS_DIM = 36
 TERMINATION_ERROR_DIM = 4
 PROTOCOL = "g1-e038-recovery-expert-transfer-v1"
+EXPECTED_PARENT_CHECKPOINT_SHA256 = EXPECTED_RESUME_SHA256
+EXPECTED_PARENT_HPARAMS_SHA256 = EXPECTED_RESUME_HPARAMS_SHA256
+EXPECTED_REFERENCE_SHA256 = EXPECTED_LAFAN_REFERENCE_SHA256
+EXPECTED_EXPERT_CHECKPOINT_SHA256 = (
+    "373fd6528d135dac65b38c35728800da693780558a03bb0cca6a412e314f7bd2"
+)
 
 _ARM_TENSOR_SHAPES = {
     "qpos": (HORIZON, QPOS_DIM),
@@ -37,7 +55,15 @@ _ARM_TENSOR_SHAPES = {
     "normalized_termination_errors": (HORIZON, TERMINATION_ERROR_DIM),
 }
 _PAIRED_TENSOR_NAMES = frozenset(
-    {"source_start_phase"}
+    {
+        "source_start_phase",
+        "initial_qpos",
+        "initial_qvel",
+        "initial_phase",
+        "initial_last_act",
+        "initial_actor_obs_history",
+        "initial_rng_key",
+    }
     | {
         f"{arm}_{name}"
         for arm in ("parent", "expert")
@@ -51,6 +77,8 @@ _INPUT_HASH_NAMES = frozenset(
         "reference",
         "source_bank",
         "expert_checkpoint",
+        "model",
+        "controller",
     }
 )
 _PARAMETER_HASH_NAMES = frozenset({"parent", "normalizer", "expert"})
@@ -163,8 +191,17 @@ def classify_transfer(
 
 
 def _expected_paired_shape(name: str) -> tuple[int, ...]:
-    if name == "source_start_phase":
-        return (BANK_ROWS,)
+    initial_shapes = {
+        "source_start_phase": (BANK_ROWS,),
+        "initial_qpos": (BANK_ROWS, QPOS_DIM),
+        "initial_qvel": (BANK_ROWS, 35),
+        "initial_phase": (BANK_ROWS,),
+        "initial_last_act": (BANK_ROWS, ACTION_DIM),
+        "initial_actor_obs_history": (BANK_ROWS, 10, 328),
+        "initial_rng_key": (BANK_ROWS, 2),
+    }
+    if name in initial_shapes:
+        return initial_shapes[name]
     arm, tensor = name.split("_", maxsplit=1)
     if arm not in {"parent", "expert"} or tensor not in _ARM_TENSOR_SHAPES:
         raise ValueError(f"unregistered paired evidence tensor: {name}")
@@ -203,6 +240,24 @@ def validate_paired_evidence(
         if not np.isfinite(value).all():
             raise ValueError(f"paired evidence {name} must be finite")
 
+    integer_tensors = (
+        "source_start_phase",
+        "initial_phase",
+        "parent_phase",
+        "expert_phase",
+    )
+    for name in integer_tensors:
+        if not np.issubdtype(evidence[name].dtype, np.integer):
+            raise ValueError(f"paired evidence {name} must have integer dtype")
+    if evidence["initial_rng_key"].dtype != np.dtype(np.uint32):
+        raise ValueError("paired evidence initial RNG keys must have uint32 dtype")
+    for arm in ("parent", "expert"):
+        for name in ("alive", "terminal"):
+            if evidence[f"{arm}_{name}"].dtype != np.dtype(bool):
+                raise ValueError(
+                    f"paired evidence {arm} {name} must have boolean dtype"
+                )
+
     parent_qpos = evidence["parent_qpos"]
     expert_qpos = evidence["expert_qpos"]
     if not np.array_equal(parent_qpos[:, 0], expert_qpos[:, 0]):
@@ -211,6 +266,15 @@ def validate_paired_evidence(
         evidence["parent_phase"][:, 0], evidence["expert_phase"][:, 0]
     ):
         raise ValueError("paired initial phase does not match")
+    for arm in ("parent", "expert"):
+        if not np.array_equal(
+            evidence[f"{arm}_qpos"][:, 0], evidence["initial_qpos"]
+        ):
+            raise ValueError(f"paired {arm} initial qpos does not match bank")
+        if not np.array_equal(
+            evidence[f"{arm}_phase"][:, 0], evidence["initial_phase"]
+        ):
+            raise ValueError(f"paired {arm} initial phase does not match bank")
 
     for arm in ("parent", "expert"):
         raw = evidence[f"{arm}_raw_action"]
@@ -268,33 +332,19 @@ def validate_paired_evidence(
 
 
 def parameter_tree_sha256(tree: object) -> str:
-    """Hash an arbitrary parameter pytree including structure, dtypes, and bytes."""
-    digest = hashlib.sha256()
+    """Hash a JAX pytree's treedef, paths, leaf dtypes, shapes, and bytes."""
+    import jax
 
-    def visit(value: object) -> None:
-        if isinstance(value, Mapping):
-            digest.update(b"mapping")
-            for key in sorted(value, key=str):
-                digest.update(str(key).encode("utf-8"))
-                visit(value[key])
-            return
-        if isinstance(value, tuple):
-            digest.update(b"tuple")
-            for item in value:
-                visit(item)
-            return
-        if isinstance(value, list):
-            digest.update(b"list")
-            for item in value:
-                visit(item)
-            return
+    digest = hashlib.sha256()
+    paths_and_leaves, treedef = jax.tree_util.tree_flatten_with_path(tree)
+    digest.update(repr(treedef).encode("utf-8"))
+    for path, value in paths_and_leaves:
+        digest.update(repr(path).encode("utf-8"))
         array = np.ascontiguousarray(np.asarray(value))
         digest.update(b"array")
         digest.update(str(array.dtype).encode("ascii"))
         digest.update(repr(array.shape).encode("ascii"))
         digest.update(array.tobytes())
-
-    visit(tree)
     return digest.hexdigest()
 
 
@@ -421,6 +471,57 @@ def _load_all_bank_rows(bank_path: Path) -> dict[str, np.ndarray]:
     return arrays
 
 
+def validate_exact_input_hashes(paths: Mapping[str, Path]) -> dict[str, str]:
+    """Require the preregistered E023, E027, LAFAN, and E038 artifacts."""
+    expected = {
+        "parent_checkpoint": EXPECTED_PARENT_CHECKPOINT_SHA256,
+        "hparams": EXPECTED_PARENT_HPARAMS_SHA256,
+        "reference": EXPECTED_REFERENCE_SHA256,
+        "source_bank": EXPECTED_SOURCE_BANK_SHA256,
+        "expert_checkpoint": EXPECTED_EXPERT_CHECKPOINT_SHA256,
+    }
+    if set(paths) != set(expected):
+        raise ValueError("E038 input hash names are not exact")
+    for name, expected_digest in expected.items():
+        if sha256_file(paths[name]) != expected_digest:
+            raise ValueError(f"E038 {name} SHA-256 does not match")
+    return expected
+
+
+def validate_parent_checkpoint(checkpoint: object) -> None:
+    """Require the selected E023 plain Flax actor at its exact final step."""
+    from src.algorithms.shac.residual_preview_adapter import FrozenPreviewResidualParams
+
+    if not hasattr(checkpoint, "actor_params") or not hasattr(checkpoint, "step"):
+        raise ValueError("E023 checkpoint does not expose a TrainState actor")
+    if int(np.asarray(checkpoint.step)) != E023_TOTAL_STEPS:
+        raise ValueError("E023 checkpoint step does not match selected parent")
+    actor_params = checkpoint.actor_params
+    if isinstance(actor_params, FrozenPreviewResidualParams):
+        raise ValueError("E023 checkpoint must contain a plain Flax actor")
+    if not isinstance(actor_params, Mapping) or set(actor_params) != {"params"}:
+        raise ValueError("E023 checkpoint plain actor identity does not match")
+    layers = actor_params["params"]
+    expected_layers = {
+        "Dense_0",
+        "Dense_1",
+        "Dense_2",
+        "Dense_3",
+        "LayerNorm_0",
+        "LayerNorm_1",
+        "LayerNorm_2",
+    }
+    if not isinstance(layers, Mapping) or set(layers) != expected_layers:
+        raise ValueError("E023 checkpoint plain actor identity does not match")
+    import jax
+
+    if not all(
+        np.isfinite(np.asarray(leaf)).all()
+        for leaf in jax.tree_util.tree_leaves(actor_params)
+    ):
+        raise ValueError("E023 actor contains nonfinite parameters")
+
+
 def run_evaluation(
     *,
     checkpoint_path: Path,
@@ -441,8 +542,11 @@ def run_evaluation(
         current_treatment_frame,
     )
     from src.core.data_structures import Normalizer
+    from src.core.networks import Actor
+    from src.envs.g1_tracking.environment import DEFAULT_CONTROLLER_PATH
     from src.envs.g1_tracking.solver_profiles import get_solver_profile, solver_context
     from tools.run_g1_action_sequence_recovery_oracle import _build_environment
+    from tools.run_g1_root_recovery_continuation import validate_runtime_assets
     from tools.evaluate_g1_tracking import _load_policy
 
     if seed != 0:
@@ -461,8 +565,29 @@ def run_evaluation(
     ):
         if not path.is_file():
             raise ValueError(f"E038 {label} is missing")
+    if hparams_path != checkpoint_path.with_name("hparams.json"):
+        raise ValueError("E023 hparams must be the parent checkpoint sibling")
+    input_hashes = validate_exact_input_hashes(
+        {
+            "parent_checkpoint": checkpoint_path,
+            "hparams": hparams_path,
+            "reference": reference_path,
+            "source_bank": bank_path,
+            "expert_checkpoint": expert_checkpoint_path,
+        }
+    )
 
     hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
+    validate_e023_hparams(hparams)
+    runtime_assets = validate_runtime_assets(
+        Path(str(hparams["xml_path"])), Path(DEFAULT_CONTROLLER_PATH)
+    )
+    input_hashes.update(
+        {
+            "model": runtime_assets["model_sha256"],
+            "controller": runtime_assets["controller_sha256"],
+        }
+    )
     rows = _load_all_bank_rows(bank_path)
     profile = get_solver_profile("g1-4x5")
     if (
@@ -471,7 +596,12 @@ def run_evaluation(
     ):
         raise ValueError("E038 evaluation requires the g1-4x5 solver profile")
     env = _build_environment(hparams, reference_path)
+    with checkpoint_path.open("rb") as stream:
+        parent_checkpoint = pickle.load(stream)
+    validate_parent_checkpoint(parent_checkpoint)
     actor, actor_params, normalizer_state = _load_policy(env, checkpoint_path, seed)
+    if not isinstance(actor, Actor):
+        raise ValueError("E023 policy loader did not return the plain Flax actor")
     normalizer = Normalizer(env.actor_frame_obs_dim)
     with expert_checkpoint_path.open("rb") as stream:
         expert_params = pickle.load(stream)
@@ -562,6 +692,12 @@ def run_evaluation(
     tensor_names = tuple(_ARM_TENSOR_SHAPES)
     evidence: dict[str, np.ndarray] = {
         "source_start_phase": np.asarray(rows["source_start_phase"]),
+        "initial_qpos": np.asarray(rows["qpos"]),
+        "initial_qvel": np.asarray(rows["qvel"]),
+        "initial_phase": np.asarray(rows["phase"], dtype=np.int32),
+        "initial_last_act": np.asarray(rows["last_act"]),
+        "initial_actor_obs_history": np.asarray(rows["actor_obs_history"]),
+        "initial_rng_key": np.asarray(keys, dtype=np.uint32),
     }
     with solver_context(profile):
         for arm, use_expert in (("parent", False), ("expert", True)):
@@ -585,13 +721,7 @@ def run_evaluation(
         provenance={
             "code_commit": code_commit,
             "seed": seed,
-            "input_sha256": {
-                "parent_checkpoint": sha256_file(checkpoint_path),
-                "hparams": sha256_file(hparams_path),
-                "reference": sha256_file(reference_path),
-                "source_bank": sha256_file(bank_path),
-                "expert_checkpoint": sha256_file(expert_checkpoint_path),
-            },
+            "input_sha256": input_hashes,
             "parameter_sha256_before": parameter_before,
             "parameter_sha256_after": parameter_after,
         },
@@ -601,14 +731,14 @@ def run_evaluation(
 def build_parser() -> argparse.ArgumentParser:
     """Build the bounded E038 evaluation parser, pinning seed and solver."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path)
-    parser.add_argument("--hparams", type=Path)
-    parser.add_argument("--reference-path", type=Path)
-    parser.add_argument("--source-bank", type=Path)
-    parser.add_argument("--expert-checkpoint", type=Path)
-    parser.add_argument("--output-directory", type=Path)
-    parser.add_argument("--code-commit")
-    parser.add_argument("--solver-profile", choices=("g1-4x5",), default="g1-4x5")
+    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--hparams", type=Path, required=True)
+    parser.add_argument("--reference-path", type=Path, required=True)
+    parser.add_argument("--source-bank", type=Path, required=True)
+    parser.add_argument("--expert-checkpoint", type=Path, required=True)
+    parser.add_argument("--output-directory", type=Path, required=True)
+    parser.add_argument("--code-commit", required=True)
+    parser.add_argument("--solver-profile", choices=("g1-4x5",), required=True)
     parser.add_argument("--seed", type=_zero_seed, default=0)
     return parser
 
@@ -618,17 +748,8 @@ def main() -> None:
     from tools.run_g1_tracking_shac import configure_jax
 
     args = build_parser().parse_args()
-    required = (
-        args.checkpoint,
-        args.hparams,
-        args.reference_path,
-        args.source_bank,
-        args.expert_checkpoint,
-        args.output_directory,
-        args.code_commit,
-    )
-    if any(value is None for value in required):
-        raise ValueError("all E038 evaluation inputs and code commit are required")
+    if args.solver_profile != "g1-4x5":
+        raise ValueError("E038 evaluation requires the g1-4x5 solver profile")
     repository = Path(__file__).resolve().parents[1]
     configure_jax()
     summary = run_evaluation(

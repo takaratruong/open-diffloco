@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import inspect
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -164,7 +166,28 @@ def test_zero_seed_is_enforced():
     from tools.evaluate_g1_e038_recovery_transfer import _zero_seed, build_parser
 
     assert _zero_seed("0") == 0
-    assert build_parser().parse_args([]).seed == 0
+    assert build_parser().parse_args(
+        [
+            "--checkpoint",
+            "/tmp/parent.pkl",
+            "--hparams",
+            "/tmp/hparams.json",
+            "--reference-path",
+            "/tmp/reference.npz",
+            "--source-bank",
+            "/tmp/bank.npz",
+            "--expert-checkpoint",
+            "/tmp/expert.pkl",
+            "--output-directory",
+            "/tmp/output",
+            "--code-commit",
+            "a" * 40,
+            "--solver-profile",
+            "g1-4x5",
+        ]
+    ).seed == 0
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([])
     with pytest.raises(Exception, match="exactly zero"):
         _zero_seed("1")
 
@@ -172,6 +195,12 @@ def test_zero_seed_is_enforced():
 def _paired_evidence() -> dict[str, np.ndarray]:
     arrays: dict[str, np.ndarray] = {
         "source_start_phase": _source_start_phase(),
+        "initial_qpos": np.zeros((120, 36), dtype=np.float64),
+        "initial_qvel": np.zeros((120, 35), dtype=np.float64),
+        "initial_phase": np.zeros(120, dtype=np.int32),
+        "initial_last_act": np.zeros((120, 29), dtype=np.float64),
+        "initial_actor_obs_history": np.zeros((120, 10, 328), dtype=np.float64),
+        "initial_rng_key": np.zeros((120, 2), dtype=np.uint32),
     }
     for arm in ("parent", "expert"):
         arrays.update(
@@ -237,6 +266,25 @@ def test_paired_evidence_rejects_unpaired_state_or_nonfinite_tensor():
         validate_paired_evidence(arrays)
 
 
+def test_paired_evidence_requires_exact_initial_bank_state_and_evidence_dtypes():
+    from tools.evaluate_g1_e038_recovery_transfer import validate_paired_evidence
+
+    arrays = _paired_evidence()
+    arrays["initial_qpos"][0, 0] = 1.0
+    with pytest.raises(ValueError, match="initial qpos.*bank"):
+        validate_paired_evidence(arrays)
+
+    arrays = _paired_evidence()
+    arrays["parent_alive"] = arrays["parent_alive"].astype(np.uint8)
+    with pytest.raises(ValueError, match="alive.*boolean"):
+        validate_paired_evidence(arrays)
+
+    arrays = _paired_evidence()
+    arrays["expert_phase"] = arrays["expert_phase"].astype(np.float64)
+    with pytest.raises(ValueError, match="phase.*integer"):
+        validate_paired_evidence(arrays)
+
+
 def test_publish_evaluation_writes_hash_bound_manifest_after_evidence(tmp_path):
     from tools.evaluate_g1_e038_recovery_transfer import publish_evaluation
     from tools.prepare_g1_rmr_reference import sha256_file
@@ -252,6 +300,8 @@ def test_publish_evaluation_writes_hash_bound_manifest_after_evidence(tmp_path):
                 "reference": "c" * 64,
                 "source_bank": "d" * 64,
                 "expert_checkpoint": "e" * 64,
+                "model": "2" * 64,
+                "controller": "3" * 64,
             },
             "parameter_sha256_before": {
                 "parent": "f" * 64,
@@ -300,6 +350,65 @@ def test_parameter_immutability_is_bit_exact():
             },
         )
     assert digest == parameter_tree_sha256(unchanged)
+
+
+def test_parameter_hash_distinguishes_jax_pytree_structure_and_named_state():
+    from collections import namedtuple
+
+    from tools.evaluate_g1_e038_recovery_transfer import parameter_tree_sha256
+
+    NormState = namedtuple("NormState", ("mean", "var"))
+    leaves = (np.asarray([1.0]), np.asarray([2.0]))
+
+    assert parameter_tree_sha256(NormState(*leaves)) != parameter_tree_sha256(leaves)
+
+
+def test_exact_e023_hashes_and_parent_checkpoint_identity_are_enforced(monkeypatch):
+    from tools import evaluate_g1_e038_recovery_transfer as evaluator
+
+    paths = {
+        "parent_checkpoint": Path("/tmp/parent.pkl"),
+        "hparams": Path("/tmp/hparams.json"),
+        "reference": Path("/tmp/reference.npz"),
+        "source_bank": Path("/tmp/bank.npz"),
+        "expert_checkpoint": Path("/tmp/expert.pkl"),
+    }
+    expected = {
+        "parent_checkpoint": evaluator.EXPECTED_PARENT_CHECKPOINT_SHA256,
+        "hparams": evaluator.EXPECTED_PARENT_HPARAMS_SHA256,
+        "reference": evaluator.EXPECTED_REFERENCE_SHA256,
+        "source_bank": evaluator.EXPECTED_SOURCE_BANK_SHA256,
+        "expert_checkpoint": evaluator.EXPECTED_EXPERT_CHECKPOINT_SHA256,
+    }
+    monkeypatch.setattr(
+        evaluator,
+        "sha256_file",
+        lambda path: expected[next(name for name, value in paths.items() if value == path)],
+    )
+    assert evaluator.validate_exact_input_hashes(paths) == expected
+
+    layers = {
+        name: {"kernel": np.zeros((1, 1)), "bias": np.zeros(1)}
+        for name in (
+            "Dense_0",
+            "Dense_1",
+            "Dense_2",
+            "Dense_3",
+            "LayerNorm_0",
+            "LayerNorm_1",
+            "LayerNorm_2",
+        )
+    }
+    evaluator.validate_parent_checkpoint(
+        SimpleNamespace(
+            step=1_572_864,
+            actor_params={"params": layers},
+        )
+    )
+    with pytest.raises(ValueError, match="step"):
+        evaluator.validate_parent_checkpoint(
+            SimpleNamespace(step=1, actor_params={"params": layers})
+        )
 
 
 def test_run_evaluation_exposes_all_immutable_inputs_and_output_directory():
