@@ -45,6 +45,12 @@ class ShacExactResumeTest(unittest.TestCase):
         self.assertEqual(
             parameters["actor_residual_preview_optimizer"].default, "adam"
         )
+        self.assertIs(
+            parameters[
+                "allow_resume_actor_residual_preview_adapter_start"
+            ].default,
+            False,
+        )
 
     def test_residual_preview_can_only_start_during_explicit_legacy_upgrade(self):
         from src.algorithms.shac.algorithm import (
@@ -119,6 +125,37 @@ class ShacExactResumeTest(unittest.TestCase):
                 requested_hidden=256,
                 requested_optimizer="adam",
                 future_reference_upgrade=False,
+            ),
+            (True, 256, "adam"),
+        )
+
+    def test_residual_preview_plain_actor_start_requires_explicit_authority(self):
+        from src.algorithms.shac.algorithm import (
+            resolve_residual_preview_adapter_resume_setting,
+        )
+
+        metadata = {
+            "actor_residual_preview_adapter": False,
+            "actor_residual_preview_hidden": 256,
+            "actor_residual_preview_optimizer": "adam",
+        }
+        with self.assertRaisesRegex(ValueError, "explicit start authority"):
+            resolve_residual_preview_adapter_resume_setting(
+                metadata,
+                requested=True,
+                requested_hidden=256,
+                requested_optimizer="adam",
+                future_reference_upgrade=False,
+                allow_start=False,
+            )
+        self.assertEqual(
+            resolve_residual_preview_adapter_resume_setting(
+                metadata,
+                requested=True,
+                requested_hidden=256,
+                requested_optimizer="adam",
+                future_reference_upgrade=False,
+                allow_start=True,
             ),
             (True, 256, "adam"),
         )

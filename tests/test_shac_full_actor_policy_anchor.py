@@ -60,6 +60,28 @@ def test_policy_anchor_configuration_is_default_off_and_fail_closed():
             )
 
 
+def test_policy_anchor_allows_explicit_frozen_residual_resume():
+    from src.algorithms.shac.algorithm import (
+        validate_actor_policy_anchor_configuration,
+    )
+
+    validate_actor_policy_anchor_configuration(
+        weight=1.0,
+        initial_full_actor_policy=None,
+        resume_from="checkpoint.pkl",
+        actor_residual_preview_adapter=True,
+        allow_resume_actor_residual_preview_adapter_start=True,
+    )
+    with pytest.raises(ValueError, match="explicit frozen residual"):
+        validate_actor_policy_anchor_configuration(
+            weight=1.0,
+            initial_full_actor_policy=None,
+            resume_from="checkpoint.pkl",
+            actor_residual_preview_adapter=True,
+            allow_resume_actor_residual_preview_adapter_start=False,
+        )
+
+
 def test_train_wires_policy_anchor_into_rollout_loss_and_hparams():
     from src.algorithms.shac.algorithm import train
 

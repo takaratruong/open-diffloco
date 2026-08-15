@@ -218,6 +218,8 @@ def test_train_wires_residual_preview_through_existing_frozen_boundary():
     assert '"residual_adapter_migration.json"' in source
     assert '"residual_muon_migration.json"' in source
     assert '"flax_residual_preview"' in source
+    assert "residual_adapter_upgrade or future_reference_upgrade" in source
+    assert '"allow_resume_actor_residual_preview_adapter_start": (' in source
 
 
 def test_train_wires_native_rmr_preview_migration_and_parent_action():

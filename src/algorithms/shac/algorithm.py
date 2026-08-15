@@ -572,6 +572,7 @@ def resolve_residual_preview_adapter_resume_setting(
     requested_hidden: int,
     requested_optimizer: str,
     future_reference_upgrade: bool,
+    allow_start: bool = False,
 ) -> tuple[bool, int, str]:
     """Allow one explicit legacy start and exact nonlinear treated resumes."""
     if not isinstance(requested, bool):
@@ -584,6 +585,10 @@ def resolve_residual_preview_adapter_resume_setting(
         raise ValueError("actor_residual_preview_hidden must be a positive integer")
     if requested_optimizer not in {"adam", "muon"}:
         raise ValueError("actor residual preview optimizer is invalid")
+    if not isinstance(allow_start, bool):
+        raise ValueError(
+            "allow_resume_actor_residual_preview_adapter_start must be boolean"
+        )
     if (
         not resumed_hparams
         or "actor_residual_preview_adapter" not in resumed_hparams
@@ -606,6 +611,12 @@ def resolve_residual_preview_adapter_resume_setting(
     )
     if saved_optimizer not in {"adam", "muon"}:
         raise ValueError("saved actor residual preview optimizer is invalid")
+    if not saved and requested:
+        if not allow_start:
+            raise ValueError(
+                "residual preview treatment requires explicit start authority"
+            )
+        return requested, requested_hidden, requested_optimizer
     if (
         saved != requested
         or (saved and saved_hidden != requested_hidden)
@@ -1246,6 +1257,8 @@ def validate_actor_policy_anchor_configuration(
     weight: float,
     initial_full_actor_policy,
     resume_from,
+    actor_residual_preview_adapter: bool = False,
+    allow_resume_actor_residual_preview_adapter_start: bool = False,
 ) -> None:
     """Fail closed unless proximal anchoring has an immutable fresh parent."""
     if (
@@ -1256,10 +1269,22 @@ def validate_actor_policy_anchor_configuration(
         raise ValueError(
             "actor policy anchor weight must be non-negative and finite"
         )
-    if weight > 0.0 and initial_full_actor_policy is None:
-        raise ValueError("actor policy anchoring requires a full actor parent")
-    if weight > 0.0 and resume_from is not None:
-        raise ValueError("actor policy anchoring currently requires a fresh run")
+    if weight == 0.0:
+        return
+    if initial_full_actor_policy is not None:
+        if resume_from is not None:
+            raise ValueError(
+                "actor policy anchoring currently requires a fresh run"
+            )
+        return
+    if resume_from is not None and actor_residual_preview_adapter:
+        if not allow_resume_actor_residual_preview_adapter_start:
+            raise ValueError(
+                "resumed policy anchoring requires an explicit frozen residual "
+                "start"
+            )
+        return
+    raise ValueError("actor policy anchoring requires a full actor parent")
 
 
 def train(
@@ -1324,6 +1349,7 @@ def train(
     actor_residual_preview_adapter: bool = False,
     actor_residual_preview_hidden: int = 256,
     actor_residual_preview_optimizer: str = "adam",
+    allow_resume_actor_residual_preview_adapter_start: bool = False,
     env_variant: str = "blind_nolinvel_nokinref",
     actor_per_env_grad_clip: float = None,
     allow_resume_actor_per_env_grad_clip_change: bool = False,
@@ -1468,6 +1494,10 @@ def train(
         weight=actor_policy_anchor_weight,
         initial_full_actor_policy=initial_full_actor_policy,
         resume_from=resume_from,
+        actor_residual_preview_adapter=actor_residual_preview_adapter,
+        allow_resume_actor_residual_preview_adapter_start=(
+            allow_resume_actor_residual_preview_adapter_start
+        ),
     )
     if initial_full_actor_policy is not None and residual_action_scale != 0.0:
         raise ValueError(
@@ -1708,6 +1738,7 @@ def train(
     resumed_step = 0
     resumed_hparams = None
     future_reference_upgrade = False
+    residual_adapter_upgrade = False
 
     if resume_from:
         resumed_state, resumed_hparams, resumed_step = load_checkpoint(resume_from)
@@ -1747,6 +1778,15 @@ def train(
             requested_hidden=actor_residual_preview_hidden,
             requested_optimizer=actor_residual_preview_optimizer,
             future_reference_upgrade=future_reference_upgrade,
+            allow_start=(
+                allow_resume_actor_residual_preview_adapter_start
+            ),
+        )
+        residual_adapter_upgrade = bool(
+            actor_residual_preview_adapter
+            and resumed_hparams is not None
+            and resumed_hparams.get("actor_residual_preview_adapter") is False
+            and allow_resume_actor_residual_preview_adapter_start
         )
         (
             adaptive_phase_sampling,
@@ -3424,7 +3464,7 @@ def train(
                 save_dir, migration_report
             )
         if actor_residual_preview_adapter:
-            if future_reference_upgrade:
+            if residual_adapter_upgrade or future_reference_upgrade:
                 parent_params = resumed_state.actor_params
                 parent_optimizer_state = resumed_state.actor_opt
                 adapter_params = residual_preview_actor.init(
@@ -3795,6 +3835,9 @@ def train(
         "actor_residual_preview_optimizer": (
             actor_residual_preview_optimizer
         ),
+        "allow_resume_actor_residual_preview_adapter_start": (
+            allow_resume_actor_residual_preview_adapter_start
+        ),
         "actor_residual_preview_muon_beta": 0.95,
         "actor_residual_preview_muon_ns_steps": 5,
         "actor_residual_preview_muon_nesterov": True,
@@ -3815,6 +3858,7 @@ def train(
             else None
         ),
         "resume_future_reference_upgrade": future_reference_upgrade,
+        "resume_residual_adapter_upgrade": residual_adapter_upgrade,
         "migration_equivalence_artifact": (
             "migration_equivalence.json"
             if migration_report is not None
