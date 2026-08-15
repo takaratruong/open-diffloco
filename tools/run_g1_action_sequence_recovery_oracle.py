@@ -145,6 +145,7 @@ def run_oracle(
     bank_path: Path,
     output_directory: Path,
     seed: int,
+    independent_tapes: bool = False,
 ) -> dict[str, object]:
     """Optimize and evaluate one shared phase-indexed action correction tape."""
     hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
@@ -199,12 +200,16 @@ def run_oracle(
     def single_loss(tape_logits, initial_state):
         correction_tape = CORRECTION_BOUND * jnp.tanh(tape_logits)
 
-        def step(carry, _):
+        def step(carry, step_index):
             state, alive = carry
-            correction = phase_tape_correction(
-                correction_tape,
-                state.info["phase"],
-                phase_min=phase_min,
+            correction = (
+                correction_tape[step_index]
+                if independent_tapes
+                else phase_tape_correction(
+                    correction_tape,
+                    state.info["phase"],
+                    phase_min=phase_min,
+                )
             ).astype(jnp.float64)
             next_state = env.step(state, parent_action(state) + correction)
             errors = jnp.stack(
@@ -235,16 +240,21 @@ def run_oracle(
         (_, _), (losses, terminals, corrections, rewards) = jax.lax.scan(
             step,
             (initial_state, jnp.asarray(True)),
-            None,
-            length=HORIZON,
+            jnp.arange(HORIZON),
         )
         return jnp.sum(losses), (terminals, corrections, rewards)
 
     value_and_gradient = jax.vmap(
-        jax.value_and_grad(single_loss, has_aux=True), in_axes=(None, 0)
+        jax.value_and_grad(single_loss, has_aux=True),
+        in_axes=(0, 0) if independent_tapes else (None, 0),
     )
     optimizer = optax.adam(LEARNING_RATE)
-    tape_logits = jnp.zeros((tape_length, env.action_dim), dtype=jnp.float64)
+    tape_shape = (
+        (SOURCE_ROWS, HORIZON, env.action_dim)
+        if independent_tapes
+        else (tape_length, env.action_dim)
+    )
+    tape_logits = jnp.zeros(tape_shape, dtype=jnp.float64)
     optimizer_state = optimizer.init(tape_logits)
 
     @jax.jit
@@ -255,7 +265,7 @@ def run_oracle(
         norms = jnp.linalg.norm(flat, axis=1)
         scale = jnp.minimum(1.0, PER_START_GRADIENT_CLIP / (norms + 1e-12))
         clipped = gradients * scale[:, None, None]
-        gradient = jnp.mean(clipped, axis=0)
+        gradient = clipped if independent_tapes else jnp.mean(clipped, axis=0)
         updates, next_state = optimizer.update(gradient, state, tape)
         next_tape = optax.apply_updates(tape, updates)
         return next_tape, next_state, jnp.mean(losses), norms, gradient
@@ -281,7 +291,10 @@ def run_oracle(
 
     final_tape = CORRECTION_BOUND * jnp.tanh(tape_logits)
     zero_tape = jnp.zeros_like(tape_logits)
-    evaluate_population = jax.vmap(single_loss, in_axes=(None, 0))
+    evaluate_population = jax.vmap(
+        single_loss,
+        in_axes=(0, 0) if independent_tapes else (None, 0),
+    )
 
     @jax.jit
     def evaluate(tape):
@@ -319,21 +332,30 @@ def run_oracle(
     )
     output_directory.mkdir(parents=True, exist_ok=True)
     evidence_path = output_directory / "action_sequence_oracle.npz"
-    _write_npz(
-        evidence_path,
-        phase=np.asarray(rows["phase"]),
-        tape_phase=np.arange(phase_min, phase_min + tape_length),
-        correction_tape=np.asarray(final_tape),
-        baseline_terminal=np.asarray(baseline_terminals),
-        candidate_terminal=np.asarray(candidate_terminals),
-        baseline_correction=np.asarray(baseline_corrections),
-        candidate_correction=np.asarray(candidate_corrections),
-        baseline_reward=np.asarray(baseline_rewards),
-        candidate_reward=np.asarray(candidate_rewards),
-    )
+    evidence_arrays = {
+        "phase": np.asarray(rows["phase"]),
+        "correction_tape": np.asarray(final_tape),
+        "baseline_terminal": np.asarray(baseline_terminals),
+        "candidate_terminal": np.asarray(candidate_terminals),
+        "baseline_correction": np.asarray(baseline_corrections),
+        "candidate_correction": np.asarray(candidate_corrections),
+        "baseline_reward": np.asarray(baseline_rewards),
+        "candidate_reward": np.asarray(candidate_rewards),
+    }
+    if independent_tapes:
+        evidence_arrays["tape_step"] = np.arange(HORIZON)
+    else:
+        evidence_arrays["tape_phase"] = np.arange(
+            phase_min, phase_min + tape_length
+        )
+    _write_npz(evidence_path, **evidence_arrays)
     summary = {
         "valid": bool(execution_valid),
-        "protocol": PROTOCOL,
+        "protocol": (
+            "g1-e023-independent-action-sequence-recovery-oracle-v1"
+            if independent_tapes
+            else PROTOCOL
+        ),
         "outcome": outcome,
         "horizon": HORIZON,
         "updates": UPDATES,
@@ -341,6 +363,7 @@ def run_oracle(
         "learning_rate": LEARNING_RATE,
         "phase_min": phase_min,
         "phase_max": phase_min + tape_length - 1,
+        "independent_tapes": independent_tapes,
         "baseline_survival": baseline_survival,
         "candidate_survival": candidate_survival,
         "candidate_full_horizon_count": int(
@@ -368,6 +391,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-directory", type=Path, required=True)
     parser.add_argument("--code-commit", required=True)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--independent-tapes", action="store_true")
     return parser
 
 
@@ -392,6 +416,7 @@ def main() -> None:
             bank_path=args.source_bank.resolve(),
             output_directory=args.output_directory.resolve(),
             seed=args.seed,
+            independent_tapes=args.independent_tapes,
         )
     print(json.dumps(summary, indent=2, sort_keys=True))
 

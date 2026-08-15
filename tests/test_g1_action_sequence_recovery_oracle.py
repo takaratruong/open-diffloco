@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from tools.run_g1_action_sequence_recovery_oracle import (
+    build_parser,
     phase_tape_correction,
     recovery_oracle_outcome,
 )
@@ -41,3 +42,23 @@ def test_oracle_outcome_requires_every_carried_start_to_cross_horizon():
         horizon=32,
         execution_valid=False,
     ) == "invalid-execution"
+
+
+def test_parser_accepts_independent_state_tape_treatment():
+    required = [
+        "--checkpoint",
+        "/tmp/e023.pkl",
+        "--hparams",
+        "/tmp/hparams.json",
+        "--reference-path",
+        "/tmp/reference.npz",
+        "--source-bank",
+        "/tmp/bank.npz",
+        "--output-directory",
+        "/tmp/output",
+        "--code-commit",
+        "a" * 40,
+    ]
+    assert build_parser().parse_args(
+        [*required, "--independent-tapes"]
+    ).independent_tapes is True
