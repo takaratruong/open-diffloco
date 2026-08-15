@@ -146,6 +146,7 @@ def run_oracle(
     output_directory: Path,
     seed: int,
     independent_tapes: bool = False,
+    worst_margin_objective: bool = False,
 ) -> dict[str, object]:
     """Optimize and evaluate one shared phase-indexed action correction tape."""
     hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
@@ -235,14 +236,38 @@ def run_oracle(
                 terminal,
                 correction,
                 next_state.reward,
+                normalized_errors,
+                alive,
             )
 
-        (_, _), (losses, terminals, corrections, rewards) = jax.lax.scan(
+        (_, _), (
+            losses,
+            terminals,
+            corrections,
+            rewards,
+            normalized_errors,
+            active,
+        ) = jax.lax.scan(
             step,
             (initial_state, jnp.asarray(True)),
             jnp.arange(HORIZON),
         )
-        return jnp.sum(losses), (terminals, corrections, rewards)
+        if worst_margin_objective:
+            masked_errors = jnp.where(
+                active[:, None], normalized_errors, -10.0
+            )
+            objective = (
+                jax.nn.logsumexp(12.0 * masked_errors) / 12.0
+                + 0.01 * jnp.mean(jnp.square(corrections))
+            )
+        else:
+            objective = jnp.sum(losses)
+        return objective, (
+            terminals,
+            corrections,
+            rewards,
+            normalized_errors,
+        )
 
     value_and_gradient = jax.vmap(
         jax.value_and_grad(single_loss, has_aux=True),
@@ -298,17 +323,21 @@ def run_oracle(
 
     @jax.jit
     def evaluate(tape):
-        _losses, (terminals, corrections, rewards) = evaluate_population(
-            tape, initial_states
-        )
-        return terminals, corrections, rewards
+        _losses, auxiliary = evaluate_population(tape, initial_states)
+        return auxiliary
 
-    baseline_terminals, baseline_corrections, baseline_rewards = evaluate(
-        zero_tape
-    )
-    candidate_terminals, candidate_corrections, candidate_rewards = evaluate(
-        tape_logits
-    )
+    (
+        baseline_terminals,
+        baseline_corrections,
+        baseline_rewards,
+        baseline_normalized_errors,
+    ) = evaluate(zero_tape)
+    (
+        candidate_terminals,
+        candidate_corrections,
+        candidate_rewards,
+        candidate_normalized_errors,
+    ) = evaluate(tape_logits)
 
     def survival(terminals: np.ndarray) -> list[int]:
         output = []
@@ -341,6 +370,12 @@ def run_oracle(
         "candidate_correction": np.asarray(candidate_corrections),
         "baseline_reward": np.asarray(baseline_rewards),
         "candidate_reward": np.asarray(candidate_rewards),
+        "baseline_normalized_termination_errors": np.asarray(
+            baseline_normalized_errors
+        ),
+        "candidate_normalized_termination_errors": np.asarray(
+            candidate_normalized_errors
+        ),
     }
     if independent_tapes:
         evidence_arrays["tape_step"] = np.arange(HORIZON)
@@ -352,6 +387,9 @@ def run_oracle(
     summary = {
         "valid": bool(execution_valid),
         "protocol": (
+            "g1-e023-worst-margin-action-sequence-recovery-oracle-v1"
+            if worst_margin_objective
+            else
             "g1-e023-independent-action-sequence-recovery-oracle-v1"
             if independent_tapes
             else PROTOCOL
@@ -364,6 +402,7 @@ def run_oracle(
         "phase_min": phase_min,
         "phase_max": phase_min + tape_length - 1,
         "independent_tapes": independent_tapes,
+        "worst_margin_objective": worst_margin_objective,
         "baseline_survival": baseline_survival,
         "candidate_survival": candidate_survival,
         "candidate_full_horizon_count": int(
@@ -392,6 +431,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--code-commit", required=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--independent-tapes", action="store_true")
+    parser.add_argument("--worst-margin-objective", action="store_true")
     return parser
 
 
@@ -417,6 +457,7 @@ def main() -> None:
             output_directory=args.output_directory.resolve(),
             seed=args.seed,
             independent_tapes=args.independent_tapes,
+            worst_margin_objective=args.worst_margin_objective,
         )
     print(json.dumps(summary, indent=2, sort_keys=True))
 

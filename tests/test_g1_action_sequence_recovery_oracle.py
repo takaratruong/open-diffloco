@@ -60,5 +60,8 @@ def test_parser_accepts_independent_state_tape_treatment():
         "a" * 40,
     ]
     assert build_parser().parse_args(
-        [*required, "--independent-tapes"]
+        [*required, "--independent-tapes", "--worst-margin-objective"]
     ).independent_tapes is True
+    assert build_parser().parse_args(
+        [*required, "--independent-tapes", "--worst-margin-objective"]
+    ).worst_margin_objective is True
