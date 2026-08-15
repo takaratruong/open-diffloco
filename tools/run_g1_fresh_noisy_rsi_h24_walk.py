@@ -52,6 +52,7 @@ def validate_preflight(
         "protocol": "g1-fresh-noisy-rsi-h24-walk-preflight-v1",
         "scientific_delta": ["reference_reset_noise_scale"],
         "reference_reset_noise_scale": 1.0,
+        "reset_noise": True,
         "fresh_initialization": True,
     }
 

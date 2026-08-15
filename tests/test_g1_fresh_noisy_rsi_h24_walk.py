@@ -53,6 +53,7 @@ def test_preflight_records_fresh_noisy_rsi_only(
     assert report["protocol"] == "g1-fresh-noisy-rsi-h24-walk-preflight-v1"
     assert report["scientific_delta"] == ["reference_reset_noise_scale"]
     assert report["reference_reset_noise_scale"] == 1.0
+    assert report["reset_noise"] is True
     assert report["fresh_initialization"] is True
 
 
