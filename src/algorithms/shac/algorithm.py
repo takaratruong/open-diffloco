@@ -93,6 +93,10 @@ from src.algorithms.shac.residual_preview_adapter import (
     residual_muon_migration_report,
     split_residual_adapter_params,
 )
+from src.algorithms.shac.progressive_recovery_expert import (
+    RecoverySupport,
+    apply_state_gated_recovery,
+)
 from src.algorithms.shac.resume_randomness import (
     apply_resume_randomness_setting,
     persist_resume_randomness_audit,
@@ -923,6 +927,124 @@ def _sha256_file(path: Path, block_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+def load_recovery_support_artifact(
+    path: str | Path, *, expected_sha256: str
+) -> tuple[RecoverySupport, dict[str, object]]:
+    """Load and validate one immutable compact recovery support artifact."""
+    resolved = Path(path).resolve()
+    if not resolved.is_file():
+        raise ValueError("recovery support artifact does not exist")
+    if len(expected_sha256) != 64 or _sha256_file(resolved) != expected_sha256:
+        raise ValueError("recovery support artifact SHA-256 does not match")
+    required = {
+        "anchors",
+        "radius",
+        "phase_min",
+        "phase_max",
+        "taper",
+        "positive_leave_one_out_distances",
+        "protected_negative_distances",
+    }
+    with np.load(resolved, allow_pickle=False) as archive:
+        if set(archive.files) != required:
+            raise ValueError("recovery support artifact keys do not match")
+        arrays = {name: archive[name] for name in archive.files}
+    anchors = np.asarray(arrays["anchors"], dtype=np.float32)
+    radius = float(np.asarray(arrays["radius"]))
+    phase_min = int(np.asarray(arrays["phase_min"]))
+    phase_max = int(np.asarray(arrays["phase_max"]))
+    taper = int(np.asarray(arrays["taper"]))
+    positive_distances = np.asarray(
+        arrays["positive_leave_one_out_distances"], dtype=np.float32
+    )
+    protected_distances = np.asarray(
+        arrays["protected_negative_distances"], dtype=np.float32
+    )
+    if (
+        anchors.shape != (24, 328)
+        or not np.isfinite(anchors).all()
+        or not math.isfinite(radius)
+        or radius <= 0.0
+        or phase_min < 0
+        or phase_max < phase_min
+        or taper != 4
+        or positive_distances.shape != (24,)
+        or protected_distances.ndim != 1
+        or protected_distances.size < 1
+        or not np.isfinite(positive_distances).all()
+        or not np.isfinite(protected_distances).all()
+    ):
+        raise ValueError("recovery support artifact contract is invalid")
+    positive_coverage = int(np.sum(positive_distances < radius))
+    if positive_coverage < 20:
+        raise ValueError("recovery support positive coverage is insufficient")
+    if np.any(protected_distances < 2.0 * radius - 1e-6):
+        raise ValueError("recovery support activates on protected negatives")
+    support = RecoverySupport(
+        anchors=jp.asarray(anchors),
+        radius=jp.asarray(radius, dtype=jp.float32),
+        phase_min=phase_min,
+        phase_max=phase_max,
+        taper=taper,
+    )
+    return support, {
+        "valid": True,
+        "path": str(resolved),
+        "sha256": expected_sha256,
+        "radius": radius,
+        "phase_min": phase_min,
+        "phase_max": phase_max,
+        "taper": taper,
+        "positive_coverage": positive_coverage,
+        "protected_negative_count": int(protected_distances.size),
+        "protected_negative_max_gate": 0.0,
+    }
+
+
+def resolve_recovery_support_resume_setting(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested_path: str | None,
+    requested_sha256: str | None,
+    allow_start: bool,
+    is_resume: bool,
+) -> tuple[str | None, str | None]:
+    """Allow one explicit gated-recovery start and exact treated resumes."""
+    if not isinstance(allow_start, bool) or not isinstance(is_resume, bool):
+        raise ValueError("recovery support authority must be boolean")
+    requested_enabled = requested_path is not None or requested_sha256 is not None
+    if requested_enabled and (
+        requested_path is None
+        or requested_sha256 is None
+        or len(requested_sha256) != 64
+    ):
+        raise ValueError("recovery support requires path and SHA-256")
+    if not is_resume:
+        return requested_path, requested_sha256
+    if resumed_hparams is None:
+        raise ValueError("recovery support resume metadata is missing")
+    saved_enabled = resumed_hparams.get("actor_state_gated_recovery", False)
+    if not isinstance(saved_enabled, bool):
+        raise ValueError("saved recovery support metadata is invalid")
+    if not saved_enabled:
+        if requested_enabled and not allow_start:
+            raise ValueError("recovery support requires explicit start authority")
+        return requested_path, requested_sha256
+    saved_path = resumed_hparams.get(
+        "actor_state_gated_recovery_support_path"
+    )
+    saved_sha256 = resumed_hparams.get(
+        "actor_state_gated_recovery_support_sha256"
+    )
+    if (
+        not requested_enabled
+        or saved_path != requested_path
+        or saved_sha256 != requested_sha256
+    ):
+        raise ValueError("recovery support settings must match the checkpoint")
+    return str(saved_path), str(saved_sha256)
+
+
 def resolve_reference_path_resume_setting(
     resumed_hparams: dict[str, object] | None,
     *,
@@ -1120,8 +1242,11 @@ def resolve_cagrad_resume_settings(
     requested_alpha: float,
     requested_iterations: int,
     requested_bin_count: int,
+    allow_change: bool = False,
 ) -> tuple[bool, float, int, int]:
     """Restore CAGrad checkpoints while allowing legacy treatment starts."""
+    if not isinstance(allow_change, bool):
+        raise ValueError("CAGrad resume change authority must be boolean")
     if not resumed_hparams or "actor_cagrad" not in resumed_hparams:
         return (
             requested_actor_cagrad,
@@ -1162,6 +1287,15 @@ def resolve_cagrad_resume_settings(
         raise ValueError("CAGrad checkpoint contains invalid resume metadata")
     if isinstance(bin_count, bool) or bin_count != 5:
         raise ValueError("CAGrad checkpoint requires exactly five phase bins")
+    if not requested_actor_cagrad:
+        if not allow_change:
+            return True, float(alpha), iterations, bin_count
+        return (
+            False,
+            requested_alpha,
+            requested_iterations,
+            requested_bin_count,
+        )
     return True, float(alpha), iterations, bin_count
 
 
@@ -1408,6 +1542,9 @@ def train(
     actor_residual_preview_hidden: int = 256,
     actor_residual_preview_optimizer: str = "adam",
     allow_resume_actor_residual_preview_adapter_start: bool = False,
+    actor_state_gated_recovery_support_path: str | None = None,
+    actor_state_gated_recovery_support_sha256: str | None = None,
+    allow_resume_actor_state_gated_recovery_start: bool = False,
     env_variant: str = "blind_nolinvel_nokinref",
     actor_per_env_grad_clip: float = None,
     allow_resume_actor_per_env_grad_clip_change: bool = False,
@@ -1418,6 +1555,7 @@ def train(
     actor_cagrad: bool = False,
     actor_cagrad_alpha: float = 0.5,
     actor_cagrad_iterations: int = 32,
+    allow_resume_actor_cagrad_change: bool = False,
     adaptive_phase_sampling: bool = False,
     adaptive_phase_uniform_ratio: float = 0.5,
     adaptive_phase_alpha: float = 0.001,
@@ -1550,6 +1688,30 @@ def train(
         raise ValueError(
             "source_actor_policy and initial_full_actor_policy are "
             "mutually exclusive"
+        )
+    if not isinstance(allow_resume_actor_state_gated_recovery_start, bool):
+        raise ValueError(
+            "allow_resume_actor_state_gated_recovery_start must be boolean"
+        )
+    if not isinstance(allow_resume_actor_cagrad_change, bool):
+        raise ValueError("allow_resume_actor_cagrad_change must be boolean")
+    requested_gated_recovery = (
+        actor_state_gated_recovery_support_path is not None
+        or actor_state_gated_recovery_support_sha256 is not None
+    )
+    if (
+        actor_state_gated_recovery_support_path is None
+    ) != (actor_state_gated_recovery_support_sha256 is None):
+        raise ValueError(
+            "state-gated recovery support path and SHA-256 are required together"
+        )
+    if requested_gated_recovery and not actor_residual_preview_adapter:
+        raise ValueError(
+            "state-gated recovery requires actor_residual_preview_adapter"
+        )
+    if requested_gated_recovery and actor_torso_wrench_assistance_conditioning:
+        raise ValueError(
+            "state-gated recovery does not support assistance-conditioned adapters"
         )
     validate_actor_policy_anchor_configuration(
         weight=actor_policy_anchor_weight,
@@ -1805,6 +1967,8 @@ def train(
     future_reference_upgrade = False
     residual_adapter_upgrade = False
     reference_path_migration_report = None
+    recovery_support = None
+    recovery_support_report = None
 
     if resume_from:
         resumed_state, resumed_hparams, resumed_step = load_checkpoint(resume_from)
@@ -1864,6 +2028,16 @@ def train(
             and allow_resume_actor_residual_preview_adapter_start
         )
         (
+            actor_state_gated_recovery_support_path,
+            actor_state_gated_recovery_support_sha256,
+        ) = resolve_recovery_support_resume_setting(
+            resumed_hparams,
+            requested_path=actor_state_gated_recovery_support_path,
+            requested_sha256=actor_state_gated_recovery_support_sha256,
+            allow_start=allow_resume_actor_state_gated_recovery_start,
+            is_resume=True,
+        )
+        (
             adaptive_phase_sampling,
             adaptive_phase_uniform_ratio,
             adaptive_phase_alpha,
@@ -1885,6 +2059,7 @@ def train(
             requested_alpha=actor_cagrad_alpha,
             requested_iterations=actor_cagrad_iterations,
             requested_bin_count=actor_phase_bin_count,
+            allow_change=allow_resume_actor_cagrad_change,
         )
         (
             carried_reset_bank_path,
@@ -1906,6 +2081,7 @@ def train(
             requested_probability=reference_root_reset_noise_probability,
             allow_change=allow_resume_reference_root_reset_noise_change,
         )
+
         actor_per_env_grad_clip = (
             resolve_actor_per_env_grad_clip_resume_setting(
                 resumed_hparams,
@@ -2056,6 +2232,16 @@ def train(
             source_actor_policy=source_actor_policy,
             initial_full_actor_policy=initial_full_actor_policy,
             env_variant=env_variant,
+        )
+
+    if actor_state_gated_recovery_support_path is not None:
+        if actor_state_gated_recovery_support_sha256 is None:
+            raise ValueError("state-gated recovery support SHA-256 is required")
+        recovery_support, recovery_support_report = (
+            load_recovery_support_artifact(
+                actor_state_gated_recovery_support_path,
+                expected_sha256=actor_state_gated_recovery_support_sha256,
+            )
         )
 
     validate_torso_wrench_assistance_configuration(
@@ -2454,23 +2640,40 @@ def train(
             ).astype(jp.float32)
             residual_logits = None
             if actor_residual_preview_adapter:
-                action, parent_action, _residual_action = (
-                    apply_frozen_preview_residual(
+                if recovery_support is not None:
+                    (
+                        action,
+                        parent_action,
+                        _residual_action,
+                        recovery_gate,
+                    ) = apply_state_gated_recovery(
                         actor,
                         residual_preview_actor,
                         actor_params,
                         obs_norm,
+                        state.info["phase"],
+                        recovery_support,
                         history_len=actor_history_len,
                         treatment_frame_dim=env.actor_frame_obs_dim,
-                        assistance_scale=(
-                            assistance_scale
-                            if actor_observe_torso_wrench_assistance
-                            else jp.zeros_like(assistance_scale)
-                        )
-                        if actor_torso_wrench_assistance_conditioning
-                        else None,
                     )
-                )
+                else:
+                    action, parent_action, _residual_action = (
+                        apply_frozen_preview_residual(
+                            actor,
+                            residual_preview_actor,
+                            actor_params,
+                            obs_norm,
+                            history_len=actor_history_len,
+                            treatment_frame_dim=env.actor_frame_obs_dim,
+                            assistance_scale=(
+                                assistance_scale
+                                if actor_observe_torso_wrench_assistance
+                                else jp.zeros_like(assistance_scale)
+                            )
+                            if actor_torso_wrench_assistance_conditioning
+                            else None,
+                        )
+                    )
                 action = action.astype(jp.float64)
                 parent_action = parent_action.astype(jp.float64)
             else:
@@ -2597,6 +2800,12 @@ def train(
                         "transition_phase": transition_phase,
                     }
                 )
+            if recovery_support is not None:
+                transition["recovery_gate"] = recovery_gate
+                transition["gated_residual_action"] = _residual_action
+                transition["reset_was_carried"] = state.info[
+                    "reset_was_carried"
+                ]
             if torso_wrench_assistance:
                 transition["torso_wrench"] = torso_wrench
             return (next_state, foot_bump_ou), transition
@@ -2993,6 +3202,42 @@ def train(
                 phase_count=int(env.reference_transitions),
                 bin_count=actor_phase_bin_count,
             )
+        if recovery_support is not None:
+            recovery_gate_values = trajs["recovery_gate"]
+            gated_residual_values = trajs["gated_residual_action"]
+            carried_mask = trajs["reset_was_carried"].astype(jp.bool_)
+            reference_mask = ~carried_mask
+            active_mask = recovery_gate_values > 0.0
+            carried_count = jp.sum(carried_mask)
+            reference_count = jp.sum(reference_mask)
+            recovery_diagnostics = {
+                "activation_fraction": jp.mean(
+                    recovery_gate_values > 0.0
+                ),
+                "gate_max": jp.max(recovery_gate_values),
+                "carried_activation_fraction": jp.where(
+                    carried_count > 0,
+                    jp.sum(active_mask & carried_mask) / carried_count,
+                    0.0,
+                ),
+                "reference_activation_fraction": jp.where(
+                    reference_count > 0,
+                    jp.sum(active_mask & reference_mask) / reference_count,
+                    0.0,
+                ),
+                "gated_residual_rms": jp.sqrt(
+                    jp.mean(jp.square(gated_residual_values))
+                ),
+                "gated_residual_max_abs": jp.max(
+                    jp.abs(gated_residual_values)
+                ),
+                "valid": (
+                    jp.all(jp.isfinite(recovery_gate_values))
+                    & jp.all(jp.isfinite(gated_residual_values))
+                    & jp.all(recovery_gate_values >= 0.0)
+                    & jp.all(recovery_gate_values <= 1.0)
+                ),
+            }
         if torso_wrench_assistance:
             torso_wrench_diagnostics = (
                 torso_wrench_assistance_diagnostics(
@@ -3389,6 +3634,8 @@ def train(
                 )
                 & (preview_normalizer_drift == 0.0)
             )
+            if recovery_support is not None:
+                preview_valid = preview_valid & recovery_diagnostics["valid"]
             if residual_muon_treatment:
                 preview_valid = preview_valid & jp.all(
                     jp.stack(
@@ -3461,6 +3708,38 @@ def train(
                                 "aux_adam_update_norm"
                             ]
                         ),
+                    }
+                )
+            if recovery_support is not None:
+                metrics.update(
+                    {
+                        "actor_recovery_gate_activation_fraction": (
+                            recovery_diagnostics["activation_fraction"]
+                        ),
+                        "actor_recovery_gate_max": recovery_diagnostics[
+                            "gate_max"
+                        ],
+                        "actor_recovery_carried_activation_fraction": (
+                            recovery_diagnostics[
+                                "carried_activation_fraction"
+                            ]
+                        ),
+                        "actor_recovery_reference_activation_fraction": (
+                            recovery_diagnostics[
+                                "reference_activation_fraction"
+                            ]
+                        ),
+                        "actor_recovery_gated_residual_rms": (
+                            recovery_diagnostics["gated_residual_rms"]
+                        ),
+                        "actor_recovery_gated_residual_max_abs": (
+                            recovery_diagnostics[
+                                "gated_residual_max_abs"
+                            ]
+                        ),
+                        "actor_recovery_valid": recovery_diagnostics[
+                            "valid"
+                        ],
                     }
                 )
         if adaptive_phase_sampling:
@@ -3923,6 +4202,36 @@ def train(
         "actor_residual_preview_optimizer": (
             actor_residual_preview_optimizer
         ),
+        "actor_state_gated_recovery": recovery_support is not None,
+        "actor_state_gated_recovery_support_path": (
+            actor_state_gated_recovery_support_path
+        ),
+        "actor_state_gated_recovery_support_sha256": (
+            actor_state_gated_recovery_support_sha256
+        ),
+        "actor_state_gated_recovery_radius": (
+            recovery_support_report["radius"]
+            if recovery_support_report is not None
+            else None
+        ),
+        "actor_state_gated_recovery_phase_min": (
+            recovery_support_report["phase_min"]
+            if recovery_support_report is not None
+            else None
+        ),
+        "actor_state_gated_recovery_phase_max": (
+            recovery_support_report["phase_max"]
+            if recovery_support_report is not None
+            else None
+        ),
+        "actor_state_gated_recovery_taper": (
+            recovery_support_report["taper"]
+            if recovery_support_report is not None
+            else None
+        ),
+        "allow_resume_actor_state_gated_recovery_start": (
+            allow_resume_actor_state_gated_recovery_start
+        ),
         "allow_resume_actor_residual_preview_adapter_start": (
             allow_resume_actor_residual_preview_adapter_start
         ),
@@ -3973,6 +4282,7 @@ def train(
         "actor_cagrad": actor_cagrad,
         "actor_cagrad_alpha": actor_cagrad_alpha,
         "actor_cagrad_iterations": actor_cagrad_iterations,
+        "allow_resume_actor_cagrad_change": allow_resume_actor_cagrad_change,
         "adaptive_phase_sampling": adaptive_phase_sampling,
         "adaptive_phase_uniform_ratio": adaptive_phase_uniform_ratio,
         "adaptive_phase_alpha": adaptive_phase_alpha,
@@ -4019,6 +4329,10 @@ def train(
             raise RuntimeError("actor CAGrad aggregation is invalid")
         if frozen_preview_treatment and not bool(metrics["actor_preview_valid"]):
             raise RuntimeError("actor preview adapter telemetry is invalid")
+        if recovery_support is not None and not bool(
+            metrics["actor_recovery_valid"]
+        ):
+            raise RuntimeError("actor recovery gate telemetry is invalid")
         if torso_wrench_assistance and not bool(
             metrics["torso_wrench_assistance_valid"]
         ):
@@ -4241,6 +4555,42 @@ def train(
                             ),
                         }
                     )
+                if recovery_support is not None:
+                    diag_entry.update(
+                        {
+                            "actor_recovery_gate_activation_fraction": float(
+                                metrics[
+                                    "actor_recovery_gate_activation_fraction"
+                                ]
+                            ),
+                            "actor_recovery_gate_max": float(
+                                metrics["actor_recovery_gate_max"]
+                            ),
+                            "actor_recovery_carried_activation_fraction": float(
+                                metrics[
+                                    "actor_recovery_carried_activation_fraction"
+                                ]
+                            ),
+                            "actor_recovery_reference_activation_fraction": float(
+                                metrics[
+                                    "actor_recovery_reference_activation_fraction"
+                                ]
+                            ),
+                            "actor_recovery_gated_residual_rms": float(
+                                metrics[
+                                    "actor_recovery_gated_residual_rms"
+                                ]
+                            ),
+                            "actor_recovery_gated_residual_max_abs": float(
+                                metrics[
+                                    "actor_recovery_gated_residual_max_abs"
+                                ]
+                            ),
+                            "actor_recovery_valid": bool(
+                                metrics["actor_recovery_valid"]
+                            ),
+                        }
+                    )
                 if residual_muon_treatment:
                     diag_entry.update(
                         {
@@ -4388,8 +4738,11 @@ def train(
                 "action_noise_current": action_noise_std_hparam(
                     np.asarray(metrics["action_noise_current"])
                 ),
-                **build_checkpoint_cagrad_telemetry(metrics),
             }
+            if actor_cagrad:
+                checkpoint_metrics.update(
+                    build_checkpoint_cagrad_telemetry(metrics)
+                )
             if actor_policy_anchor_weight > 0.0:
                 checkpoint_metrics.update(
                     build_policy_anchor_telemetry(
@@ -4502,6 +4855,42 @@ def train(
                             }
                             if residual_muon_treatment
                             else {}
+                        ),
+                    }
+                )
+            if recovery_support is not None:
+                checkpoint_metrics.update(
+                    {
+                        "actor_recovery_gate_activation_fraction": float(
+                            metrics[
+                                "actor_recovery_gate_activation_fraction"
+                            ]
+                        ),
+                        "actor_recovery_gate_max": float(
+                            metrics["actor_recovery_gate_max"]
+                        ),
+                        "actor_recovery_carried_activation_fraction": float(
+                            metrics[
+                                "actor_recovery_carried_activation_fraction"
+                            ]
+                        ),
+                        "actor_recovery_reference_activation_fraction": float(
+                            metrics[
+                                "actor_recovery_reference_activation_fraction"
+                            ]
+                        ),
+                        "actor_recovery_gated_residual_rms": float(
+                            metrics[
+                                "actor_recovery_gated_residual_rms"
+                            ]
+                        ),
+                        "actor_recovery_gated_residual_max_abs": float(
+                            metrics[
+                                "actor_recovery_gated_residual_max_abs"
+                            ]
+                        ),
+                        "actor_recovery_valid": bool(
+                            metrics["actor_recovery_valid"]
                         ),
                     }
                 )

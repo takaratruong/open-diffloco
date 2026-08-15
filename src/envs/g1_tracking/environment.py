@@ -880,6 +880,7 @@ class G1TrackingEnv:
             "foot_bump_ou": jp.zeros((4, 3)),
             "foot_normal_forces": jp.zeros(4),
             "terminal": jp.array(0.0),
+            "reset_was_carried": jp.array(False),
             **randomization,
         }
         if self.adaptive_phase_sampling:
@@ -1258,6 +1259,9 @@ class G1TrackingEnv:
                 randomization=randomization,
                 phase_sampler_failed_count=phase_sampler_failed_count,
                 last_act=last_act,
+            )
+            state = state.replace(
+                info={**state.info, "reset_was_carried": use_carried}
             )
             if not self.carried_reset_restores_actor_context:
                 return state
