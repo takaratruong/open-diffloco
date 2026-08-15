@@ -269,6 +269,7 @@ def _collect_source(
     *,
     source_phase: int,
     seed: int,
+    step_fn: Callable | None = None,
 ) -> tuple[dict[str, np.ndarray], int]:
     import jax
     import jax.numpy as jnp
@@ -298,6 +299,7 @@ def _collect_source(
     step_limit = source_rollout_step_limit(
         int(env.reference_transitions), source_phase
     )
+    resolved_step = env.step if step_fn is None else step_fn
     for step in range(step_limit):
         action = action_fn(state)
         records["qpos"].append(np.asarray(state.data.qpos))
@@ -316,7 +318,7 @@ def _collect_source(
         records["transitions_to_terminal"].append(0)
         records["terminal"].append(0.0)
         records["termination_errors"].append(_termination_errors(env, state))
-        state = env.step(state, action)
+        state = resolved_step(state, action)
         if float(state.done) > 0.5:
             break
     observed_survival = len(records["phase"])

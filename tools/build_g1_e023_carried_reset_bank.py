@@ -156,7 +156,11 @@ def collect_e023_bank(
         evaluate_actor_action,
         prepare_phase_grid_action,
     )
-    from tools.evaluate_g1_tracking import configure_jax, make_evaluation_env
+    from tools.evaluate_g1_tracking import (
+        build_compiled_step,
+        configure_jax,
+        make_evaluation_env,
+    )
 
     hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
     contract = validate_e023_hparams(hparams)
@@ -208,6 +212,7 @@ def collect_e023_bank(
         zero_output=bool(contract["actor_zero_output"]),
     )
     normalizer = Normalizer(env.actor_frame_obs_dim)
+    compiled_step = build_compiled_step(env)
 
     def action_fn(state):
         normalized = env.normalize_actor_obs(
@@ -228,7 +233,11 @@ def collect_e023_bank(
     with solver_context(profile):
         for phase in source_phases:
             source, observed = _collect_source(
-                env, action_fn, source_phase=phase, seed=seed
+                env,
+                action_fn,
+                source_phase=phase,
+                seed=seed,
+                step_fn=compiled_step,
             )
             sources.append(source)
             survival.append(observed)

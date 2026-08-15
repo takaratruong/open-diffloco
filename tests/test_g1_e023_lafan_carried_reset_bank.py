@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+
 import numpy as np
 import pytest
 
@@ -100,3 +102,11 @@ def test_lafan_bank_parser_requires_parent_hparams_and_clean_code():
     )
     assert args.code_commit == "d" * 40
     assert args.seed == 0
+
+
+def test_e023_collection_uses_the_registered_compiled_step_boundary():
+    from tools import build_g1_e023_carried_reset_bank as collector
+
+    source = inspect.getsource(collector.collect_e023_bank)
+    assert "build_compiled_step(env)" in source
+    assert "step_fn=compiled_step" in source
