@@ -136,8 +136,10 @@ def collect_e023_bank(
     reference_path: Path,
     *,
     seed: int,
+    source_phases: tuple[int, ...] = E023_SOURCE_PHASES,
+    require_reference_match: bool = True,
 ) -> tuple[dict[str, np.ndarray], tuple[int, ...]]:
-    """Collect E023's phase-0 and phase-50 pre-failure actor contexts."""
+    """Collect E023 pre-failure actor contexts on the requested reference."""
     import jax
     import jax.numpy as jnp
 
@@ -158,7 +160,15 @@ def collect_e023_bank(
 
     hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
     contract = validate_e023_hparams(hparams)
-    if Path(str(hparams.get("reference_path", ""))).resolve() != reference_path:
+    if not source_phases or len(set(source_phases)) != len(source_phases):
+        raise ValueError("source phases must be a nonempty unique tuple")
+    if any(not isinstance(phase, int) or phase < 0 for phase in source_phases):
+        raise ValueError("source phases must be nonnegative integers")
+    if (
+        require_reference_match
+        and Path(str(hparams.get("reference_path", ""))).resolve()
+        != reference_path
+    ):
         raise ValueError("E023 hparams reference path does not match input")
     configure_jax()
     profile = get_solver_profile("g1-4x5")
@@ -216,7 +226,7 @@ def collect_e023_bank(
     sources = []
     survival = []
     with solver_context(profile):
-        for phase in E023_SOURCE_PHASES:
+        for phase in source_phases:
             source, observed = _collect_source(
                 env, action_fn, source_phase=phase, seed=seed
             )
