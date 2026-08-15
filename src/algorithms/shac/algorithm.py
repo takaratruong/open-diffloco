@@ -239,6 +239,21 @@ def persist_assistance_conditioning_migration_report(
     return path
 
 
+def persist_reference_path_migration_report(
+    save_dir: str | Path, report: dict[str, object]
+) -> Path:
+    """Atomically publish an explicitly authorized reference migration."""
+    if report.get("valid") is not True:
+        raise ValueError("reference path migration failed")
+    path = Path(save_dir) / "reference_path_migration.json"
+    temp_path = path.with_name(f".{path.name}.tmp")
+    with temp_path.open("w", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    os.replace(temp_path, path)
+    return path
+
+
 def persist_checkpoint_phase_metric(
     save_dir: str | Path, row: dict[str, object]
 ) -> Path:
@@ -908,6 +923,49 @@ def _sha256_file(path: Path, block_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+def resolve_reference_path_resume_setting(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested_path: str | None,
+    allow_change: bool,
+    is_resume: bool,
+) -> tuple[str | None, dict[str, object] | None]:
+    """Resolve an exact reference resume or one explicit path treatment."""
+    if not isinstance(allow_change, bool):
+        raise ValueError("reference path change authority must be boolean")
+    if not isinstance(is_resume, bool):
+        raise ValueError("reference path resume state must be boolean")
+    if not is_resume:
+        return requested_path, None
+    if resumed_hparams is None:
+        raise ValueError("reference path resume metadata is required")
+    saved_path = resumed_hparams.get("reference_path")
+    if not isinstance(saved_path, str) or not saved_path:
+        raise ValueError("reference path resume metadata is invalid")
+    saved = Path(saved_path).expanduser().resolve()
+    if requested_path is None:
+        return str(saved), None
+    if not isinstance(requested_path, str) or not requested_path:
+        raise ValueError("requested reference path is invalid")
+    requested = Path(requested_path).expanduser().resolve()
+    if requested == saved:
+        return str(saved), None
+    if not allow_change:
+        raise ValueError("reference path change requires explicit authority")
+    if not saved.is_file() or not requested.is_file():
+        raise ValueError("reference path migration inputs must be files")
+    report: dict[str, object] = {
+        "protocol": "g1-reference-path-migration-v1",
+        "valid": True,
+        "previous_reference_path": str(saved),
+        "previous_reference_sha256": _sha256_file(saved),
+        "requested_reference_path": str(requested),
+        "requested_reference_sha256": _sha256_file(requested),
+        "environment_state_reinitialized": True,
+    }
+    return str(requested), report
+
+
 def reference_hparams_for_env(env) -> dict[str, object]:
     """Returns the immutable G1 reference contract recorded with a run."""
     reference_path = Path(env.reference_path).resolve()
@@ -1397,6 +1455,7 @@ def train(
     actor_observe_torso_wrench_assistance: bool = False,
     allow_resume_assistance_conditioning_change: bool = False,
     reference_path: str | None = None,
+    allow_resume_reference_path_change: bool = False,
     reference_stride: int | None = None,
 ):
     """
@@ -1457,6 +1516,8 @@ def train(
                                                false routes exact zero.
         allow_resume_assistance_conditioning_change: Explicitly authorize a
                                                       resumed scalar-boundary change.
+        allow_resume_reference_path_change: Explicitly authorize a resumed
+                                            reference treatment.
         kp_range: (lo, hi) absolute range for actuator position gain per episode
         kd_range: (lo, hi) absolute range for actuator velocity gain per episode
         push_velocity_range: Interval root x/y velocity disturbance range.
@@ -1645,6 +1706,10 @@ def train(
         raise ValueError(
             "allow_resume_assistance_conditioning_change must be boolean"
         )
+    if not isinstance(allow_resume_reference_path_change, bool):
+        raise ValueError(
+            "allow_resume_reference_path_change must be boolean"
+        )
     if (
         isinstance(reference_reset_noise_scale, bool)
         or not math.isfinite(reference_reset_noise_scale)
@@ -1739,9 +1804,19 @@ def train(
     resumed_hparams = None
     future_reference_upgrade = False
     residual_adapter_upgrade = False
+    reference_path_migration_report = None
 
     if resume_from:
         resumed_state, resumed_hparams, resumed_step = load_checkpoint(resume_from)
+        (
+            reference_path,
+            reference_path_migration_report,
+        ) = resolve_reference_path_resume_setting(
+            resumed_hparams,
+            requested_path=reference_path,
+            allow_change=allow_resume_reference_path_change,
+            is_resume=True,
+        )
         actor_bootstrap_scale = resolve_actor_bootstrap_resume_scale(
             resumed_hparams,
             requested_scale=actor_bootstrap_scale,
@@ -1889,9 +1964,6 @@ def train(
             action_scale = resumed_hparams.get("action_scale", action_scale)
             xml_path = resumed_hparams.get("xml_path", xml_path)
             env_variant = resumed_hparams.get("env_variant", env_variant)
-            reference_path = resumed_hparams.get(
-                "reference_path", reference_path
-            )
             reference_stride = resumed_hparams.get(
                 "reference_stride", reference_stride
             )
@@ -3430,6 +3502,10 @@ def train(
         persist_future_reference_migration_report(
             save_dir, migration_report
         )
+    if reference_path_migration_report is not None:
+        persist_reference_path_migration_report(
+            save_dir, reference_path_migration_report
+        )
     if resumed_state is not None:
         print(
             "Restoring complete training state from step "
@@ -3442,6 +3518,10 @@ def train(
                 initialized_state.env_state,
             )
         )
+        if reference_path_migration_report is not None:
+            resumed_state = resumed_state.replace(
+                env_state=initialized_state.env_state
+            )
         if future_reference_upgrade:
             legacy_resumed_state = resumed_state
             resumed_state = migrate_future_reference_train_state(
@@ -3792,6 +3872,14 @@ def train(
         ),
         "allow_resume_assistance_conditioning_change": (
             allow_resume_assistance_conditioning_change
+        ),
+        "allow_resume_reference_path_change": (
+            allow_resume_reference_path_change
+        ),
+        "reference_path_migration_artifact": (
+            "reference_path_migration.json"
+            if reference_path_migration_report is not None
+            else None
         ),
         "assistance_conditioning_migration_artifact": (
             "assistance_conditioning_migration.json"

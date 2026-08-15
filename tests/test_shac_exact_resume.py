@@ -51,6 +51,85 @@ class ShacExactResumeTest(unittest.TestCase):
             ].default,
             False,
         )
+        self.assertIs(
+            parameters["allow_resume_reference_path_change"].default,
+            False,
+        )
+
+    def test_reference_path_change_requires_explicit_resume_authority(self):
+        from src.algorithms.shac.algorithm import (
+            resolve_reference_path_resume_setting,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            saved = root / "saved.npz"
+            requested = root / "requested.npz"
+            saved.write_bytes(b"saved")
+            requested.write_bytes(b"requested")
+            metadata = {"reference_path": str(saved)}
+
+            with self.assertRaisesRegex(ValueError, "explicit authority"):
+                resolve_reference_path_resume_setting(
+                    metadata,
+                    requested_path=str(requested),
+                    allow_change=False,
+                    is_resume=True,
+                )
+            resolved, report = resolve_reference_path_resume_setting(
+                metadata,
+                requested_path=str(requested),
+                allow_change=True,
+                is_resume=True,
+            )
+
+        self.assertEqual(resolved, str(requested.resolve()))
+        self.assertIsNotNone(report)
+        self.assertTrue(report["valid"])
+        self.assertEqual(
+            report["previous_reference_path"], str(saved.resolve())
+        )
+        self.assertEqual(
+            report["requested_reference_path"], str(requested.resolve())
+        )
+        self.assertTrue(report["environment_state_reinitialized"])
+
+    def test_reference_path_resume_fails_closed_without_metadata(self):
+        from src.algorithms.shac.algorithm import (
+            resolve_reference_path_resume_setting,
+        )
+
+        with self.assertRaisesRegex(ValueError, "metadata"):
+            resolve_reference_path_resume_setting(
+                None,
+                requested_path="/tmp/new.npz",
+                allow_change=True,
+                is_resume=True,
+            )
+
+    def test_reference_path_exact_resume_and_fresh_run_do_not_migrate(self):
+        from src.algorithms.shac.algorithm import (
+            resolve_reference_path_resume_setting,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / "reference.npz"
+            reference.write_bytes(b"reference")
+            exact = resolve_reference_path_resume_setting(
+                {"reference_path": str(reference)},
+                requested_path=None,
+                allow_change=False,
+                is_resume=True,
+            )
+            fresh = resolve_reference_path_resume_setting(
+                None,
+                requested_path=str(reference),
+                allow_change=False,
+                is_resume=False,
+            )
+
+        self.assertEqual(exact, (str(reference.resolve()), None))
+        self.assertEqual(fresh, (str(reference), None))
 
     def test_residual_preview_can_only_start_during_explicit_legacy_upgrade(self):
         from src.algorithms.shac.algorithm import (
