@@ -1531,6 +1531,7 @@ def train(
     resume_from: str = None,
     resume_random_seed: int | None = None,
     checkpoint_interval: int = 10_000,
+    checkpoint_steps: tuple[int, ...] | None = None,
     max_episode_length: int = 5000,
     actor_history_len: int = 10,
     actor_observation_noise: bool = False,
@@ -1673,6 +1674,8 @@ def train(
         resume_random_seed: Optional independent RNG stream for exact resume.
                             Changes only trainer and per-environment RNG keys.
         checkpoint_interval: Save checkpoint every N steps
+        checkpoint_steps: Optional exact checkpoint step schedule. When set,
+            it replaces the periodic interval.
         allow_resume_actor_bootstrap_scale_change: Explicitly permit changing
             actor terminal-value scale when resuming a checkpoint.
         actor_bootstrap_delay_steps: Environment steps before the actor uses
@@ -1959,6 +1962,23 @@ def train(
             raise ValueError(f"{name} must be a positive integer")
     effective_num_envs = num_envs * gradient_accumulation_steps
     steps_per_actor_update = effective_num_envs * unroll_length
+    if checkpoint_steps is not None:
+        if (
+            not isinstance(checkpoint_steps, tuple)
+            or not checkpoint_steps
+            or any(
+                isinstance(step, bool)
+                or not isinstance(step, int)
+                or step < 1
+                for step in checkpoint_steps
+            )
+            or tuple(sorted(set(checkpoint_steps))) != checkpoint_steps
+            or any(step % steps_per_actor_update for step in checkpoint_steps)
+            or checkpoint_steps[-1] != total_steps
+        ):
+            raise ValueError(
+                "checkpoint_steps must be increasing actor-update steps ending at total_steps"
+            )
 
     # Handle checkpoint resumption
     resumed_state = None
@@ -4185,6 +4205,9 @@ def train(
         "seed": seed,
         "resume_random_seed": resume_random_seed,
         "best_reward": best_reward,
+        "checkpoint_steps": (
+            list(checkpoint_steps) if checkpoint_steps is not None else None
+        ),
         "max_episode_length": max_episode_length,
         "actor_history_len": actor_history_len,
         "actor_observation_noise": actor_observation_noise,
@@ -4718,16 +4741,27 @@ def train(
 
         current_step = (i + 1) * steps_per_iter
         hparams["best_reward"] = best_reward
-        last_checkpoint_step, checkpoint_path = (
-            archive_periodic_checkpoint_if_due(
+        if checkpoint_steps is None:
+            last_checkpoint_step, checkpoint_path = (
+                archive_periodic_checkpoint_if_due(
+                    state,
+                    save_dir,
+                    last_checkpoint_step,
+                    checkpoint_interval,
+                    current_step=current_step,
+                    hparams=hparams,
+                )
+            )
+        elif current_step in checkpoint_steps:
+            persist_run_hparams(save_dir, hparams)
+            checkpoint_path = save_periodic_checkpoint(
                 state,
                 save_dir,
-                last_checkpoint_step,
-                checkpoint_interval,
-                current_step=current_step,
-                hparams=hparams,
+                current_step,
             )
-        )
+            last_checkpoint_step = current_step
+        else:
+            checkpoint_path = None
         if should_persist_checkpoint_metrics(
             checkpoint_path,
             actor_cagrad=actor_cagrad,
