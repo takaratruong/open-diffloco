@@ -44,7 +44,8 @@ def build_lafan_bank_summary(
     if observed_survival != E023_LAFAN_ZERO_SHOT:
         raise ValueError(
             "observed survival does not match the registered E023 LAFAN "
-            "zero-shot baseline"
+            f"zero-shot baseline: {observed_survival!r} != "
+            f"{E023_LAFAN_ZERO_SHOT!r}"
         )
     summary = validate_history_bank(
         arrays,
