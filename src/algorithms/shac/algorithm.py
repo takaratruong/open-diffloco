@@ -2317,6 +2317,23 @@ def train(
             env_variant=env_variant,
         )
 
+    if resume_from is None:
+        (
+            actor_residual_preview_initial_adapter_path,
+            actor_residual_preview_initial_adapter_sha256,
+        ) = resolve_zero_head_feature_transfer_resume_setting(
+            None,
+            requested_path=(
+                actor_residual_preview_initial_adapter_path
+            ),
+            requested_sha256=(
+                actor_residual_preview_initial_adapter_sha256
+            ),
+            residual_adapter_enabled=actor_residual_preview_adapter,
+            residual_adapter_upgrade=False,
+            is_resume=False,
+        )
+
     if actor_state_gated_recovery_support_path is not None:
         if actor_state_gated_recovery_support_sha256 is None:
             raise ValueError("state-gated recovery support SHA-256 is required")

@@ -30,6 +30,8 @@ def test_train_exposes_and_persists_zero_head_feature_source():
     assert source.index("load_zero_head_recovery_feature_adapter") < source.index(
         "initialize_residual_adapter_optimizer"
     )
+    assert "if resume_from is None:" in source
+    assert "is_resume=False" in source
 
 
 def test_loader_hash_binds_expert_and_persists_manifest(tmp_path):
