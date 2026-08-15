@@ -527,16 +527,14 @@ def run_evaluation(
                     history_len=env.actor_history_len,
                     treatment_frame_dim=env.actor_frame_obs_dim,
                 )
-                raw_action = raw_action.astype(jnp.float64)
-                parent_action = parent_action.astype(jnp.float64)
-                correction = correction.astype(jnp.float64)
             else:
-                parent_action = parent_actor.apply(parent_params, normalized).astype(
-                    jnp.float64
-                )
+                parent_action = parent_actor.apply(parent_params, normalized)
                 correction = jnp.zeros_like(parent_action)
                 raw_action = parent_action
-            next_state = env.step(state, raw_action)
+            # Training forms parent + residual in float32, then casts the
+            # already-composed action to float64 immediately before env.step.
+            # Preserve those exact actor-boundary operands in the evidence.
+            next_state = env.step(state, raw_action.astype(jnp.float64))
             terminal = next_state.info["terminal"] > 0.5
             normalized_errors = jnp.stack(
                 (
