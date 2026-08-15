@@ -110,3 +110,5 @@ def test_e023_collection_uses_the_registered_compiled_step_boundary():
     source = inspect.getsource(collector.collect_e023_bank)
     assert "build_compiled_step(env)" in source
     assert "step_fn=compiled_step" in source
+    assert "_load_policy(" in source
+    assert "env, checkpoint_path, seed" in source

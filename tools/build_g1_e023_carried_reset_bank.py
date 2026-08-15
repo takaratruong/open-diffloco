@@ -147,7 +147,6 @@ def collect_e023_bank(
         FrozenPreviewResidualParams,
     )
     from src.core.data_structures import Normalizer
-    from src.core.networks import Actor
     from src.envs.g1_tracking.solver_profiles import (
         get_solver_profile,
         solver_context,
@@ -157,6 +156,7 @@ def collect_e023_bank(
         prepare_phase_grid_action,
     )
     from tools.evaluate_g1_tracking import (
+        _load_policy,
         build_compiled_step,
         configure_jax,
         make_evaluation_env,
@@ -204,22 +204,18 @@ def collect_e023_bank(
     for leaf in jax.tree_util.tree_leaves(checkpoint.actor_params):
         if not np.isfinite(np.asarray(leaf)).all():
             raise ValueError("E023 actor contains nonfinite parameters")
-    actor = Actor(
-        env.action_dim,
-        hidden=tuple(contract["actor_hidden"]),
-        squash=bool(contract["squash_actor_mean"]),
-        layer_norm=bool(contract["actor_layer_norm"]),
-        zero_output=bool(contract["actor_zero_output"]),
+    actor, actor_params, normalizer_state = _load_policy(
+        env, checkpoint_path, seed
     )
     normalizer = Normalizer(env.actor_frame_obs_dim)
     compiled_step = build_compiled_step(env)
 
     def action_fn(state):
         normalized = env.normalize_actor_obs(
-            normalizer, checkpoint.normalizer, state.obs
+            normalizer, normalizer_state, state.obs
         ).astype(jnp.float32)
         action = evaluate_actor_action(
-            actor, checkpoint.actor_params, normalized
+            actor, actor_params, normalized
         )
         return prepare_phase_grid_action(
             action,
