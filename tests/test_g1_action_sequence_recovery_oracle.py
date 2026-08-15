@@ -90,3 +90,33 @@ def test_parser_validates_recovery_oracle_update_budget():
         build_parser().parse_args([*required, "--updates", "0"])
     with pytest.raises(SystemExit):
         build_parser().parse_args([*required, "--updates", "-1"])
+
+
+def test_parser_validates_recovery_oracle_correction_bound():
+    required = [
+        "--checkpoint",
+        "/tmp/e023.pkl",
+        "--hparams",
+        "/tmp/hparams.json",
+        "--reference-path",
+        "/tmp/reference.npz",
+        "--source-bank",
+        "/tmp/bank.npz",
+        "--output-directory",
+        "/tmp/output",
+        "--code-commit",
+        "a" * 40,
+    ]
+
+    assert build_parser().parse_args(required).correction_bound == 0.5
+    assert (
+        build_parser()
+        .parse_args([*required, "--correction-bound", "1.0"])
+        .correction_bound
+        == 1.0
+    )
+    for invalid in ("0", "-1", "nan", "inf"):
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(
+                [*required, "--correction-bound", invalid]
+            )

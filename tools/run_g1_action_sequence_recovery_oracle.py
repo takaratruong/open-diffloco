@@ -47,6 +47,13 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _positive_finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        raise argparse.ArgumentTypeError("value must be positive and finite")
+    return parsed
+
+
 def phase_tape_correction(
     tape: jax.Array, phases: jax.Array, *, phase_min: int
 ) -> jax.Array:
@@ -155,6 +162,7 @@ def run_oracle(
     independent_tapes: bool = False,
     worst_margin_objective: bool = False,
     updates: int = UPDATES,
+    correction_bound: float = CORRECTION_BOUND,
 ) -> dict[str, object]:
     """Optimize and evaluate one shared phase-indexed action correction tape."""
     hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
@@ -207,7 +215,7 @@ def run_oracle(
         return actor.apply(actor_params, normalized).astype(jnp.float64)
 
     def single_loss(tape_logits, initial_state):
-        correction_tape = CORRECTION_BOUND * jnp.tanh(tape_logits)
+        correction_tape = correction_bound * jnp.tanh(tape_logits)
 
         def step(carry, step_index):
             state, alive = carry
@@ -322,7 +330,7 @@ def run_oracle(
         if update_index == 1 or update_index % 8 == 0:
             print(json.dumps(record, sort_keys=True), flush=True)
 
-    final_tape = CORRECTION_BOUND * jnp.tanh(tape_logits)
+    final_tape = correction_bound * jnp.tanh(tape_logits)
     zero_tape = jnp.zeros_like(tape_logits)
     evaluate_population = jax.vmap(
         single_loss,
@@ -359,7 +367,7 @@ def run_oracle(
     execution_valid = (
         np.isfinite(np.asarray(final_tape)).all()
         and np.isfinite(np.asarray(candidate_rewards)).all()
-        and float(jnp.max(jnp.abs(final_tape))) <= CORRECTION_BOUND + 1e-12
+        and float(jnp.max(jnp.abs(final_tape))) <= correction_bound + 1e-12
     )
     outcome = recovery_oracle_outcome(
         baseline_survival=baseline_survival,
@@ -405,7 +413,7 @@ def run_oracle(
         "outcome": outcome,
         "horizon": HORIZON,
         "updates": updates,
-        "correction_bound": CORRECTION_BOUND,
+        "correction_bound": correction_bound,
         "learning_rate": LEARNING_RATE,
         "phase_min": phase_min,
         "phase_max": phase_min + tape_length - 1,
@@ -441,6 +449,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--independent-tapes", action="store_true")
     parser.add_argument("--worst-margin-objective", action="store_true")
     parser.add_argument("--updates", type=_positive_int, default=UPDATES)
+    parser.add_argument(
+        "--correction-bound",
+        type=_positive_finite_float,
+        default=CORRECTION_BOUND,
+    )
     return parser
 
 
@@ -468,6 +481,7 @@ def main() -> None:
             independent_tapes=args.independent_tapes,
             worst_margin_objective=args.worst_margin_objective,
             updates=args.updates,
+            correction_bound=args.correction_bound,
         )
     print(json.dumps(summary, indent=2, sort_keys=True))
 
