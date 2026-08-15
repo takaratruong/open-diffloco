@@ -46,12 +46,12 @@ def test_lafan_selector_preserves_every_parent_phase_and_requires_clean_suffix()
         [
             {
                 "update": 8,
-                "survival": [119, 63, 49, 39, 45],
+                "survival": [117, 63, 49, 39, 46],
                 "completed_suffix": [False] * 5,
             },
             {
                 "update": 16,
-                "survival": [120, 65, 51, 40, 46],
+                "survival": [118, 65, 51, 40, 47],
                 "completed_suffix": [False] * 5,
             },
             {

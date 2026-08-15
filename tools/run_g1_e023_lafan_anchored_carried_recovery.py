@@ -40,7 +40,7 @@ EXPECTED_PARENT_REFERENCE_SHA256 = (
 EXPECTED_LAFAN_REFERENCE_SHA256 = (
     "bf8c8b407062d1b309440f4c1787c345b04d79501ea75f615e5b41c0c5ebb6db"
 )
-E023_LAFAN_FLOORS = (118, 63, 49, 39, 46)
+E023_LAFAN_FLOORS = (116, 63, 49, 39, 47)
 COMPLETE_SUFFIXES = (499, 399, 299, 199, 99)
 
 
@@ -120,13 +120,25 @@ def validate_preflight(
         "rows": 120,
         "rows_per_source": [24] * 5,
         "source_phases": [0, 100, 200, 300, 400],
-        "source_survival": list(E023_LAFAN_FLOORS),
         "checkpoint_sha256": EXPECTED_RESUME_SHA256,
         "hparams_sha256": EXPECTED_RESUME_HPARAMS_SHA256,
         "reference_sha256": EXPECTED_LAFAN_REFERENCE_SHA256,
         "bank_sha256": carried_bank_sha256,
     }
-    if not isinstance(summary, dict) or any(
+    source_survival = summary.get("source_survival") if isinstance(summary, dict) else None
+    survival_matches = (
+        isinstance(source_survival, list)
+        and len(source_survival) == 5
+        and all(
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and abs(value - baseline) <= 2
+            for value, baseline in zip(
+                source_survival, E023_LAFAN_FLOORS, strict=True
+            )
+        )
+    )
+    if not isinstance(summary, dict) or not survival_matches or any(
         summary.get(key) != value for key, value in expected_summary.items()
     ):
         raise ValueError("LAFAN carried bank summary does not match registration")

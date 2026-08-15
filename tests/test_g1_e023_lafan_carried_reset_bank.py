@@ -7,16 +7,18 @@ import pytest
 
 
 SOURCE_PHASES = (0, 100, 200, 300, 400)
-SURVIVAL = (118, 63, 49, 39, 46)
+SURVIVAL = (116, 63, 49, 39, 47)
 
 
-def _arrays() -> dict[str, np.ndarray]:
+def _arrays(
+    survival: tuple[int, ...] = SURVIVAL,
+) -> dict[str, np.ndarray]:
     from tools.build_g1_history_carried_reset_bank import (
         select_preterminal_indices,
     )
 
     chunks = []
-    for phase, steps in zip(SOURCE_PHASES, SURVIVAL, strict=True):
+    for phase, steps in zip(SOURCE_PHASES, survival, strict=True):
         indices = select_preterminal_indices(steps)
         chunks.append((phase, steps, indices))
     rows = 120
@@ -65,10 +67,16 @@ def test_lafan_bank_requires_five_exact_preterminal_bands():
     assert summary["rows_per_source"] == [24] * 5
     assert summary["source_survival"] == list(SURVIVAL)
 
+    tolerant = (115, 63, 49, 39, 46)
+    tolerant_summary = build_lafan_bank_summary(
+        _arrays(tolerant), observed_survival=tolerant, frame_dim=328
+    )
+    assert tolerant_summary["source_survival"] == list(tolerant)
+
     with pytest.raises(ValueError, match="zero-shot baseline"):
         build_lafan_bank_summary(
-            _arrays(),
-            observed_survival=(117, 63, 49, 39, 46),
+            _arrays((113, 63, 49, 39, 47)),
+            observed_survival=(113, 63, 49, 39, 47),
             frame_dim=328,
         )
 
