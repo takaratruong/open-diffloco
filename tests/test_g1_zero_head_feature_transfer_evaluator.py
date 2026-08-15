@@ -120,6 +120,29 @@ def test_selector_reports_solve_insufficient_and_rejects_malformed():
             parent_survival=parent,
         )
 
+
+def test_selector_accepts_explicit_outcome_labels_without_changing_selection():
+    from tools.evaluate_g1_zero_head_feature_transfer import select_checkpoint
+
+    parent = [10] * 120
+    labels = {
+        "solve": "teacher-objective-solve",
+        "advance": "teacher-objective-advance",
+        "insufficient": "teacher-objective-insufficient",
+    }
+    selected = select_checkpoint(
+        [
+            {
+                **_record(update, [11] * 120, [116, 63, 49, 39, 47]),
+                "paired_parent_survival": [10] * 120,
+            }
+            for update in (8, 16, 32, 64)
+        ],
+        outcome_labels=labels,
+    )
+    assert selected["outcome"] == "teacher-objective-advance"
+    assert selected["selected_update"] == 8
+
     with pytest.raises(ValueError, match="exact updates"):
         select_checkpoint(
             [
@@ -528,6 +551,48 @@ def test_aggregate_selection_requires_all_hash_bound_carried_and_ordinary_eviden
             output_path=tmp_path / "bad.json",
             expected_code_commit="c" * 40,
         )
+
+
+def test_aggregate_selection_accepts_explicit_training_and_output_protocols(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from tools import evaluate_g1_zero_head_feature_transfer as evaluator
+
+    monkeypatch.setattr(
+        evaluator,
+        "validate_code_provenance",
+        lambda commit: {
+            "repository": "/tmp/repository",
+            "code_commit": commit,
+            "dirty_patch_sha256": "0" * 64,
+        },
+    )
+    training = _write_selection_fixture(tmp_path)
+    payload = json.loads(training.read_text())
+    payload["protocol"] = "g1-conflict-projected-recovery-teacher-training-v1"
+    training.write_text(json.dumps(payload))
+    manifest = evaluator.aggregate_selection(
+        evaluation_root=tmp_path,
+        training_validation_path=training,
+        output_path=tmp_path / "teacher-selection.json",
+        expected_code_commit="c" * 40,
+        expected_training_protocol=(
+            "g1-conflict-projected-recovery-teacher-training-v1"
+        ),
+        output_protocol=(
+            "g1-conflict-projected-recovery-teacher-selection-v1"
+        ),
+        outcome_labels={
+            "solve": "teacher-objective-solve",
+            "advance": "teacher-objective-advance",
+            "insufficient": "teacher-objective-insufficient",
+        },
+    )
+    assert manifest["protocol"] == (
+        "g1-conflict-projected-recovery-teacher-selection-v1"
+    )
+    assert manifest["outcome"] == "teacher-objective-advance"
 
 
 def test_selection_cli_requires_training_evaluations_and_output():

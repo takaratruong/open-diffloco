@@ -58,6 +58,23 @@ _INPUT_HASH_NAMES = frozenset(
     }
 )
 PROTOCOL = "g1-zero-head-feature-transfer-carried-evaluation-v1"
+DEFAULT_OUTCOME_LABELS = {
+    "solve": "zero-head-features-solve",
+    "advance": "zero-head-features-advance",
+    "insufficient": "zero-head-features-insufficient",
+}
+
+
+def _validate_outcome_labels(
+    labels: Mapping[str, str] | None,
+) -> dict[str, str]:
+    resolved = dict(DEFAULT_OUTCOME_LABELS if labels is None else labels)
+    if set(resolved) != {"solve", "advance", "insufficient"} or any(
+        not isinstance(value, str) or not value
+        for value in resolved.values()
+    ):
+        raise ValueError("selection outcome labels are invalid")
+    return resolved
 
 
 def _integer_vector(
@@ -92,8 +109,10 @@ def select_checkpoint(
     records: Sequence[Mapping[str, object]],
     *,
     parent_survival: Sequence[int] | None = None,
+    outcome_labels: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """Select only checkpoints safe against their paired parent rollout."""
+    labels = _validate_outcome_labels(outcome_labels)
     fallback_parent = (
         _integer_vector(
             list(parent_survival), length=BANK_ROWS, maximum=HORIZON
@@ -167,7 +186,7 @@ def select_checkpoint(
     if not improved:
         return {
             "valid": True,
-            "outcome": "zero-head-features-insufficient",
+            "outcome": labels["insufficient"],
             "eligible_updates": [row[0] for row in eligible],
             "selected_update": None,
             "selected_paired_parent_survival": None,
@@ -195,9 +214,9 @@ def select_checkpoint(
     return {
         "valid": True,
         "outcome": (
-            "zero-head-features-solve"
+            labels["solve"]
             if solved
-            else "zero-head-features-advance"
+            else labels["advance"]
         ),
         "eligible_updates": [row[0] for row in eligible],
         "selected_update": update,
@@ -589,15 +608,27 @@ def aggregate_selection(
     training_validation_path: Path,
     output_path: Path,
     expected_code_commit: str,
+    expected_training_protocol: str = (
+        "g1-zero-head-feature-transfer-training-v1"
+    ),
+    output_protocol: str = "g1-zero-head-feature-transfer-selection-v1",
+    outcome_labels: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """Select only from all four complete, hash-bound E041 evaluations."""
+    if (
+        not isinstance(expected_training_protocol, str)
+        or not expected_training_protocol
+        or not isinstance(output_protocol, str)
+        or not output_protocol
+    ):
+        raise ValueError("selection protocol names are invalid")
     code_provenance = validate_code_provenance(expected_code_commit)
     training_validation_path = training_validation_path.resolve()
     training = _load_json_object(training_validation_path)
     if (
         training.get("valid") is not True
         or training.get("protocol")
-        != "g1-zero-head-feature-transfer-training-v1"
+        != expected_training_protocol
     ):
         raise ValueError("E041 training validation is not valid")
     training_run = Path(str(training.get("run_directory", ""))).resolve()
@@ -707,11 +738,11 @@ def aggregate_selection(
             "paired_rollouts": sha256_file(paired_path),
             "ordinary_summary": sha256_file(ordinary_path),
         }
-    selection = select_checkpoint(records)
+    selection = select_checkpoint(records, outcome_labels=outcome_labels)
     selected_update = selection["selected_update"]
     manifest = {
         **selection,
-        "protocol": "g1-zero-head-feature-transfer-selection-v1",
+        "protocol": output_protocol,
         "code_provenance": code_provenance,
         "training_validation_path": str(training_validation_path),
         "training_validation_sha256": sha256_file(training_validation_path),
