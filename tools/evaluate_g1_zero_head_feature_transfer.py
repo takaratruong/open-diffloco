@@ -42,6 +42,7 @@ EVALUATION_CHECKPOINTS = {
     1_966_080: 32,
     2_359_296: 64,
 }
+EVALUATION_UPDATES = tuple(EVALUATION_CHECKPOINTS.values())
 _INPUT_HASH_NAMES = frozenset(
     {
         "parent_checkpoint",
@@ -83,6 +84,13 @@ def select_checkpoint(
     parent = _integer_vector(
         list(parent_survival), length=BANK_ROWS, maximum=HORIZON
     )
+    updates = [record.get("update") for record in records]
+    if (
+        len(updates) != len(EVALUATION_UPDATES)
+        or any(isinstance(update, bool) or not isinstance(update, int) for update in updates)
+        or tuple(sorted(updates)) != tuple(sorted(EVALUATION_UPDATES))
+    ):
+        raise ValueError("selection requires the four exact updates")
     normalized: list[tuple[int, tuple[int, ...], tuple[int, ...]]] = []
     for record in records:
         update = record.get("update")
@@ -288,19 +296,36 @@ def validate_candidate_checkpoint(
     candidate_state,
     *,
     candidate_step: int,
-    parent_params,
-    parent_normalizer,
+    parent_state,
 ) -> dict[str, object]:
     """Require a frozen-parent 328-256-29 residual at one registered update."""
     import jax
 
     from src.algorithms.shac.residual_preview_adapter import (
         FrozenPreviewResidualParams,
+        _adam_state,
         split_residual_adapter_params,
     )
 
     if candidate_step not in EVALUATION_CHECKPOINTS:
         raise ValueError("candidate step is not on the E041 checkpoint grid")
+    required_state_fields = {
+        "key",
+        "env_state",
+        "actor_params",
+        "critic_params",
+        "target_critic_params",
+        "normalizer",
+        "actor_opt",
+        "critic_opt",
+        "step",
+        "critic_normalizer",
+        "ldm_params",
+        "ldm_opt",
+        "replay_buffer",
+    }
+    if any(not hasattr(candidate_state, name) for name in required_state_fields):
+        raise ValueError("candidate checkpoint is not a complete TrainState")
     if (
         not hasattr(candidate_state, "step")
         or int(np.asarray(candidate_state.step)) != candidate_step
@@ -309,10 +334,23 @@ def validate_candidate_checkpoint(
         raise ValueError("candidate checkpoint does not match E041 structure")
     parent_exact = parameter_tree_sha256(
         candidate_state.actor_params.parent
-    ) == parameter_tree_sha256(parent_params)
+    ) == parameter_tree_sha256(parent_state.actor_params)
     normalizer_exact = parameter_tree_sha256(
         candidate_state.normalizer
-    ) == parameter_tree_sha256(parent_normalizer)
+    ) == parameter_tree_sha256(parent_state.normalizer)
+    try:
+        parent_adam = _adam_state(parent_state.actor_opt)
+        candidate_adam = _adam_state(candidate_state.actor_opt)
+    except ValueError as error:
+        raise ValueError("candidate optimizer structure is invalid") from error
+    optimizer_parent_exact = bool(
+        isinstance(candidate_adam.mu, FrozenPreviewResidualParams)
+        and isinstance(candidate_adam.nu, FrozenPreviewResidualParams)
+        and parameter_tree_sha256(candidate_adam.mu.parent)
+        == parameter_tree_sha256(parent_adam.mu)
+        and parameter_tree_sha256(candidate_adam.nu.parent)
+        == parameter_tree_sha256(parent_adam.nu)
+    )
     dense0, auxiliary = split_residual_adapter_params(
         candidate_state.actor_params.adapter
     )
@@ -324,9 +362,20 @@ def validate_candidate_checkpoint(
     )
     finite = all(
         np.isfinite(np.asarray(leaf)).all()
-        for leaf in jax.tree_util.tree_leaves(candidate_state.actor_params)
+        for tree in (
+            candidate_state.actor_params,
+            candidate_state.actor_opt,
+            candidate_state.normalizer,
+        )
+        for leaf in jax.tree_util.tree_leaves(tree)
     )
-    valid = parent_exact and normalizer_exact and shape_exact and finite
+    valid = (
+        parent_exact
+        and normalizer_exact
+        and optimizer_parent_exact
+        and shape_exact
+        and finite
+    )
     if not valid:
         raise ValueError("candidate checkpoint frozen-state contract failed")
     return {
@@ -335,6 +384,7 @@ def validate_candidate_checkpoint(
         "candidate_update": EVALUATION_CHECKPOINTS[candidate_step],
         "parent_parameters_exact": parent_exact,
         "normalizer_exact": normalizer_exact,
+        "parent_optimizer_moments_exact": optimizer_parent_exact,
         "adapter_shape_exact": shape_exact,
         "parameters_finite": bool(finite),
     }
@@ -393,6 +443,186 @@ def publish_evaluation(
         "paired_rollouts_sha256": sha256_file(evidence_path),
     }
     _write_json_atomically(summary_path, manifest)
+    return manifest
+
+
+def _load_json_object(path: Path) -> dict[str, object]:
+    if not path.is_file():
+        raise ValueError(f"required evaluation artifact is missing: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"evaluation artifact must be a JSON object: {path}")
+
+    def require_finite(value: object) -> None:
+        if isinstance(value, Mapping):
+            for item in value.values():
+                require_finite(item)
+        elif isinstance(value, list):
+            for item in value:
+                require_finite(item)
+        elif isinstance(value, float) and not np.isfinite(value):
+            raise ValueError(f"evaluation artifact contains nonfinite JSON: {path}")
+
+    require_finite(payload)
+    return payload
+
+
+def _validate_ordinary_summary(
+    payload: Mapping[str, object],
+    *,
+    checkpoint_sha256: str,
+) -> tuple[int, ...]:
+    expected_phases = (0, 100, 200, 300, 400)
+    if (
+        payload.get("protocol")
+        != "g1-flax-dance-replay-free-five-phase-v1"
+        or payload.get("checkpoint_sha256") != checkpoint_sha256
+        or payload.get("reference_sha256") != EXPECTED_LAFAN_REFERENCE_SHA256
+        or payload.get("solver_profile") != "g1-4x5"
+        or payload.get("actor_residual_preview_adapter") is not True
+        or payload.get("actor_residual_preview_hidden") != 256
+    ):
+        raise ValueError("ordinary phase-grid provenance is invalid")
+    checkpoint_path = Path(str(payload.get("checkpoint_path", ""))).resolve()
+    if not checkpoint_path.is_file() or sha256_file(checkpoint_path) != checkpoint_sha256:
+        raise ValueError("ordinary phase-grid checkpoint SHA does not match")
+    results = payload.get("results")
+    summary = payload.get("summary")
+    if (
+        not isinstance(results, list)
+        or len(results) != len(expected_phases)
+        or not isinstance(summary, Mapping)
+        or tuple(summary.get("phases", ())) != expected_phases
+    ):
+        raise ValueError("ordinary phase-grid evidence is incomplete")
+    phases = tuple(row.get("phase") for row in results if isinstance(row, Mapping))
+    steps = tuple(row.get("steps") for row in results if isinstance(row, Mapping))
+    if (
+        len(phases) != len(expected_phases)
+        or phases != expected_phases
+        or any(
+            isinstance(step, bool) or not isinstance(step, int) or step < 0
+            for step in steps
+        )
+        or tuple(summary.get("survival", ())) != steps
+    ):
+        raise ValueError("ordinary phase-grid survival evidence is invalid")
+    return steps
+
+
+def aggregate_selection(
+    *,
+    evaluation_root: Path,
+    training_validation_path: Path,
+    output_path: Path,
+) -> dict[str, object]:
+    """Select only from all four complete, hash-bound E041 evaluations."""
+    training_validation_path = training_validation_path.resolve()
+    training = _load_json_object(training_validation_path)
+    if (
+        training.get("valid") is not True
+        or training.get("protocol")
+        != "g1-zero-head-feature-transfer-training-v1"
+    ):
+        raise ValueError("E041 training validation is not valid")
+    evaluation_root = evaluation_root.resolve()
+    records: list[dict[str, object]] = []
+    evaluation_hashes: dict[str, dict[str, str]] = {}
+    parent_survival: tuple[int, ...] | None = None
+    checkpoint_paths: dict[int, str] = {}
+    for step, update in EVALUATION_CHECKPOINTS.items():
+        directory = evaluation_root / f"update{update:03d}"
+        carried_path = directory / "carried" / "summary.json"
+        ordinary_path = directory / "ordinary" / "phase_grid_summary.json"
+        carried = _load_json_object(carried_path)
+        ordinary = _load_json_object(ordinary_path)
+        if (
+            carried.get("valid") is not True
+            or carried.get("protocol") != PROTOCOL
+            or carried.get("candidate_step") != step
+            or carried.get("candidate_update") != update
+            or carried.get("seed") != 0
+            or carried.get("solver_profile") != "g1-4x5"
+        ):
+            raise ValueError("carried evaluation manifest is invalid")
+        input_hashes = _validate_digest_map(carried.get("input_sha256"))
+        checkpoint_sha256 = input_hashes["candidate_checkpoint"]
+        ordinary_survival = _validate_ordinary_summary(
+            ordinary, checkpoint_sha256=checkpoint_sha256
+        )
+        checkpoint_path = str(Path(str(ordinary["checkpoint_path"])).resolve())
+        checkpoint_paths[update] = checkpoint_path
+        paired_path = Path(str(carried.get("paired_rollouts_path", ""))).resolve()
+        expected_paired_path = (directory / "carried" / "paired_rollouts.npz").resolve()
+        if (
+            paired_path != expected_paired_path
+            or not paired_path.is_file()
+            or carried.get("paired_rollouts_sha256") != sha256_file(paired_path)
+        ):
+            raise ValueError("carried rollout evidence hash does not match")
+        candidate_survival = _integer_vector(
+            carried.get("candidate_survival"),
+            length=BANK_ROWS,
+            maximum=HORIZON,
+        )
+        current_parent = _integer_vector(
+            carried.get("parent_survival"),
+            length=BANK_ROWS,
+            maximum=HORIZON,
+        )
+        if parent_survival is None:
+            parent_survival = current_parent
+        elif current_parent != parent_survival:
+            raise ValueError("carried parent survival changed across checkpoints")
+        improvements = sum(
+            value > floor
+            for value, floor in zip(candidate_survival, current_parent, strict=True)
+        )
+        regressions = sum(
+            value < floor
+            for value, floor in zip(candidate_survival, current_parent, strict=True)
+        )
+        if (
+            carried.get("carried_no_regression") is not (regressions == 0)
+            or carried.get("carried_improvement_count") != improvements
+            or carried.get("carried_regression_count") != regressions
+        ):
+            raise ValueError("carried survival diagnostics do not recompute")
+        records.append(
+            {
+                "update": update,
+                "carried_survival": list(candidate_survival),
+                "ordinary_survival": list(ordinary_survival),
+            }
+        )
+        evaluation_hashes[str(update)] = {
+            "candidate_checkpoint": checkpoint_sha256,
+            "carried_summary": sha256_file(carried_path),
+            "paired_rollouts": sha256_file(paired_path),
+            "ordinary_summary": sha256_file(ordinary_path),
+        }
+    if parent_survival is None:
+        raise ValueError("E041 selection has no carried parent evidence")
+    selection = select_checkpoint(records, parent_survival=parent_survival)
+    selected_update = selection["selected_update"]
+    manifest = {
+        **selection,
+        "protocol": "g1-zero-head-feature-transfer-selection-v1",
+        "training_validation_path": str(training_validation_path),
+        "training_validation_sha256": sha256_file(training_validation_path),
+        "evaluation_sha256": evaluation_hashes,
+        "selected_checkpoint_path": (
+            checkpoint_paths[int(selected_update)]
+            if selected_update is not None
+            else None
+        ),
+        "selected_checkpoint_sha256": (
+            evaluation_hashes[str(selected_update)]["candidate_checkpoint"]
+            if selected_update is not None
+            else None
+        ),
+    }
+    _write_json_atomically(output_path.resolve(), manifest)
     return manifest
 
 
@@ -477,8 +707,7 @@ def run_evaluation(
     candidate_validation = validate_candidate_checkpoint(
         candidate_state,
         candidate_step=candidate_step,
-        parent_params=parent_params,
-        parent_normalizer=parent_normalizer,
+        parent_state=parent_state,
     )
     candidate_params = candidate_state.actor_params
     adapter_kernel, _ = split_residual_adapter_params(candidate_params.adapter)

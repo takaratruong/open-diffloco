@@ -25,12 +25,13 @@ def test_selector_requires_componentwise_carried_preservation():
         _record(8, [11] * 119 + [9], [117, 63, 49, 39, 47]),
         _record(16, [11] * 120, [116, 63, 49, 39, 47]),
         _record(32, [12] * 120, [116, 63, 49, 39, 47]),
+        _record(64, [10] * 120, [116, 63, 49, 39, 47]),
     ]
 
     selected = select_checkpoint(records, parent_survival=parent)
 
     assert selected["outcome"] == "zero-head-features-advance"
-    assert selected["eligible_updates"] == [16, 32]
+    assert selected["eligible_updates"] == [16, 32, 64]
     assert selected["selected_update"] == 32
     assert selected["selected_carried_survival"] == [12] * 120
 
@@ -40,13 +41,21 @@ def test_selector_reports_solve_insufficient_and_rejects_malformed():
 
     parent = [10] * 120
     solved = select_checkpoint(
-        [_record(8, [32] * 120, [499, 399, 299, 199, 99])],
+        [
+            _record(8, [32] * 120, [499, 399, 299, 199, 99]),
+            _record(16, [10] * 119 + [9], [116, 63, 49, 39, 47]),
+            _record(32, [10] * 119 + [9], [116, 63, 49, 39, 47]),
+            _record(64, [10] * 119 + [9], [116, 63, 49, 39, 47]),
+        ],
         parent_survival=parent,
     )
     assert solved["outcome"] == "zero-head-features-solve"
 
     insufficient = select_checkpoint(
-        [_record(8, [10] * 119 + [9], [116, 63, 49, 39, 47])],
+        [
+            _record(update, [10] * 119 + [9], [116, 63, 49, 39, 47])
+            for update in (8, 16, 32, 64)
+        ],
         parent_survival=parent,
     )
     assert insufficient["outcome"] == "zero-head-features-insufficient"
@@ -54,7 +63,21 @@ def test_selector_reports_solve_insufficient_and_rejects_malformed():
 
     with pytest.raises(ValueError, match="selection record"):
         select_checkpoint(
-            [_record(8, [10] * 119, [116, 63, 49, 39, 47])],
+            [
+                _record(8, [10] * 119, [116, 63, 49, 39, 47]),
+                _record(16, [10] * 120, [116, 63, 49, 39, 47]),
+                _record(32, [10] * 120, [116, 63, 49, 39, 47]),
+                _record(64, [10] * 120, [116, 63, 49, 39, 47]),
+            ],
+            parent_survival=parent,
+        )
+
+    with pytest.raises(ValueError, match="exact updates"):
+        select_checkpoint(
+            [
+                _record(update, [10] * 120, [116, 63, 49, 39, 47])
+                for update in (8, 16, 32, 999)
+            ],
             parent_survival=parent,
         )
 
@@ -116,8 +139,11 @@ def test_parser_requires_candidate_hash_step_and_all_pinned_inputs():
 
 
 def _candidate_state(*, step: int = 1_671_168):
+    import optax
+
     from src.algorithms.shac.residual_preview_adapter import (
         FrozenPreviewResidualParams,
+        initialize_residual_adapter_optimizer,
     )
 
     parent = {"parent": jnp.asarray([1.0], dtype=jnp.float32)}
@@ -134,15 +160,42 @@ def _candidate_state(*, step: int = 1_671_168):
             },
         }
     }
-    return (
-        SimpleNamespace(
-            step=step,
-            actor_params=FrozenPreviewResidualParams(parent, adapter),
-            normalizer=normalizer,
-        ),
-        parent,
-        normalizer,
+    composite = FrozenPreviewResidualParams(parent, adapter)
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0), optax.adam(1.0e-3)
     )
+    parent_optimizer = optimizer.init(parent)
+    candidate_optimizer = initialize_residual_adapter_optimizer(
+        optimizer,
+        parent_optimizer_state=parent_optimizer,
+        composite_params=composite,
+    )
+    common = {
+        "key": jnp.zeros((2,), dtype=jnp.uint32),
+        "env_state": {"state": jnp.asarray(0.0)},
+        "critic_params": {"critic": jnp.asarray(0.0)},
+        "target_critic_params": {"critic": jnp.asarray(0.0)},
+        "critic_opt": {"critic": jnp.asarray(0.0)},
+        "critic_normalizer": {"mean": jnp.asarray(0.0)},
+        "ldm_params": None,
+        "ldm_opt": None,
+        "replay_buffer": None,
+    }
+    parent_state = SimpleNamespace(
+        step=1_572_864,
+        actor_params=parent,
+        normalizer=normalizer,
+        actor_opt=parent_optimizer,
+        **common,
+    )
+    candidate_state = SimpleNamespace(
+        step=step,
+        actor_params=composite,
+        normalizer=normalizer,
+        actor_opt=candidate_optimizer,
+        **common,
+    )
+    return candidate_state, parent_state
 
 
 def test_candidate_checkpoint_requires_registered_selection_step_and_frozen_state():
@@ -150,12 +203,11 @@ def test_candidate_checkpoint_requires_registered_selection_step_and_frozen_stat
         validate_candidate_checkpoint,
     )
 
-    candidate, parent, normalizer = _candidate_state()
+    candidate, parent = _candidate_state()
     report = validate_candidate_checkpoint(
         candidate,
         candidate_step=1_671_168,
-        parent_params=parent,
-        parent_normalizer=normalizer,
+        parent_state=parent,
     )
     assert report["valid"] is True
     assert report["candidate_update"] == 8
@@ -165,11 +217,10 @@ def test_candidate_checkpoint_requires_registered_selection_step_and_frozen_stat
         validate_candidate_checkpoint(
             candidate,
             candidate_step=1_867_776,
-            parent_params=parent,
-            parent_normalizer=normalizer,
+            parent_state=parent,
         )
 
-    candidate, parent, normalizer = _candidate_state()
+    candidate, parent = _candidate_state()
     candidate.actor_params.adapter["params"]["Dense_1"]["bias"] = jnp.full(
         (29,), jnp.nan
     )
@@ -177,8 +228,16 @@ def test_candidate_checkpoint_requires_registered_selection_step_and_frozen_stat
         validate_candidate_checkpoint(
             candidate,
             candidate_step=1_671_168,
-            parent_params=parent,
-            parent_normalizer=normalizer,
+            parent_state=parent,
+        )
+
+    candidate, parent = _candidate_state()
+    del candidate.actor_opt
+    with pytest.raises(ValueError, match="complete TrainState"):
+        validate_candidate_checkpoint(
+            candidate,
+            candidate_step=1_671_168,
+            parent_state=parent,
         )
 
 
@@ -266,3 +325,133 @@ def test_publication_requires_exact_provenance_and_is_hash_bound(tmp_path: Path)
             arrays=_paired_evidence(),
             provenance=malformed,
         )
+
+
+def _write_selection_fixture(root: Path) -> Path:
+    from tools.evaluate_g1_zero_head_feature_transfer import (
+        EVALUATION_CHECKPOINTS,
+        EXPECTED_LAFAN_REFERENCE_SHA256,
+    )
+    from tools.prepare_g1_rmr_reference import sha256_file
+
+    parent = [10] * 120
+    for step, update in EVALUATION_CHECKPOINTS.items():
+        directory = root / f"update{update:03d}"
+        carried_directory = directory / "carried"
+        ordinary_directory = directory / "ordinary"
+        carried_directory.mkdir(parents=True)
+        ordinary_directory.mkdir(parents=True)
+        checkpoint_path = directory / "checkpoint.pkl"
+        checkpoint_path.write_bytes(f"checkpoint-{update}".encode())
+        checkpoint_hash = sha256_file(checkpoint_path)
+        evidence_path = carried_directory / "paired_rollouts.npz"
+        evidence_path.write_bytes(f"paired-{update}".encode())
+        candidate = [11] * 120 if update == 32 else parent
+        carried = {
+            "valid": True,
+            "protocol": "g1-zero-head-feature-transfer-carried-evaluation-v1",
+            "candidate_step": step,
+            "candidate_update": update,
+            "parent_survival": parent,
+            "candidate_survival": candidate,
+            "carried_no_regression": True,
+            "carried_improvement_count": 120 if update == 32 else 0,
+            "carried_regression_count": 0,
+            "seed": 0,
+            "solver_profile": "g1-4x5",
+            "input_sha256": {
+                "parent_checkpoint": "1" * 64,
+                "parent_hparams": "2" * 64,
+                "candidate_checkpoint": checkpoint_hash,
+                "reference": "b" * 64,
+                "source_bank": "5" * 64,
+                "model": "6" * 64,
+                "controller": "7" * 64,
+            },
+            "paired_rollouts_path": str(evidence_path),
+            "paired_rollouts_sha256": sha256_file(evidence_path),
+        }
+        (carried_directory / "summary.json").write_text(json.dumps(carried))
+        survival = [116, 63, 49, 39, 47]
+        ordinary = {
+            "protocol": "g1-flax-dance-replay-free-five-phase-v1",
+            "checkpoint_path": str(checkpoint_path),
+            "checkpoint_sha256": checkpoint_hash,
+            "reference_sha256": EXPECTED_LAFAN_REFERENCE_SHA256,
+            "solver_profile": "g1-4x5",
+            "actor_residual_preview_adapter": True,
+            "actor_residual_preview_hidden": 256,
+            "results": [
+                {"phase": phase, "steps": steps, "terminal": True}
+                for phase, steps in zip(
+                    (0, 100, 200, 300, 400), survival, strict=True
+                )
+            ],
+            "summary": {
+                "phases": [0, 100, 200, 300, 400],
+                "survival": survival,
+            },
+        }
+        (ordinary_directory / "phase_grid_summary.json").write_text(
+            json.dumps(ordinary)
+        )
+    training = root / "training_validation.json"
+    training.write_text(
+        json.dumps(
+            {
+                "valid": True,
+                "protocol": "g1-zero-head-feature-transfer-training-v1",
+            }
+        )
+    )
+    return training
+
+
+def test_aggregate_selection_requires_all_hash_bound_carried_and_ordinary_evidence(
+    tmp_path: Path,
+):
+    from tools.evaluate_g1_zero_head_feature_transfer import aggregate_selection
+
+    training = _write_selection_fixture(tmp_path)
+    output = tmp_path / "selection.json"
+    manifest = aggregate_selection(
+        evaluation_root=tmp_path,
+        training_validation_path=training,
+        output_path=output,
+    )
+
+    assert manifest["valid"] is True
+    assert manifest["outcome"] == "zero-head-features-advance"
+    assert manifest["selected_update"] == 32
+    assert set(manifest["evaluation_sha256"]) == {"8", "16", "32", "64"}
+    assert json.loads(output.read_text()) == manifest
+
+    phase_path = tmp_path / "update016/ordinary/phase_grid_summary.json"
+    phase = json.loads(phase_path.read_text())
+    phase["checkpoint_sha256"] = "f" * 64
+    phase_path.write_text(json.dumps(phase))
+    with pytest.raises(ValueError, match="phase-grid provenance"):
+        aggregate_selection(
+            evaluation_root=tmp_path,
+            training_validation_path=training,
+            output_path=tmp_path / "bad.json",
+        )
+
+
+def test_selection_cli_requires_training_evaluations_and_output():
+    from tools.select_g1_zero_head_feature_transfer import build_parser
+
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args([])
+    args = parser.parse_args(
+        [
+            "--evaluation-root",
+            "/tmp/evaluations",
+            "--training-validation",
+            "/tmp/training.json",
+            "--output",
+            "/tmp/selection.json",
+        ]
+    )
+    assert args.output == Path("/tmp/selection.json")
