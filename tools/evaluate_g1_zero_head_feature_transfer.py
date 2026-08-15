@@ -91,11 +91,15 @@ def _boolean_vector(values: object, *, length: int) -> tuple[bool, ...]:
 def select_checkpoint(
     records: Sequence[Mapping[str, object]],
     *,
-    parent_survival: Sequence[int],
+    parent_survival: Sequence[int] | None = None,
 ) -> dict[str, object]:
-    """Select only carried-state-safe checkpoints, then maximize recovery."""
-    parent = _integer_vector(
-        list(parent_survival), length=BANK_ROWS, maximum=HORIZON
+    """Select only checkpoints safe against their paired parent rollout."""
+    fallback_parent = (
+        _integer_vector(
+            list(parent_survival), length=BANK_ROWS, maximum=HORIZON
+        )
+        if parent_survival is not None
+        else None
     )
     updates = [record.get("update") for record in records]
     if (
@@ -105,7 +109,13 @@ def select_checkpoint(
     ):
         raise ValueError("selection requires the four exact updates")
     normalized: list[
-        tuple[int, tuple[int, ...], tuple[int, ...], tuple[bool, ...]]
+        tuple[
+            int,
+            tuple[int, ...],
+            tuple[int, ...],
+            tuple[int, ...],
+            tuple[bool, ...],
+        ]
     ] = []
     for record in records:
         update = record.get("update")
@@ -116,25 +126,42 @@ def select_checkpoint(
             length=BANK_ROWS,
             maximum=HORIZON,
         )
+        paired_parent_value = record.get("paired_parent_survival")
+        if paired_parent_value is None:
+            if fallback_parent is None:
+                raise ValueError("selection record has no paired parent survival")
+            paired_parent = fallback_parent
+        else:
+            paired_parent = _integer_vector(
+                paired_parent_value,
+                length=BANK_ROWS,
+                maximum=HORIZON,
+            )
         ordinary = _integer_vector(
             record.get("ordinary_survival"), length=len(ORDINARY_FLOORS)
         )
         completed = _boolean_vector(
             record.get("ordinary_completed"), length=len(ORDINARY_FLOORS)
         )
-        normalized.append((update, carried, ordinary, completed))
+        normalized.append((update, paired_parent, carried, ordinary, completed))
     eligible = [
         row
         for row in normalized
-        if all(value >= floor for value, floor in zip(row[1], parent, strict=True))
+        if all(
+            value >= floor
+            for value, floor in zip(row[2], row[1], strict=True)
+        )
     ]
     improved = [
         row
         for row in eligible
-        if any(value > floor for value, floor in zip(row[1], parent, strict=True))
+        if any(
+            value > floor
+            for value, floor in zip(row[2], row[1], strict=True)
+        )
         or any(
             value > floor
-            for value, floor in zip(row[2], ORDINARY_FLOORS, strict=True)
+            for value, floor in zip(row[3], ORDINARY_FLOORS, strict=True)
         )
     ]
     if not improved:
@@ -143,13 +170,14 @@ def select_checkpoint(
             "outcome": "zero-head-features-insufficient",
             "eligible_updates": [row[0] for row in eligible],
             "selected_update": None,
+            "selected_paired_parent_survival": None,
             "selected_carried_survival": None,
             "selected_ordinary_survival": None,
             "selected_ordinary_completed": None,
         }
 
     def key(row):
-        update, carried, ordinary, _completed = row
+        update, _paired_parent, carried, ordinary, _completed = row
         return (
             sum(value >= HORIZON for value in carried[:24]),
             sum(value >= HORIZON for value in carried),
@@ -162,7 +190,7 @@ def select_checkpoint(
             -update,
         )
 
-    update, carried, ordinary, completed = max(improved, key=key)
+    update, paired_parent, carried, ordinary, completed = max(improved, key=key)
     solved = all(value >= HORIZON for value in carried) and all(completed)
     return {
         "valid": True,
@@ -173,6 +201,7 @@ def select_checkpoint(
         ),
         "eligible_updates": [row[0] for row in eligible],
         "selected_update": update,
+        "selected_paired_parent_survival": list(paired_parent),
         "selected_carried_survival": list(carried),
         "selected_ordinary_survival": list(ordinary),
         "selected_ordinary_completed": list(completed),
@@ -590,7 +619,6 @@ def aggregate_selection(
     evaluation_root = evaluation_root.resolve()
     records: list[dict[str, object]] = []
     evaluation_hashes: dict[str, dict[str, str]] = {}
-    parent_survival: tuple[int, ...] | None = None
     checkpoint_paths: dict[int, str] = {}
     for step, update in EVALUATION_CHECKPOINTS.items():
         directory = evaluation_root / f"update{update:03d}"
@@ -650,10 +678,6 @@ def aggregate_selection(
             or list(current_parent) != carried.get("parent_survival")
         ):
             raise ValueError("carried survival does not match paired tensors")
-        if parent_survival is None:
-            parent_survival = current_parent
-        elif current_parent != parent_survival:
-            raise ValueError("carried parent survival changed across checkpoints")
         improvements = sum(
             value > floor
             for value, floor in zip(candidate_survival, current_parent, strict=True)
@@ -671,6 +695,7 @@ def aggregate_selection(
         records.append(
             {
                 "update": update,
+                "paired_parent_survival": list(current_parent),
                 "carried_survival": list(candidate_survival),
                 "ordinary_survival": list(ordinary_survival),
                 "ordinary_completed": list(ordinary_completed),
@@ -682,9 +707,7 @@ def aggregate_selection(
             "paired_rollouts": sha256_file(paired_path),
             "ordinary_summary": sha256_file(ordinary_path),
         }
-    if parent_survival is None:
-        raise ValueError("E041 selection has no carried parent evidence")
-    selection = select_checkpoint(records, parent_survival=parent_survival)
+    selection = select_checkpoint(records)
     selected_update = selection["selected_update"]
     manifest = {
         **selection,

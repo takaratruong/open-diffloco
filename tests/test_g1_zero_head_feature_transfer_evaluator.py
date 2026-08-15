@@ -42,6 +42,34 @@ def test_selector_requires_componentwise_carried_preservation():
     assert selected["selected_carried_survival"] == [12] * 120
 
 
+def test_selector_uses_each_candidates_paired_parent_baseline():
+    from tools.evaluate_g1_zero_head_feature_transfer import select_checkpoint
+
+    records = [
+        {
+            **_record(8, [10] * 120, [116, 63, 49, 39, 47]),
+            "paired_parent_survival": [10] * 120,
+        },
+        {
+            **_record(16, [11] * 120, [116, 63, 49, 39, 47]),
+            "paired_parent_survival": [11] * 120,
+        },
+        {
+            **_record(32, [10] * 120, [116, 63, 49, 39, 47]),
+            "paired_parent_survival": [9] * 120,
+        },
+        {
+            **_record(64, [10] * 119 + [9], [116, 63, 49, 39, 47]),
+            "paired_parent_survival": [10] * 120,
+        },
+    ]
+
+    selected = select_checkpoint(records)
+
+    assert selected["eligible_updates"] == [8, 16, 32]
+    assert selected["selected_update"] == 32
+
+
 def test_selector_reports_solve_insufficient_and_rejects_malformed():
     from tools.evaluate_g1_zero_head_feature_transfer import select_checkpoint
 
@@ -378,12 +406,15 @@ def _write_selection_fixture(root: Path) -> Path:
         checkpoint_hash = sha256_file(checkpoint_path)
         evidence_path = carried_directory / "paired_rollouts.npz"
         arrays = _paired_evidence()
+        parent_terminal_step = 11 if update == 16 else 10
         for arm in ("parent", "expert"):
-            terminal_step = 11 if arm == "expert" and update == 32 else 10
+            terminal_step = (
+                11 if arm == "expert" and update == 32 else parent_terminal_step
+            )
             arrays[f"{arm}_terminal"][:, terminal_step] = True
             arrays[f"{arm}_alive"][:, terminal_step + 1 :] = False
         np.savez_compressed(evidence_path, **arrays)
-        parent = [10] * 120
+        parent = [parent_terminal_step] * 120
         candidate = [11] * 120 if update == 32 else parent
         carried = {
             "valid": True,
