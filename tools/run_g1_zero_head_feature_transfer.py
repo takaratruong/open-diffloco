@@ -21,6 +21,32 @@ from tools.run_g1_zero_assistance_consolidation import _write_json_atomically
 
 
 EXPERT_SHA256 = "373fd6528d135dac65b38c35728800da693780558a03bb0cca6a412e314f7bd2"
+E027_BANK_SHA256 = "d91dfb1b5190f14a5204cb16abbf527ede4f08e0a9b46cec9dfa602500d708a5"
+E027_BANK_SUMMARY_SHA256 = (
+    "c7b9f2e3d35a1d01d9154913d6b20eb6d7a413341226e2806f7c2904b23b9feb"
+)
+
+
+def _zero_seed(value: str) -> int:
+    seed = int(value)
+    if seed != 0:
+        raise argparse.ArgumentTypeError("E041 requires seed exactly zero")
+    return seed
+
+
+def validate_registered_hash_arguments(
+    *,
+    bank_sha256: str,
+    bank_summary_sha256: str,
+    expert_sha256: str,
+) -> None:
+    """Reject caller substitutions for E041's three immutable artifacts."""
+    if (
+        bank_sha256 != E027_BANK_SHA256
+        or bank_summary_sha256 != E027_BANK_SUMMARY_SHA256
+        or expert_sha256 != EXPERT_SHA256
+    ):
+        raise ValueError("registered E027/E038 artifact hashes do not match")
 
 
 def build_zero_head_feature_transfer_kwargs(
@@ -86,6 +112,11 @@ def validate_preflight(
     code_commit: str,
 ) -> dict[str, object]:
     """Bind E027's exact inputs plus the immutable E038 expert source."""
+    validate_registered_hash_arguments(
+        bank_sha256=carried_bank_sha256,
+        bank_summary_sha256=carried_bank_summary_sha256,
+        expert_sha256=expert_sha256,
+    )
     base = validate_lafan_preflight(
         repository=repository,
         reference_path=reference_path,
@@ -160,7 +191,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--carried-reset-bank-summary-sha256", required=True)
     parser.add_argument("--expert-checkpoint", type=Path, required=True)
     parser.add_argument("--expert-sha256", required=True)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=_zero_seed, default=0)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--code-commit", required=True)
     return parser

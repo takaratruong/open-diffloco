@@ -67,7 +67,10 @@ def test_feature_transfer_report_requires_exact_source_and_zero_effect():
 
 
 def test_runner_parser_requires_expert_and_pinned_inputs():
-    from tools.run_g1_zero_head_feature_transfer import build_parser
+    from tools.run_g1_zero_head_feature_transfer import (
+        build_parser,
+        validate_registered_hash_arguments,
+    )
 
     parser = build_parser()
     with pytest.raises(SystemExit):
@@ -88,3 +91,26 @@ def test_runner_parser_requires_expert_and_pinned_inputs():
         ]
     )
     assert args.seed == 0
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "--solver-profile", "g1-4x5",
+                "--reference-path", "/tmp/ref.npz",
+                "--resume-from", "/tmp/parent.pkl",
+                "--carried-reset-bank", "/tmp/bank.npz",
+                "--carried-reset-bank-sha256", "a" * 64,
+                "--carried-reset-bank-summary", "/tmp/bank.json",
+                "--carried-reset-bank-summary-sha256", "b" * 64,
+                "--expert-checkpoint", "/tmp/expert.pkl",
+                "--expert-sha256", "c" * 64,
+                "--seed", "1",
+                "--output-root", "/tmp/out",
+                "--code-commit", "d" * 40,
+            ]
+        )
+    with pytest.raises(ValueError, match="registered E027"):
+        validate_registered_hash_arguments(
+            bank_sha256="a" * 64,
+            bank_summary_sha256="b" * 64,
+            expert_sha256="c" * 64,
+        )
