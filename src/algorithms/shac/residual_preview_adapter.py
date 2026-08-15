@@ -233,6 +233,129 @@ def merge_residual_adapter_params(
     return freeze(rebuilt) if isinstance(template, FrozenDict) else rebuilt
 
 
+def transplant_zero_head_recovery_features(
+    template_params: PyTree,
+    expert_params: PyTree,
+) -> tuple[PyTree, dict[str, object]]:
+    """Copy an expert hidden layer while retaining an exact-zero output head."""
+    try:
+        template_kernel, template_aux = split_residual_adapter_params(
+            template_params
+        )
+        expert_kernel, expert_aux = split_residual_adapter_params(expert_params)
+    except ValueError as error:
+        raise ValueError(
+            "zero-head recovery feature parameters are invalid"
+        ) from error
+    template_arrays = (
+        template_kernel,
+        template_aux.dense0_bias,
+        template_aux.dense1_kernel,
+        template_aux.dense1_bias,
+    )
+    expert_arrays = (
+        expert_kernel,
+        expert_aux.dense0_bias,
+        expert_aux.dense1_kernel,
+        expert_aux.dense1_bias,
+    )
+    if any(
+        left.shape != right.shape
+        for left, right in zip(template_arrays, expert_arrays, strict=True)
+    ) or not all(np.isfinite(np.asarray(value)).all() for value in expert_arrays):
+        raise ValueError("zero-head recovery feature source does not match template")
+    if not (
+        np.all(np.asarray(template_aux.dense1_kernel) == 0.0)
+        and np.all(np.asarray(template_aux.dense1_bias) == 0.0)
+    ):
+        raise ValueError("zero-head recovery feature template head is not zero")
+    candidate = merge_residual_adapter_params(
+        template_params,
+        expert_kernel,
+        ResidualAdapterAuxParams(
+            dense0_bias=expert_aux.dense0_bias,
+            dense1_kernel=template_aux.dense1_kernel,
+            dense1_bias=template_aux.dense1_bias,
+        ),
+    )
+    candidate_kernel, candidate_aux = split_residual_adapter_params(candidate)
+    hidden_kernel_exact = bool(
+        np.array_equal(np.asarray(candidate_kernel), np.asarray(expert_kernel))
+    )
+    hidden_bias_exact = bool(
+        np.array_equal(
+            np.asarray(candidate_aux.dense0_bias),
+            np.asarray(expert_aux.dense0_bias),
+        )
+    )
+    output_head_zero = bool(
+        np.all(np.asarray(candidate_aux.dense1_kernel) == 0.0)
+        and np.all(np.asarray(candidate_aux.dense1_bias) == 0.0)
+    )
+    valid = hidden_kernel_exact and hidden_bias_exact and output_head_zero
+    if not valid:
+        raise ValueError("zero-head recovery feature transplant audit failed")
+    return candidate, {
+        "protocol": "g1-zero-head-recovery-feature-transfer-v1",
+        "input_dim": int(candidate_kernel.shape[0]),
+        "hidden_dim": int(candidate_kernel.shape[1]),
+        "action_dim": int(candidate_aux.dense1_bias.shape[0]),
+        "hidden_kernel_exact": hidden_kernel_exact,
+        "hidden_bias_exact": hidden_bias_exact,
+        "output_head_zero": output_head_zero,
+        "valid": valid,
+    }
+
+
+def resolve_zero_head_feature_transfer_resume_setting(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested_path: str | None,
+    requested_sha256: str | None,
+    residual_adapter_enabled: bool,
+    residual_adapter_upgrade: bool,
+    is_resume: bool,
+) -> tuple[str | None, str | None]:
+    """Authorize one feature transplant and require exact settings thereafter."""
+    flags = (residual_adapter_enabled, residual_adapter_upgrade, is_resume)
+    if any(not isinstance(value, bool) for value in flags):
+        raise ValueError("zero-head recovery feature authority must be boolean")
+    requested = requested_path is not None or requested_sha256 is not None
+    if requested and (
+        not isinstance(requested_path, str)
+        or not requested_path
+        or not isinstance(requested_sha256, str)
+        or len(requested_sha256) != 64
+    ):
+        raise ValueError("zero-head recovery feature transfer requires path and SHA")
+    if requested and not residual_adapter_enabled:
+        raise ValueError("zero-head recovery feature transfer requires residual adapter")
+    if not is_resume:
+        return requested_path, requested_sha256
+    if resumed_hparams is None:
+        raise ValueError("zero-head recovery feature resume metadata is missing")
+    saved_path = resumed_hparams.get(
+        "actor_residual_preview_initial_adapter_path"
+    )
+    saved_sha256 = resumed_hparams.get(
+        "actor_residual_preview_initial_adapter_sha256"
+    )
+    saved = saved_path is not None or saved_sha256 is not None
+    if residual_adapter_upgrade:
+        if saved:
+            raise ValueError("zero-head recovery feature parent metadata is invalid")
+        return requested_path, requested_sha256
+    if requested and not saved:
+        raise ValueError(
+            "zero-head recovery feature transfer requires residual adapter upgrade"
+        )
+    if requested != saved or (
+        requested and (requested_path != saved_path or requested_sha256 != saved_sha256)
+    ):
+        raise ValueError("zero-head recovery feature settings must match checkpoint")
+    return requested_path, requested_sha256
+
+
 def _append_zero_input_row(adapter_params: PyTree) -> PyTree:
     kernel, auxiliary = split_residual_adapter_params(adapter_params)
     expanded = jp.concatenate(
