@@ -100,11 +100,17 @@ def classify_transfer(
     median_regressed = bool(
         np.median(expert[untouched]) < np.median(parent[untouched])
     )
+    has_improvements = bool(np.any(expert > parent))
+    has_regressions = bool(np.any(expert < parent))
 
-    if phase_zero_successes < 10 or median_regressed:
+    if (
+        phase_zero_successes < 10
+        or median_regressed
+        or (has_regressions and not has_improvements)
+    ):
         return "recovery-expert-destructive"
     if phase_zero_successes in (10, 11) or (
-        np.any(expert > parent) and np.any(expert < parent)
+        has_improvements and has_regressions
     ):
         return "recovery-expert-mixed-transfer"
     if phase_zero_successes >= 12 and no_regressions:

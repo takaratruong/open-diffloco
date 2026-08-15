@@ -38,8 +38,9 @@ changes its parameters.
   successes, no state regresses, but fewer than 10 untouched states reach H32.
 - `recovery-expert-mixed-transfer`: finite execution produces both survival
   improvements and regressions, or phase-zero reproduces only 10-11 successes.
-- `recovery-expert-destructive`: phase-zero reproduces fewer than 10 successes
-  or untouched-state median survival falls below E023.
+- `recovery-expert-destructive`: phase-zero reproduces fewer than 10 successes,
+  untouched-state median survival falls below E023, or any survival regression
+  occurs without an improvement.
 - `invalid-execution`: any provenance, shape, state reconstruction, finite,
   action-boundary, paired-evidence, or artifact contract fails.
 

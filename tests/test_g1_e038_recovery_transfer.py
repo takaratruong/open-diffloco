@@ -123,6 +123,40 @@ def test_classify_transfer_marks_untouched_median_regression_destructive():
     )
 
 
+def test_classify_transfer_marks_improvements_and_regressions_mixed():
+    from tools.evaluate_g1_e038_recovery_transfer import classify_transfer
+
+    parent = [HORIZON - 1] * 120
+    expert = (
+        [HORIZON] * 12
+        + [HORIZON - 1] * 12
+        + [HORIZON - 2]
+        + [HORIZON - 1] * 95
+    )
+
+    assert (
+        classify_transfer(parent, expert, _source_start_phase(), execution_valid=True)
+        == "recovery-expert-mixed-transfer"
+    )
+
+
+def test_classify_transfer_marks_unmatched_regression_destructive():
+    from tools.evaluate_g1_e038_recovery_transfer import classify_transfer
+
+    parent = [HORIZON] * 24 + [HORIZON - 1] * 96
+    expert = (
+        [HORIZON] * 12
+        + [HORIZON - 1] * 12
+        + [HORIZON - 2]
+        + [HORIZON - 1] * 95
+    )
+
+    assert (
+        classify_transfer(parent, expert, _source_start_phase(), execution_valid=True)
+        == "recovery-expert-destructive"
+    )
+
+
 def test_zero_seed_is_enforced():
     from tools.evaluate_g1_e038_recovery_transfer import _zero_seed, build_parser
 
