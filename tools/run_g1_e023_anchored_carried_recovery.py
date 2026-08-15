@@ -59,9 +59,7 @@ def build_anchored_carried_recovery_kwargs(
     carried_bank: str | Path,
 ) -> dict[str, Any]:
     """Apply only the registered frozen-adapter carried-recovery treatment."""
-    kwargs = build_rmr_noise_h24_kwargs(
-        profile_name, reference_path, seed
-    )
+    kwargs = build_rmr_noise_h24_kwargs(profile_name, reference_path, seed)
     kwargs.update(
         resume_from=str(Path(resume_from).resolve()),
         total_steps=CONTINUATION_END_STEP,
@@ -208,8 +206,7 @@ def validate_recovery_telemetry(
         if (
             row.get("actor_preview_valid") is not True
             or row.get("actor_policy_anchor_valid") is not True
-            or row.get("actor_policy_anchor_weight")
-            != ACTOR_POLICY_ANCHOR_WEIGHT
+            or row.get("actor_policy_anchor_weight") != ACTOR_POLICY_ANCHOR_WEIGHT
             or isinstance(anchor_error, bool)
             or not isinstance(anchor_error, (int, float))
             or not math.isfinite(float(anchor_error))
@@ -230,6 +227,7 @@ def select_checkpoint(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     for record in records:
         update = record.get("update")
         survival = record.get("survival")
+        completed_suffix = record.get("completed_suffix")
         if (
             isinstance(update, bool)
             or not isinstance(update, int)
@@ -237,18 +235,19 @@ def select_checkpoint(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             or not isinstance(survival, (list, tuple))
             or len(survival) != 5
             or any(
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or value < 0
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
                 for value in survival
             )
+            or not isinstance(completed_suffix, (list, tuple))
+            or len(completed_suffix) != 5
+            or any(not isinstance(value, bool) for value in completed_suffix)
         ):
             raise ValueError("phase-grid selection record is invalid")
         vector = tuple(survival)
-        normalized.append((update, vector))
+        normalized.append((update, vector, tuple(completed_suffix)))
     eligible = [
-        (update, vector)
-        for update, vector in normalized
+        (update, vector, completed_suffix)
+        for update, vector, completed_suffix in normalized
         if all(value >= floor for value, floor in zip(vector, E023_FLOORS))
     ]
     if not eligible:
@@ -260,7 +259,7 @@ def select_checkpoint(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "selected_update": None,
             "selected_survival": None,
         }
-    selected_update, selected_survival = max(
+    selected_update, selected_survival, selected_completed_suffix = max(
         eligible,
         key=lambda item: (
             min(item[1]),
@@ -269,21 +268,19 @@ def select_checkpoint(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             -item[0],
         ),
     )
-    solved = all(
-        value >= target
-        for value, target in zip(selected_survival, COMPLETE_SUFFIXES)
+    solved = all(selected_completed_suffix) and all(
+        value >= target for value, target in zip(selected_survival, COMPLETE_SUFFIXES)
     )
     return {
         "valid": True,
         "outcome": (
-            "anchored-carried-solves-walk"
-            if solved
-            else "anchored-carried-advances"
+            "anchored-carried-solves-walk" if solved else "anchored-carried-advances"
         ),
         "floors": list(E023_FLOORS),
-        "eligible_updates": [update for update, _ in eligible],
+        "eligible_updates": [update for update, _, _ in eligible],
         "selected_update": selected_update,
         "selected_survival": list(selected_survival),
+        "selected_completed_suffix": list(selected_completed_suffix),
     }
 
 
@@ -358,9 +355,7 @@ def main() -> None:
         carried_bank=args.carried_reset_bank.resolve(),
         carried_bank_summary=args.carried_reset_bank_summary.resolve(),
         carried_bank_sha256=args.carried_reset_bank_sha256,
-        carried_bank_summary_sha256=(
-            args.carried_reset_bank_summary_sha256
-        ),
+        carried_bank_summary_sha256=(args.carried_reset_bank_summary_sha256),
         code_commit=args.code_commit,
     )
     _write_json_atomically(output_root / "preflight.json", preflight)
@@ -380,12 +375,8 @@ def main() -> None:
     finally:
         os.chdir(previous_directory)
     run_directory = (output_root / relative_save_dir).resolve()
-    validation = validate_training_artifacts(
-        run_directory, expected_kwargs=kwargs
-    )
-    _write_json_atomically(
-        output_root / "training_validation.json", validation
-    )
+    validation = validate_training_artifacts(run_directory, expected_kwargs=kwargs)
+    _write_json_atomically(output_root / "training_validation.json", validation)
     print(run_directory)
 
 

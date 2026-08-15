@@ -105,9 +105,7 @@ def test_recovery_telemetry_requires_exact_migration_and_frozen_parent():
         validate_recovery_telemetry,
     )
 
-    result = validate_recovery_telemetry(
-        _telemetry_rows(), _migration_report()
-    )
+    result = validate_recovery_telemetry(_telemetry_rows(), _migration_report())
     assert result["valid"] is True
     assert result["checkpoint_count"] == 8
 
@@ -129,10 +127,26 @@ def test_componentwise_selector_never_trades_away_e023_phase():
     from tools.run_g1_e023_anchored_carried_recovery import select_checkpoint
 
     records = [
-        {"update": 8, "survival": [120, 99, 60, 49, 24]},
-        {"update": 16, "survival": [116, 99, 68, 49, 24]},
-        {"update": 32, "survival": [117, 99, 68, 49, 24]},
-        {"update": 64, "survival": [124, 99, 74, 49, 24]},
+        {
+            "update": 8,
+            "survival": [120, 99, 60, 49, 24],
+            "completed_suffix": [False, True, False, True, True],
+        },
+        {
+            "update": 16,
+            "survival": [116, 99, 68, 49, 24],
+            "completed_suffix": [False, True, False, True, True],
+        },
+        {
+            "update": 32,
+            "survival": [117, 99, 68, 49, 24],
+            "completed_suffix": [False, True, False, True, True],
+        },
+        {
+            "update": 64,
+            "survival": [124, 99, 74, 49, 24],
+            "completed_suffix": [True, True, True, True, True],
+        },
     ]
     selected = select_checkpoint(records)
     assert selected["outcome"] == "anchored-carried-solves-walk"
@@ -140,10 +154,27 @@ def test_componentwise_selector_never_trades_away_e023_phase():
     assert selected["eligible_updates"] == [16, 32, 64]
 
     insufficient = select_checkpoint(
-        [{"update": 8, "survival": [123, 98, 74, 49, 24]}]
+        [
+            {
+                "update": 8,
+                "survival": [123, 98, 74, 49, 24],
+                "completed_suffix": [False, False, True, True, True],
+            }
+        ]
     )
     assert insufficient["outcome"] == "anchored-carried-insufficient"
     assert insufficient["selected_update"] is None
+
+    final_transition_terminal = select_checkpoint(
+        [
+            {
+                "update": 16,
+                "survival": [124, 99, 74, 49, 24],
+                "completed_suffix": [True, True, False, True, True],
+            }
+        ]
+    )
+    assert final_transition_terminal["outcome"] == "anchored-carried-advances"
 
 
 def test_recovery_preflight_pins_parent_and_bank(
