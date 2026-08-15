@@ -33,6 +33,7 @@ def _valid_arrays() -> dict[str, np.ndarray]:
         "normalized_termination_errors": np.zeros(
             (24, 32, 4), dtype=np.float64
         ),
+        "success_mask": np.asarray(E034_SURVIVAL) == 32,
     }
 
 
@@ -47,7 +48,7 @@ def test_teacher_dataset_requires_exact_e034_replay_and_reports_clipping():
 
 @pytest.mark.parametrize(
     "mutation",
-    ("shape", "survival", "clip", "nonfinite"),
+    ("shape", "survival", "clip", "nonfinite", "success_mask"),
 )
 def test_teacher_dataset_fails_closed_on_invalid_evidence(mutation: str):
     arrays = _valid_arrays()
@@ -57,8 +58,10 @@ def test_teacher_dataset_fails_closed_on_invalid_evidence(mutation: str):
         arrays["terminal"][14, 26] = False
     elif mutation == "clip":
         arrays["effective_action"][0, 0, 0] = 0.25
-    else:
+    elif mutation == "nonfinite":
         arrays["reward"][0, 0] = np.nan
+    else:
+        arrays["success_mask"][12] = True
 
     with pytest.raises(ValueError):
         validate_teacher_arrays(arrays)
@@ -101,3 +104,24 @@ def test_teacher_dataset_parser_requires_all_pinned_inputs():
 
     assert args.seed == 0
     assert args.oracle_evidence.name == "oracle.npz"
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            [
+                "--checkpoint",
+                "checkpoint.pkl",
+                "--hparams",
+                "hparams.json",
+                "--reference-path",
+                "reference.npz",
+                "--source-bank",
+                "bank.npz",
+                "--oracle-evidence",
+                "oracle.npz",
+                "--output-directory",
+                "output",
+                "--code-commit",
+                "a" * 40,
+                "--seed",
+                "1",
+            ]
+        )

@@ -61,6 +61,7 @@ _SHAPES = {
     "terminal": (24, 32),
     "reward": (24, 32),
     "normalized_termination_errors": (24, 32, 4),
+    "success_mask": (24,),
 }
 
 
@@ -111,6 +112,8 @@ def validate_teacher_arrays(
         raise ValueError("teacher raw action does not equal parent plus correction")
 
     successful = np.asarray(E034_SURVIVAL) == 32
+    if not np.array_equal(np.asarray(arrays["success_mask"]), successful):
+        raise ValueError("teacher success mask does not match E034 survival")
     action_mask = np.broadcast_to(alive[..., None], raw.shape)
     clipped = np.abs(raw) > 1.0
 
@@ -296,7 +299,16 @@ def collect_teacher_arrays(
         "reward",
         "normalized_termination_errors",
     )
-    return {name: np.asarray(value) for name, value in zip(names, replay)}
+    arrays = {name: np.asarray(value) for name, value in zip(names, replay)}
+    arrays["success_mask"] = np.asarray(E034_SURVIVAL) == 32
+    return arrays
+
+
+def _zero_seed(value: str) -> int:
+    seed = int(value)
+    if seed != 0:
+        raise argparse.ArgumentTypeError("E034 replay seed must be exactly zero")
+    return seed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -308,7 +320,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--oracle-evidence", type=Path, required=True)
     parser.add_argument("--output-directory", type=Path, required=True)
     parser.add_argument("--code-commit", required=True)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=_zero_seed, default=0)
     return parser
 
 
