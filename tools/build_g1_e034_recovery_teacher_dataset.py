@@ -59,6 +59,8 @@ _SHAPES = {
     "effective_action": (24, 32, 29),
     "alive": (24, 32),
     "terminal": (24, 32),
+    "replay_alive": (24, 32),
+    "replay_terminal": (24, 32),
     "reward": (24, 32),
     "normalized_termination_errors": (24, 32, 4),
     "success_mask": (24,),
@@ -71,6 +73,14 @@ def _survival(terminals: np.ndarray) -> list[int]:
         indices = np.flatnonzero(row)
         output.append(int(indices[0]) if indices.size else 32)
     return output
+
+
+def _alive_from_survival(survival: list[int] | tuple[int, ...]) -> np.ndarray:
+    alive = np.ones((24, 32), dtype=bool)
+    for row, survived in enumerate(survival):
+        if survived < 32:
+            alive[row, survived + 1 :] = False
+    return alive
 
 
 def validate_teacher_arrays(
@@ -91,12 +101,27 @@ def validate_teacher_arrays(
     survival = _survival(terminal)
     if survival != list(E034_SURVIVAL):
         raise ValueError("teacher dataset survival does not reproduce E034")
-    expected_alive = np.ones((24, 32), dtype=bool)
-    for row, survived in enumerate(E034_SURVIVAL):
-        if survived < 32:
-            expected_alive[row, survived + 1 :] = False
+    expected_alive = _alive_from_survival(E034_SURVIVAL)
     if not np.array_equal(alive, expected_alive):
         raise ValueError("teacher dataset alive mask does not match terminals")
+    replay_terminal = np.asarray(arrays["replay_terminal"], dtype=bool)
+    replay_alive = np.asarray(arrays["replay_alive"], dtype=bool)
+    replay_survival = _survival(replay_terminal)
+    if not np.array_equal(
+        replay_alive, _alive_from_survival(replay_survival)
+    ):
+        raise ValueError("teacher replay alive mask does not match terminals")
+    successful = np.asarray(E034_SURVIVAL) == 32
+    replay_successful = np.asarray(replay_survival) == 32
+    if not np.array_equal(replay_successful, successful):
+        raise ValueError("teacher replay changes the E034 success set")
+    failed_drift = np.abs(
+        np.asarray(replay_survival)[~successful]
+        - np.asarray(E034_SURVIVAL)[~successful]
+    )
+    maximum_failed_drift = int(np.max(failed_drift))
+    if maximum_failed_drift > 1:
+        raise ValueError("teacher failed-row replay drift exceeds one transition")
 
     raw = np.asarray(arrays["raw_action"])
     effective = np.asarray(arrays["effective_action"])
@@ -111,7 +136,6 @@ def validate_teacher_arrays(
     ):
         raise ValueError("teacher raw action does not equal parent plus correction")
 
-    successful = np.asarray(E034_SURVIVAL) == 32
     if not np.array_equal(np.asarray(arrays["success_mask"]), successful):
         raise ValueError("teacher success mask does not match E034 survival")
     action_mask = np.broadcast_to(alive[..., None], raw.shape)
@@ -123,6 +147,8 @@ def validate_teacher_arrays(
 
     return {
         "survival": survival,
+        "replay_survival": replay_survival,
+        "maximum_failed_survival_drift": maximum_failed_drift,
         "successful_starts": int(np.sum(successful)),
         "teacher_rows": int(np.sum(successful) * 32),
         "all_clip_fraction": clip_fraction(np.ones(24, dtype=bool)),
@@ -205,6 +231,7 @@ def collect_teacher_arrays(
     normalizer = Normalizer(env.actor_frame_obs_dim)
     with np.load(oracle_evidence_path, allow_pickle=False) as archive:
         correction_tape = np.asarray(archive["correction_tape"])
+        oracle_terminal = np.asarray(archive["candidate_terminal"], dtype=bool)
     if correction_tape.shape != (24, 32, 29):
         raise ValueError("E034 correction tape shape does not match")
     if not np.isfinite(correction_tape).all():
@@ -294,12 +321,15 @@ def collect_teacher_arrays(
         "correction",
         "raw_action",
         "effective_action",
-        "alive",
-        "terminal",
+        "replay_alive",
+        "replay_terminal",
         "reward",
         "normalized_termination_errors",
     )
     arrays = {name: np.asarray(value) for name, value in zip(names, replay)}
+    oracle_survival = _survival(oracle_terminal)
+    arrays["terminal"] = oracle_terminal
+    arrays["alive"] = _alive_from_survival(oracle_survival)
     arrays["success_mask"] = np.asarray(E034_SURVIVAL) == 32
     return arrays
 

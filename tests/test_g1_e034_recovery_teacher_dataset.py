@@ -29,6 +29,8 @@ def _valid_arrays() -> dict[str, np.ndarray]:
         "effective_action": np.clip(raw, -1.0, 1.0),
         "alive": alive,
         "terminal": terminal,
+        "replay_alive": alive.copy(),
+        "replay_terminal": terminal.copy(),
         "reward": np.zeros((24, 32), dtype=np.float64),
         "normalized_termination_errors": np.zeros(
             (24, 32, 4), dtype=np.float64
@@ -48,7 +50,14 @@ def test_teacher_dataset_requires_exact_e034_replay_and_reports_clipping():
 
 @pytest.mark.parametrize(
     "mutation",
-    ("shape", "survival", "clip", "nonfinite", "success_mask"),
+    (
+        "shape",
+        "survival",
+        "clip",
+        "nonfinite",
+        "success_mask",
+        "replay_success",
+    ),
 )
 def test_teacher_dataset_fails_closed_on_invalid_evidence(mutation: str):
     arrays = _valid_arrays()
@@ -60,11 +69,25 @@ def test_teacher_dataset_fails_closed_on_invalid_evidence(mutation: str):
         arrays["effective_action"][0, 0, 0] = 0.25
     elif mutation == "nonfinite":
         arrays["reward"][0, 0] = np.nan
-    else:
+    elif mutation == "success_mask":
         arrays["success_mask"][12] = True
+    else:
+        arrays["replay_terminal"][0, 31] = True
 
     with pytest.raises(ValueError):
         validate_teacher_arrays(arrays)
+
+
+def test_teacher_dataset_accepts_one_step_drift_only_on_failed_replay_rows():
+    arrays = _valid_arrays()
+    arrays["replay_terminal"][12, 30] = False
+    arrays["replay_terminal"][12, 31] = True
+    arrays["replay_alive"][12, 31] = True
+
+    summary = validate_teacher_arrays(arrays)
+
+    assert summary["replay_survival"][12] == 31
+    assert summary["maximum_failed_survival_drift"] == 1
 
 
 def test_teacher_dataset_publication_is_hash_bound_and_manifest_last(tmp_path):
