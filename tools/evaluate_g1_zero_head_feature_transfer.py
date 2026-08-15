@@ -43,6 +43,9 @@ EVALUATION_CHECKPOINTS = {
     2_359_296: 64,
 }
 EVALUATION_UPDATES = tuple(EVALUATION_CHECKPOINTS.values())
+TRAINING_CHECKPOINT_STEPS = tuple(
+    range(1_671_168, 2_359_296 + 1, 98_304)
+)
 _INPUT_HASH_NAMES = frozenset(
     {
         "parent_checkpoint",
@@ -471,6 +474,7 @@ def _validate_ordinary_summary(
     payload: Mapping[str, object],
     *,
     checkpoint_sha256: str,
+    code_provenance: Mapping[str, str],
 ) -> tuple[int, ...]:
     expected_phases = (0, 100, 200, 300, 400)
     if (
@@ -481,6 +485,10 @@ def _validate_ordinary_summary(
         or payload.get("solver_profile") != "g1-4x5"
         or payload.get("actor_residual_preview_adapter") is not True
         or payload.get("actor_residual_preview_hidden") != 256
+        or payload.get("reference_transitions") != 499
+        or payload.get("seed") != 0
+        or payload.get("post_policy_action_clip") is not False
+        or payload.get("code_provenance") != code_provenance
     ):
         raise ValueError("ordinary phase-grid provenance is invalid")
     checkpoint_path = Path(str(payload.get("checkpoint_path", ""))).resolve()
@@ -497,16 +505,38 @@ def _validate_ordinary_summary(
         raise ValueError("ordinary phase-grid evidence is incomplete")
     phases = tuple(row.get("phase") for row in results if isinstance(row, Mapping))
     steps = tuple(row.get("steps") for row in results if isinstance(row, Mapping))
+    terminals = tuple(
+        row.get("terminal") for row in results if isinstance(row, Mapping)
+    )
+    suffix_lengths = tuple(499 - phase for phase in expected_phases)
     if (
         len(phases) != len(expected_phases)
         or phases != expected_phases
         or any(
-            isinstance(step, bool) or not isinstance(step, int) or step < 0
-            for step in steps
+            isinstance(step, bool)
+            or not isinstance(step, int)
+            or step < 0
+            or step > suffix
+            for step, suffix in zip(steps, suffix_lengths, strict=True)
         )
-        or tuple(summary.get("survival", ())) != steps
+        or any(not isinstance(terminal, bool) for terminal in terminals)
+        or any(
+            not terminal and step != suffix
+            for terminal, step, suffix in zip(
+                terminals, steps, suffix_lengths, strict=True
+            )
+        )
     ):
         raise ValueError("ordinary phase-grid survival evidence is invalid")
+    from tools.evaluate_g1_rmr_phase_grid import build_phase_grid_summary
+
+    recomputed = build_phase_grid_summary(
+        [dict(row) for row in results],
+        phases=expected_phases,
+        reference_transitions=499,
+    )
+    if dict(summary) != recomputed:
+        raise ValueError("ordinary phase-grid summary does not recompute")
     return steps
 
 
@@ -515,8 +545,10 @@ def aggregate_selection(
     evaluation_root: Path,
     training_validation_path: Path,
     output_path: Path,
+    expected_code_commit: str,
 ) -> dict[str, object]:
     """Select only from all four complete, hash-bound E041 evaluations."""
+    code_provenance = validate_code_provenance(expected_code_commit)
     training_validation_path = training_validation_path.resolve()
     training = _load_json_object(training_validation_path)
     if (
@@ -525,6 +557,22 @@ def aggregate_selection(
         != "g1-zero-head-feature-transfer-training-v1"
     ):
         raise ValueError("E041 training validation is not valid")
+    training_run = Path(str(training.get("run_directory", ""))).resolve()
+    training_steps = training.get("checkpoint_steps")
+    training_hashes = training.get("checkpoint_sha256_by_step")
+    if (
+        not training_run.is_dir()
+        or training_steps != list(TRAINING_CHECKPOINT_STEPS)
+        or not isinstance(training_hashes, Mapping)
+        or set(training_hashes) != {str(step) for step in TRAINING_CHECKPOINT_STEPS}
+    ):
+        raise ValueError("E041 training checkpoint manifest is not exact")
+    validated_training_hashes = {
+        str(step): sha256_file(training_run / f"checkpoint_step_{step}.pkl")
+        for step in TRAINING_CHECKPOINT_STEPS
+    }
+    if dict(training_hashes) != validated_training_hashes:
+        raise ValueError("E041 training checkpoint hashes do not match")
     evaluation_root = evaluation_root.resolve()
     records: list[dict[str, object]] = []
     evaluation_hashes: dict[str, dict[str, str]] = {}
@@ -543,14 +591,22 @@ def aggregate_selection(
             or carried.get("candidate_update") != update
             or carried.get("seed") != 0
             or carried.get("solver_profile") != "g1-4x5"
+            or carried.get("code_provenance") != code_provenance
         ):
             raise ValueError("carried evaluation manifest is invalid")
         input_hashes = _validate_digest_map(carried.get("input_sha256"))
         checkpoint_sha256 = input_hashes["candidate_checkpoint"]
         ordinary_survival = _validate_ordinary_summary(
-            ordinary, checkpoint_sha256=checkpoint_sha256
+            ordinary,
+            checkpoint_sha256=checkpoint_sha256,
+            code_provenance=code_provenance,
         )
         checkpoint_path = str(Path(str(ordinary["checkpoint_path"])).resolve())
+        if (
+            Path(checkpoint_path).parent != training_run
+            or checkpoint_sha256 != validated_training_hashes[str(step)]
+        ):
+            raise ValueError("evaluated checkpoint is not from validated E041 training")
         checkpoint_paths[update] = checkpoint_path
         paired_path = Path(str(carried.get("paired_rollouts_path", ""))).resolve()
         expected_paired_path = (directory / "carried" / "paired_rollouts.npz").resolve()
@@ -560,16 +616,26 @@ def aggregate_selection(
             or carried.get("paired_rollouts_sha256") != sha256_file(paired_path)
         ):
             raise ValueError("carried rollout evidence hash does not match")
+        with np.load(paired_path, allow_pickle=False) as archive:
+            paired_arrays = {
+                name: np.asarray(archive[name]) for name in archive.files
+            }
+        recomputed = validate_paired_evidence(paired_arrays)
         candidate_survival = _integer_vector(
-            carried.get("candidate_survival"),
+            recomputed["expert_survival"],
             length=BANK_ROWS,
             maximum=HORIZON,
         )
         current_parent = _integer_vector(
-            carried.get("parent_survival"),
+            recomputed["parent_survival"],
             length=BANK_ROWS,
             maximum=HORIZON,
         )
+        if (
+            list(candidate_survival) != carried.get("candidate_survival")
+            or list(current_parent) != carried.get("parent_survival")
+        ):
+            raise ValueError("carried survival does not match paired tensors")
         if parent_survival is None:
             parent_survival = current_parent
         elif current_parent != parent_survival:
@@ -608,6 +674,7 @@ def aggregate_selection(
     manifest = {
         **selection,
         "protocol": "g1-zero-head-feature-transfer-selection-v1",
+        "code_provenance": code_provenance,
         "training_validation_path": str(training_validation_path),
         "training_validation_sha256": sha256_file(training_validation_path),
         "evaluation_sha256": evaluation_hashes,

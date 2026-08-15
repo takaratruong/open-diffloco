@@ -328,24 +328,42 @@ def test_publication_requires_exact_provenance_and_is_hash_bound(tmp_path: Path)
 
 
 def _write_selection_fixture(root: Path) -> Path:
+    from tools.evaluate_g1_rmr_phase_grid import build_phase_grid_summary
     from tools.evaluate_g1_zero_head_feature_transfer import (
         EVALUATION_CHECKPOINTS,
         EXPECTED_LAFAN_REFERENCE_SHA256,
+        TRAINING_CHECKPOINT_STEPS,
     )
     from tools.prepare_g1_rmr_reference import sha256_file
 
-    parent = [10] * 120
+    training_run = root / "training-run"
+    training_run.mkdir()
+    checkpoint_hashes: dict[str, str] = {}
+    code_provenance = {
+        "repository": "/tmp/repository",
+        "code_commit": "c" * 40,
+        "dirty_patch_sha256": "0" * 64,
+    }
+    for step in TRAINING_CHECKPOINT_STEPS:
+        checkpoint_path = training_run / f"checkpoint_step_{step}.pkl"
+        checkpoint_path.write_bytes(f"checkpoint-{step}".encode())
+        checkpoint_hashes[str(step)] = sha256_file(checkpoint_path)
     for step, update in EVALUATION_CHECKPOINTS.items():
         directory = root / f"update{update:03d}"
         carried_directory = directory / "carried"
         ordinary_directory = directory / "ordinary"
         carried_directory.mkdir(parents=True)
         ordinary_directory.mkdir(parents=True)
-        checkpoint_path = directory / "checkpoint.pkl"
-        checkpoint_path.write_bytes(f"checkpoint-{update}".encode())
+        checkpoint_path = training_run / f"checkpoint_step_{step}.pkl"
         checkpoint_hash = sha256_file(checkpoint_path)
         evidence_path = carried_directory / "paired_rollouts.npz"
-        evidence_path.write_bytes(f"paired-{update}".encode())
+        arrays = _paired_evidence()
+        for arm in ("parent", "expert"):
+            terminal_step = 11 if arm == "expert" and update == 32 else 10
+            arrays[f"{arm}_terminal"][:, terminal_step] = True
+            arrays[f"{arm}_alive"][:, terminal_step + 1 :] = False
+        np.savez_compressed(evidence_path, **arrays)
+        parent = [10] * 120
         candidate = [11] * 120 if update == 32 else parent
         carried = {
             "valid": True,
@@ -359,11 +377,12 @@ def _write_selection_fixture(root: Path) -> Path:
             "carried_regression_count": 0,
             "seed": 0,
             "solver_profile": "g1-4x5",
+            "code_provenance": code_provenance,
             "input_sha256": {
                 "parent_checkpoint": "1" * 64,
                 "parent_hparams": "2" * 64,
                 "candidate_checkpoint": checkpoint_hash,
-                "reference": "b" * 64,
+                "reference": EXPECTED_LAFAN_REFERENCE_SHA256,
                 "source_bank": "5" * 64,
                 "model": "6" * 64,
                 "controller": "7" * 64,
@@ -373,24 +392,30 @@ def _write_selection_fixture(root: Path) -> Path:
         }
         (carried_directory / "summary.json").write_text(json.dumps(carried))
         survival = [116, 63, 49, 39, 47]
+        ordinary_results = [
+            {"phase": phase, "steps": steps, "terminal": True}
+            for phase, steps in zip(
+                (0, 100, 200, 300, 400), survival, strict=True
+            )
+        ]
         ordinary = {
             "protocol": "g1-flax-dance-replay-free-five-phase-v1",
             "checkpoint_path": str(checkpoint_path),
             "checkpoint_sha256": checkpoint_hash,
             "reference_sha256": EXPECTED_LAFAN_REFERENCE_SHA256,
+            "reference_transitions": 499,
             "solver_profile": "g1-4x5",
+            "seed": 0,
+            "post_policy_action_clip": False,
+            "code_provenance": code_provenance,
             "actor_residual_preview_adapter": True,
             "actor_residual_preview_hidden": 256,
-            "results": [
-                {"phase": phase, "steps": steps, "terminal": True}
-                for phase, steps in zip(
-                    (0, 100, 200, 300, 400), survival, strict=True
-                )
-            ],
-            "summary": {
-                "phases": [0, 100, 200, 300, 400],
-                "survival": survival,
-            },
+            "results": ordinary_results,
+            "summary": build_phase_grid_summary(
+                ordinary_results,
+                phases=(0, 100, 200, 300, 400),
+                reference_transitions=499,
+            ),
         }
         (ordinary_directory / "phase_grid_summary.json").write_text(
             json.dumps(ordinary)
@@ -401,6 +426,9 @@ def _write_selection_fixture(root: Path) -> Path:
             {
                 "valid": True,
                 "protocol": "g1-zero-head-feature-transfer-training-v1",
+                "run_directory": str(training_run),
+                "checkpoint_steps": list(TRAINING_CHECKPOINT_STEPS),
+                "checkpoint_sha256_by_step": checkpoint_hashes,
             }
         )
     )
@@ -409,15 +437,27 @@ def _write_selection_fixture(root: Path) -> Path:
 
 def test_aggregate_selection_requires_all_hash_bound_carried_and_ordinary_evidence(
     tmp_path: Path,
+    monkeypatch,
 ):
-    from tools.evaluate_g1_zero_head_feature_transfer import aggregate_selection
+    from tools import evaluate_g1_zero_head_feature_transfer as evaluator
+
+    monkeypatch.setattr(
+        evaluator,
+        "validate_code_provenance",
+        lambda commit: {
+            "repository": "/tmp/repository",
+            "code_commit": commit,
+            "dirty_patch_sha256": "0" * 64,
+        },
+    )
 
     training = _write_selection_fixture(tmp_path)
     output = tmp_path / "selection.json"
-    manifest = aggregate_selection(
+    manifest = evaluator.aggregate_selection(
         evaluation_root=tmp_path,
         training_validation_path=training,
         output_path=output,
+        expected_code_commit="c" * 40,
     )
 
     assert manifest["valid"] is True
@@ -431,10 +471,11 @@ def test_aggregate_selection_requires_all_hash_bound_carried_and_ordinary_eviden
     phase["checkpoint_sha256"] = "f" * 64
     phase_path.write_text(json.dumps(phase))
     with pytest.raises(ValueError, match="phase-grid provenance"):
-        aggregate_selection(
+        evaluator.aggregate_selection(
             evaluation_root=tmp_path,
             training_validation_path=training,
             output_path=tmp_path / "bad.json",
+            expected_code_commit="c" * 40,
         )
 
 
@@ -452,6 +493,8 @@ def test_selection_cli_requires_training_evaluations_and_output():
             "/tmp/training.json",
             "--output",
             "/tmp/selection.json",
+            "--code-commit",
+            "d" * 40,
         ]
     )
     assert args.output == Path("/tmp/selection.json")

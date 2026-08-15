@@ -31,6 +31,7 @@ from src.envs.g1_tracking.solver_profiles import (
     solver_context,
 )
 from tools.compare_g1_tracking_residual import rollout
+from tools.build_g1_e023_carried_reset_bank import validate_code_commit
 from tools.evaluate_g1_rmr_phase_grid import build_phase_grid_summary
 from tools.evaluate_g1_tracking import (
     EVALUATION_ENV_VARIANTS,
@@ -65,10 +66,14 @@ def build_payload(
     post_policy_action_clip: bool = True,
     recovery_support_sha256: str | None = None,
     recovery_support_bounds: dict[str, int | float] | None = None,
+    seed: int = 0,
+    code_provenance: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """Build the immutable no-render phase-grid artifact."""
     return {
         "protocol": "g1-flax-dance-replay-free-five-phase-v1",
+        "seed": seed,
+        "code_provenance": code_provenance,
         "checkpoint_path": checkpoint_path,
         "checkpoint_sha256": checkpoint_sha256,
         "reference_path": reference_path,
@@ -268,6 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--phases", type=int, nargs=5, default=DEFAULT_PHASES)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--code-commit", default=None)
     parser.add_argument(
         "--env-variant",
         choices=EVALUATION_ENV_VARIANTS,
@@ -297,6 +303,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    code_provenance = None
+    if args.code_commit is not None:
+        repository = Path(__file__).resolve().parents[1]
+        commit = validate_code_commit(repository, args.code_commit)
+        code_provenance = {
+            "repository": str(repository),
+            "code_commit": commit,
+            "dirty_patch_sha256": hashlib.sha256(b"").hexdigest(),
+        }
     configure_jax()
     checkpoint_path = args.checkpoint.resolve()
     reference_path = args.reference_path.resolve()
@@ -502,6 +517,8 @@ def main() -> None:
             if recovery_support_report is not None
             else None
         ),
+        seed=args.seed,
+        code_provenance=code_provenance,
     )
     _write_json(args.output.resolve(), payload)
     print(json.dumps(payload["summary"], indent=2, sort_keys=True))

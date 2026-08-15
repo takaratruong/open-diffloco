@@ -14,6 +14,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--evaluation-root", type=Path, required=True)
     parser.add_argument("--training-validation", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--code-commit", required=True)
     return parser
 
 
@@ -23,6 +24,7 @@ def main() -> None:
         evaluation_root=args.evaluation_root,
         training_validation_path=args.training_validation,
         output_path=args.output,
+        expected_code_commit=args.code_commit,
     )
     print(json.dumps(manifest, indent=2, sort_keys=True))
 

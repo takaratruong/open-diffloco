@@ -34,6 +34,12 @@ def test_flax_phase_grid_payload_records_exact_suffix_completion():
         actor_residual_preview_adapter=True,
         actor_residual_preview_hidden=256,
         actor_residual_preview_trainable_parameter_count=91_677,
+        seed=0,
+        code_provenance={
+            "repository": "/tmp/repository",
+            "code_commit": "c" * 40,
+            "dirty_patch_sha256": "0" * 64,
+        },
     )
 
     assert payload["summary"]["survival"] == [499, 399, 299, 199, 99]
@@ -47,6 +53,8 @@ def test_flax_phase_grid_payload_records_exact_suffix_completion():
     assert payload["actor_residual_preview_trainable_parameter_count"] == 91_677
     assert payload["actor_assistance_conditioning_scale"] == 0.0
     assert payload["post_policy_action_clip"] is True
+    assert payload["seed"] == 0
+    assert payload["code_provenance"]["code_commit"] == "c" * 40
 
 
 def test_flax_phase_grid_parser_defaults_absolute_and_accepts_delta():
@@ -63,6 +71,10 @@ def test_flax_phase_grid_parser_defaults_absolute_and_accepts_delta():
     parser = build_parser()
 
     assert parser.parse_args(required).actor_reference_preview_mode is None
+    assert parser.parse_args(required).code_commit is None
+    assert parser.parse_args([*required, "--code-commit", "d" * 40]).code_commit == (
+        "d" * 40
+    )
     assert (
         parser.parse_args(
             [*required, "--actor-reference-preview-mode", "delta"]
