@@ -62,6 +62,35 @@ def test_imitation_loss_includes_correction_and_effective_action():
     assert float(wrong) > 0.0
 
 
+def test_fit_reports_loss_of_selected_post_update_params(monkeypatch):
+    import jax
+    import jax.numpy as jnp
+
+    import tools.run_g1_e034_recovery_expert as treatment
+    from src.algorithms.shac.residual_preview_adapter import PreviewResidualAdapter
+
+    monkeypatch.setattr(treatment, "TRAINING_UPDATES", 1)
+    expert = PreviewResidualAdapter(action_dim=2, hidden_dim=3)
+    frames = jnp.ones((4, 5), dtype=jnp.float32)
+    parent = jnp.zeros((4, 2), dtype=jnp.float32)
+    target = jnp.full((4, 2), 0.5, dtype=jnp.float32)
+    params = expert.init(jax.random.PRNGKey(0), frames[:1])
+
+    selected, _curve, reported_loss = treatment.fit_expert(
+        expert=expert,
+        initial_params=params,
+        frames=frames,
+        parent_actions=parent,
+        teacher_corrections=target,
+        teacher_effective_actions=target,
+    )
+    selected_loss = treatment.imitation_loss(
+        expert.apply(selected, frames), parent, target, target
+    )
+
+    assert reported_loss == pytest.approx(float(selected_loss), abs=1e-8)
+
+
 @pytest.mark.parametrize(
     ("candidate", "expected"),
     [

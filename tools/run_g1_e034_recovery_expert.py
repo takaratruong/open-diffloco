@@ -185,9 +185,11 @@ def fit_expert(
                 teacher_effective_actions,
             )
 
-        loss, gradients = jax.value_and_grad(loss_fn)(params)
+        _loss, gradients = jax.value_and_grad(loss_fn)(params)
         updates, next_state = optimizer.update(gradients, state, params)
-        return optax.apply_updates(params, updates), next_state, loss, gradients
+        next_params = optax.apply_updates(params, updates)
+        next_loss = loss_fn(next_params)
+        return next_params, next_state, next_loss, gradients
 
     params = initial_params
     best_params = initial_params
