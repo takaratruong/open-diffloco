@@ -5,6 +5,8 @@ import pytest
 
 from tools.build_g1_e034_recovery_teacher_dataset import (
     E034_SURVIVAL,
+    build_parser,
+    publish_teacher_dataset,
     validate_teacher_arrays,
 )
 
@@ -60,3 +62,42 @@ def test_teacher_dataset_fails_closed_on_invalid_evidence(mutation: str):
 
     with pytest.raises(ValueError):
         validate_teacher_arrays(arrays)
+
+
+def test_teacher_dataset_publication_is_hash_bound_and_manifest_last(tmp_path):
+    arrays = _valid_arrays()
+
+    manifest = publish_teacher_dataset(
+        output_directory=tmp_path,
+        arrays=arrays,
+        provenance={"code_commit": "a" * 40},
+    )
+
+    assert manifest["valid"] is True
+    assert len(manifest["dataset_sha256"]) == 64
+    assert (tmp_path / "e034_recovery_teacher_dataset.npz").is_file()
+    assert (tmp_path / "summary.json").is_file()
+
+
+def test_teacher_dataset_parser_requires_all_pinned_inputs():
+    args = build_parser().parse_args(
+        [
+            "--checkpoint",
+            "checkpoint.pkl",
+            "--hparams",
+            "hparams.json",
+            "--reference-path",
+            "reference.npz",
+            "--source-bank",
+            "bank.npz",
+            "--oracle-evidence",
+            "oracle.npz",
+            "--output-directory",
+            "output",
+            "--code-commit",
+            "a" * 40,
+        ]
+    )
+
+    assert args.seed == 0
+    assert args.oracle_evidence.name == "oracle.npz"
