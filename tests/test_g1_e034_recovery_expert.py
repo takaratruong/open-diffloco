@@ -91,6 +91,24 @@ def test_fit_reports_loss_of_selected_post_update_params(monkeypatch):
     assert reported_loss == pytest.approx(float(selected_loss), abs=1e-8)
 
 
+def test_parent_reproduction_allows_only_measured_layout_drift():
+    from tools.run_g1_e034_recovery_expert import (
+        validate_parent_action_reproduction,
+    )
+
+    expected = np.zeros((2, 2), dtype=np.float32)
+    observed = expected.copy()
+    observed[1, 1] = 3.35e-4
+
+    report = validate_parent_action_reproduction(observed, expected)
+
+    assert report["maximum"] == pytest.approx(3.35e-4)
+    with pytest.raises(ValueError, match="frozen policy"):
+        validate_parent_action_reproduction(
+            np.full((2, 2), 6e-4, dtype=np.float32), expected
+        )
+
+
 @pytest.mark.parametrize(
     ("candidate", "expected"),
     [
