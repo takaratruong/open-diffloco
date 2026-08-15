@@ -217,6 +217,32 @@ def _alive_from_terminals(terminals: np.ndarray) -> np.ndarray:
     return alive
 
 
+def _validate_forward_canonicalized_qpos(
+    actual: np.ndarray,
+    requested: np.ndarray,
+    *,
+    arm: str,
+) -> float:
+    """Allow only MJX forward's roundoff-scale root-quaternion normalization."""
+    if not (
+        np.array_equal(actual[:, :3], requested[:, :3])
+        and np.array_equal(actual[:, 7:], requested[:, 7:])
+    ):
+        raise ValueError(
+            f"paired {arm} initial qpos non-quaternion coordinates do not "
+            "match bank"
+        )
+    quaternion_delta = np.abs(actual[:, 3:7] - requested[:, 3:7])
+    if not np.allclose(
+        actual[:, 3:7], requested[:, 3:7], rtol=0.0, atol=1.0e-12
+    ):
+        raise ValueError(
+            f"paired {arm} initial root quaternion does not match bank after "
+            "bounded MJX forward canonicalization"
+        )
+    return float(np.max(quaternion_delta))
+
+
 def validate_paired_evidence(
     arrays: Mapping[str, np.ndarray],
 ) -> dict[str, object]:
@@ -266,11 +292,15 @@ def validate_paired_evidence(
         evidence["parent_phase"][:, 0], evidence["expert_phase"][:, 0]
     ):
         raise ValueError("paired initial phase does not match")
+    qpos_canonicalization = {
+        arm: _validate_forward_canonicalized_qpos(
+            evidence[f"{arm}_qpos"][:, 0],
+            evidence["initial_qpos"],
+            arm=arm,
+        )
+        for arm in ("parent", "expert")
+    }
     for arm in ("parent", "expert"):
-        if not np.array_equal(
-            evidence[f"{arm}_qpos"][:, 0], evidence["initial_qpos"]
-        ):
-            raise ValueError(f"paired {arm} initial qpos does not match bank")
         if not np.array_equal(
             evidence[f"{arm}_phase"][:, 0], evidence["initial_phase"]
         ):
@@ -307,6 +337,9 @@ def validate_paired_evidence(
     untouched = ~phase_zero
     return {
         "source_rows": [ROWS_PER_SOURCE] * len(SOURCE_PHASES),
+        "initial_qpos_max_abs_canonicalization": max(
+            qpos_canonicalization.values()
+        ),
         "parent_survival": parent_survival,
         "expert_survival": expert_survival,
         "parent_full_horizon_count": int(

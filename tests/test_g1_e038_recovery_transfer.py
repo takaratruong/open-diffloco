@@ -260,6 +260,30 @@ def test_paired_evidence_rejects_unpaired_state_or_nonfinite_tensor():
     with pytest.raises(ValueError, match="initial qpos"):
         validate_paired_evidence(arrays)
 
+
+def test_paired_evidence_allows_only_root_quaternion_forward_canonicalization():
+    from tools.evaluate_g1_e038_recovery_transfer import validate_paired_evidence
+
+    arrays = _paired_evidence()
+    for arm in ("parent", "expert"):
+        arrays[f"{arm}_qpos"][0, 0, 3] = np.nextafter(0.0, 1.0)
+
+    validation = validate_paired_evidence(arrays)
+
+    assert validation["initial_qpos_max_abs_canonicalization"] > 0.0
+
+    arrays = _paired_evidence()
+    for arm in ("parent", "expert"):
+        arrays[f"{arm}_qpos"][0, 0, 7] = np.nextafter(0.0, 1.0)
+    with pytest.raises(ValueError, match="non-quaternion"):
+        validate_paired_evidence(arrays)
+
+    arrays = _paired_evidence()
+    for arm in ("parent", "expert"):
+        arrays[f"{arm}_qpos"][0, 0, 3] = 2.0e-12
+    with pytest.raises(ValueError, match="root quaternion"):
+        validate_paired_evidence(arrays)
+
     arrays = _paired_evidence()
     arrays["parent_reward"][0, 0] = np.nan
     with pytest.raises(ValueError, match="finite"):
