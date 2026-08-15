@@ -97,6 +97,7 @@ def validate_preflight(
         "additional_updates": CONTINUATION_UPDATES,
         "checkpoint_steps": list(expected_checkpoint_steps()),
         "scientific_delta": ["resume_from", "total_steps"],
+        "fresh_initialization": False,
     }
 
 

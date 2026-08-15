@@ -78,6 +78,7 @@ def test_continuation_preflight_pins_parent_hashes(
         "resume_from",
         "total_steps",
     ]
+    assert report["fresh_initialization"] is False
 
 
 def test_continuation_parser_requires_resume_and_commit() -> None:
