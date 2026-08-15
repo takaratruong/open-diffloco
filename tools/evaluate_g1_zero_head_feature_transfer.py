@@ -78,6 +78,16 @@ def _integer_vector(
     return tuple(values)
 
 
+def _boolean_vector(values: object, *, length: int) -> tuple[bool, ...]:
+    if (
+        not isinstance(values, (list, tuple))
+        or len(values) != length
+        or any(not isinstance(value, bool) for value in values)
+    ):
+        raise ValueError("zero-head feature selection record is invalid")
+    return tuple(values)
+
+
 def select_checkpoint(
     records: Sequence[Mapping[str, object]],
     *,
@@ -94,7 +104,9 @@ def select_checkpoint(
         or tuple(sorted(updates)) != tuple(sorted(EVALUATION_UPDATES))
     ):
         raise ValueError("selection requires the four exact updates")
-    normalized: list[tuple[int, tuple[int, ...], tuple[int, ...]]] = []
+    normalized: list[
+        tuple[int, tuple[int, ...], tuple[int, ...], tuple[bool, ...]]
+    ] = []
     for record in records:
         update = record.get("update")
         if isinstance(update, bool) or not isinstance(update, int) or update < 1:
@@ -107,7 +119,10 @@ def select_checkpoint(
         ordinary = _integer_vector(
             record.get("ordinary_survival"), length=len(ORDINARY_FLOORS)
         )
-        normalized.append((update, carried, ordinary))
+        completed = _boolean_vector(
+            record.get("ordinary_completed"), length=len(ORDINARY_FLOORS)
+        )
+        normalized.append((update, carried, ordinary, completed))
     eligible = [
         row
         for row in normalized
@@ -130,10 +145,11 @@ def select_checkpoint(
             "selected_update": None,
             "selected_carried_survival": None,
             "selected_ordinary_survival": None,
+            "selected_ordinary_completed": None,
         }
 
     def key(row):
-        update, carried, ordinary = row
+        update, carried, ordinary, _completed = row
         return (
             sum(value >= HORIZON for value in carried[:24]),
             sum(value >= HORIZON for value in carried),
@@ -146,11 +162,8 @@ def select_checkpoint(
             -update,
         )
 
-    update, carried, ordinary = max(improved, key=key)
-    solved = all(value >= HORIZON for value in carried) and all(
-        value >= target
-        for value, target in zip(ordinary, COMPLETE_SUFFIXES, strict=True)
-    )
+    update, carried, ordinary, completed = max(improved, key=key)
+    solved = all(value >= HORIZON for value in carried) and all(completed)
     return {
         "valid": True,
         "outcome": (
@@ -162,6 +175,7 @@ def select_checkpoint(
         "selected_update": update,
         "selected_carried_survival": list(carried),
         "selected_ordinary_survival": list(ordinary),
+        "selected_ordinary_completed": list(completed),
     }
 
 
@@ -475,7 +489,7 @@ def _validate_ordinary_summary(
     *,
     checkpoint_sha256: str,
     code_provenance: Mapping[str, str],
-) -> tuple[int, ...]:
+) -> tuple[tuple[int, ...], tuple[bool, ...]]:
     expected_phases = (0, 100, 200, 300, 400)
     if (
         payload.get("protocol")
@@ -537,7 +551,7 @@ def _validate_ordinary_summary(
     )
     if dict(summary) != recomputed:
         raise ValueError("ordinary phase-grid summary does not recompute")
-    return steps
+    return steps, tuple(recomputed["completed_suffix"])
 
 
 def aggregate_selection(
@@ -596,7 +610,7 @@ def aggregate_selection(
             raise ValueError("carried evaluation manifest is invalid")
         input_hashes = _validate_digest_map(carried.get("input_sha256"))
         checkpoint_sha256 = input_hashes["candidate_checkpoint"]
-        ordinary_survival = _validate_ordinary_summary(
+        ordinary_survival, ordinary_completed = _validate_ordinary_summary(
             ordinary,
             checkpoint_sha256=checkpoint_sha256,
             code_provenance=code_provenance,
@@ -659,6 +673,7 @@ def aggregate_selection(
                 "update": update,
                 "carried_survival": list(candidate_survival),
                 "ordinary_survival": list(ordinary_survival),
+                "ordinary_completed": list(ordinary_completed),
             }
         )
         evaluation_hashes[str(update)] = {

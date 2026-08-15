@@ -9,11 +9,17 @@ import numpy as np
 import pytest
 
 
-def _record(update: int, carried: list[int], ordinary: list[int]):
+def _record(
+    update: int,
+    carried: list[int],
+    ordinary: list[int],
+    completed: list[bool] | None = None,
+):
     return {
         "update": update,
         "carried_survival": carried,
         "ordinary_survival": ordinary,
+        "ordinary_completed": completed if completed is not None else [False] * 5,
     }
 
 
@@ -42,7 +48,12 @@ def test_selector_reports_solve_insufficient_and_rejects_malformed():
     parent = [10] * 120
     solved = select_checkpoint(
         [
-            _record(8, [32] * 120, [499, 399, 299, 199, 99]),
+            _record(
+                8,
+                [32] * 120,
+                [499, 399, 299, 199, 99],
+                [True] * 5,
+            ),
             _record(16, [10] * 119 + [9], [116, 63, 49, 39, 47]),
             _record(32, [10] * 119 + [9], [116, 63, 49, 39, 47]),
             _record(64, [10] * 119 + [9], [116, 63, 49, 39, 47]),
@@ -50,6 +61,15 @@ def test_selector_reports_solve_insufficient_and_rejects_malformed():
         parent_survival=parent,
     )
     assert solved["outcome"] == "zero-head-features-solve"
+
+    terminal_at_end = select_checkpoint(
+        [
+            _record(update, [32] * 120, [499, 399, 299, 199, 99])
+            for update in (8, 16, 32, 64)
+        ],
+        parent_survival=parent,
+    )
+    assert terminal_at_end["outcome"] == "zero-head-features-advance"
 
     insufficient = select_checkpoint(
         [
