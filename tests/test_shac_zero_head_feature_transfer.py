@@ -68,7 +68,10 @@ def test_transplant_copies_only_hidden_features_and_keeps_zero_head():
     }
 
 
-@pytest.mark.parametrize("mutation", ("shape", "nonfinite", "template_head"))
+@pytest.mark.parametrize(
+    "mutation",
+    ("shape", "mutual_shape", "nonfinite", "template_head", "negative_zero"),
+)
 def test_transplant_fails_closed_on_invalid_source_or_template(mutation: str):
     from src.algorithms.shac.residual_preview_adapter import (
         transplant_zero_head_recovery_features,
@@ -78,10 +81,17 @@ def test_transplant_fails_closed_on_invalid_source_or_template(mutation: str):
     expert = copy.deepcopy(template)
     if mutation == "shape":
         expert["params"]["Dense_0"]["kernel"] = jnp.zeros((6, 4))
+    elif mutation == "mutual_shape":
+        for params in (template, expert):
+            params["params"]["Dense_0"]["bias"] = jnp.zeros((3,))
     elif mutation == "nonfinite":
         expert["params"]["Dense_0"]["bias"] = jnp.full((4,), jnp.nan)
-    else:
+    elif mutation == "template_head":
         template["params"]["Dense_1"]["bias"] = jnp.ones((2,))
+    else:
+        template["params"]["Dense_1"]["bias"] = jnp.full(
+            (2,), -0.0, dtype=jnp.float32
+        )
 
     with pytest.raises(ValueError, match="zero-head recovery feature"):
         transplant_zero_head_recovery_features(template, expert)
@@ -141,5 +151,32 @@ def test_feature_transfer_resume_settings_start_once_and_then_match_exactly():
             requested_sha256=digest,
             residual_adapter_enabled=True,
             residual_adapter_upgrade=False,
+            is_resume=True,
+        )
+    with pytest.raises(ValueError, match="requires a resumed checkpoint"):
+        resolve_zero_head_feature_transfer_resume_setting(
+            None,
+            requested_path=path,
+            requested_sha256=digest,
+            residual_adapter_enabled=True,
+            residual_adapter_upgrade=False,
+            is_resume=False,
+        )
+    with pytest.raises(ValueError, match="plain parent"):
+        resolve_zero_head_feature_transfer_resume_setting(
+            treated,
+            requested_path=path,
+            requested_sha256=digest,
+            residual_adapter_enabled=True,
+            residual_adapter_upgrade=True,
+            is_resume=True,
+        )
+    with pytest.raises(ValueError, match="hexadecimal"):
+        resolve_zero_head_feature_transfer_resume_setting(
+            {"actor_residual_preview_adapter": False},
+            requested_path=path,
+            requested_sha256="z" * 64,
+            residual_adapter_enabled=True,
+            residual_adapter_upgrade=True,
             is_resume=True,
         )

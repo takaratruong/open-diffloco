@@ -91,7 +91,9 @@ from src.algorithms.shac.residual_preview_adapter import (
     migrate_residual_adapter_assistance_conditioning,
     residual_adapter_migration_report,
     residual_muon_migration_report,
+    resolve_zero_head_feature_transfer_resume_setting,
     split_residual_adapter_params,
+    transplant_zero_head_recovery_features,
 )
 from src.algorithms.shac.progressive_recovery_expert import (
     RecoverySupport,
@@ -205,6 +207,21 @@ def persist_residual_adapter_migration_report(
     if report.get("valid") is not True:
         raise ValueError("residual adapter migration equivalence failed")
     path = Path(save_dir) / "residual_adapter_migration.json"
+    temp_path = path.with_name(f".{path.name}.tmp")
+    with temp_path.open("w", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    os.replace(temp_path, path)
+    return path
+
+
+def persist_zero_head_feature_transfer_report(
+    save_dir: str | Path, report: dict[str, object]
+) -> Path:
+    """Atomically publish the hash-bound zero-head feature transplant audit."""
+    if report.get("valid") is not True:
+        raise ValueError("zero-head recovery feature transfer failed")
+    path = Path(save_dir) / "zero_head_feature_transfer.json"
     temp_path = path.with_name(f".{path.name}.tmp")
     with temp_path.open("w", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2, sort_keys=True)
@@ -927,6 +944,35 @@ def _sha256_file(path: Path, block_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+def load_zero_head_recovery_feature_adapter(
+    path: str | Path,
+    *,
+    expected_sha256: str,
+    template_params,
+) -> tuple[object, dict[str, object]]:
+    """Load one immutable expert and copy only its hidden representation."""
+    resolved = Path(path).resolve()
+    if not resolved.is_file():
+        raise ValueError("zero-head recovery feature source does not exist")
+    if (
+        not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or _sha256_file(resolved) != expected_sha256
+    ):
+        raise ValueError("zero-head recovery feature source SHA-256 does not match")
+    with resolved.open("rb") as stream:
+        expert_params = pickle.load(stream)
+    candidate, report = transplant_zero_head_recovery_features(
+        template_params, expert_params
+    )
+    report = {
+        **report,
+        "source_path": str(resolved),
+        "source_sha256": expected_sha256,
+    }
+    return candidate, report
+
+
 def load_recovery_support_artifact(
     path: str | Path, *, expected_sha256: str
 ) -> tuple[RecoverySupport, dict[str, object]]:
@@ -1543,6 +1589,8 @@ def train(
     actor_residual_preview_hidden: int = 256,
     actor_residual_preview_optimizer: str = "adam",
     allow_resume_actor_residual_preview_adapter_start: bool = False,
+    actor_residual_preview_initial_adapter_path: str | None = None,
+    actor_residual_preview_initial_adapter_sha256: str | None = None,
     actor_state_gated_recovery_support_path: str | None = None,
     actor_state_gated_recovery_support_sha256: str | None = None,
     allow_resume_actor_state_gated_recovery_start: bool = False,
@@ -2046,6 +2094,21 @@ def train(
             and resumed_hparams is not None
             and resumed_hparams.get("actor_residual_preview_adapter") is False
             and allow_resume_actor_residual_preview_adapter_start
+        )
+        (
+            actor_residual_preview_initial_adapter_path,
+            actor_residual_preview_initial_adapter_sha256,
+        ) = resolve_zero_head_feature_transfer_resume_setting(
+            resumed_hparams,
+            requested_path=(
+                actor_residual_preview_initial_adapter_path
+            ),
+            requested_sha256=(
+                actor_residual_preview_initial_adapter_sha256
+            ),
+            residual_adapter_enabled=actor_residual_preview_adapter,
+            residual_adapter_upgrade=residual_adapter_upgrade,
+            is_resume=True,
         )
         (
             actor_state_gated_recovery_support_path,
@@ -3852,6 +3915,22 @@ def train(
                         (1, env.actor_frame_obs_dim), dtype=jp.float32
                     ),
                 )
+                zero_head_feature_report = None
+                if actor_residual_preview_initial_adapter_path is not None:
+                    if actor_residual_preview_initial_adapter_sha256 is None:
+                        raise ValueError(
+                            "zero-head recovery feature SHA-256 is required"
+                        )
+                    (
+                        adapter_params,
+                        zero_head_feature_report,
+                    ) = load_zero_head_recovery_feature_adapter(
+                        actor_residual_preview_initial_adapter_path,
+                        expected_sha256=(
+                            actor_residual_preview_initial_adapter_sha256
+                        ),
+                        template_params=adapter_params,
+                    )
                 composite_params = FrozenPreviewResidualParams(
                     parent=parent_params,
                     adapter=adapter_params,
@@ -3907,6 +3986,40 @@ def train(
                 persist_residual_adapter_migration_report(
                     save_dir, residual_adapter_report
                 )
+                if zero_head_feature_report is not None:
+                    zero_head_feature_report = {
+                        **zero_head_feature_report,
+                        "parent_parameters_exact": (
+                            residual_adapter_report["parent_parameters_exact"]
+                        ),
+                        "initial_action_exact": bool(
+                            residual_adapter_report["residual_action_zero"]
+                            and residual_adapter_report[
+                                "reconstructed_parent_exact"
+                            ]
+                            and residual_adapter_report[
+                                "max_action_absolute_error"
+                            ]
+                            == 0.0
+                        ),
+                        "adapter_optimizer_moments_zero": bool(
+                            residual_adapter_report["adapter_mu_zero"]
+                            and residual_adapter_report["adapter_nu_zero"]
+                        ),
+                    }
+                    zero_head_feature_report["valid"] = bool(
+                        zero_head_feature_report["valid"]
+                        and zero_head_feature_report[
+                            "parent_parameters_exact"
+                        ]
+                        and zero_head_feature_report["initial_action_exact"]
+                        and zero_head_feature_report[
+                            "adapter_optimizer_moments_zero"
+                        ]
+                    )
+                    persist_zero_head_feature_transfer_report(
+                        save_dir, zero_head_feature_report
+                    )
                 if residual_muon_report is not None:
                     persist_residual_muon_migration_report(
                         save_dir, residual_muon_report
@@ -4224,6 +4337,12 @@ def train(
         ),
         "actor_residual_preview_optimizer": (
             actor_residual_preview_optimizer
+        ),
+        "actor_residual_preview_initial_adapter_path": (
+            actor_residual_preview_initial_adapter_path
+        ),
+        "actor_residual_preview_initial_adapter_sha256": (
+            actor_residual_preview_initial_adapter_sha256
         ),
         "actor_state_gated_recovery": recovery_support is not None,
         "actor_state_gated_recovery_support_path": (

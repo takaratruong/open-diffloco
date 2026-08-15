@@ -259,14 +259,37 @@ def transplant_zero_head_recovery_features(
         expert_aux.dense1_kernel,
         expert_aux.dense1_bias,
     )
-    if any(
+    def internally_compatible(values) -> bool:
+        dense0_kernel, dense0_bias, dense1_kernel, dense1_bias = values
+        return bool(
+            dense0_kernel.ndim == 2
+            and dense0_kernel.shape[0] > 0
+            and dense0_kernel.shape[1] > 0
+            and dense0_bias.shape == (dense0_kernel.shape[1],)
+            and dense1_bias.ndim == 1
+            and dense1_bias.shape[0] > 0
+            and dense1_kernel.shape
+            == (dense0_kernel.shape[1], dense1_bias.shape[0])
+            and all(
+                np.issubdtype(np.asarray(value).dtype, np.floating)
+                for value in values
+            )
+        )
+
+    if not internally_compatible(template_arrays) or not internally_compatible(
+        expert_arrays
+    ) or any(
         left.shape != right.shape
         for left, right in zip(template_arrays, expert_arrays, strict=True)
     ) or not all(np.isfinite(np.asarray(value)).all() for value in expert_arrays):
         raise ValueError("zero-head recovery feature source does not match template")
-    if not (
-        np.all(np.asarray(template_aux.dense1_kernel) == 0.0)
-        and np.all(np.asarray(template_aux.dense1_bias) == 0.0)
+    template_head = (
+        np.asarray(template_aux.dense1_kernel),
+        np.asarray(template_aux.dense1_bias),
+    )
+    if not all(
+        value.tobytes() == np.zeros_like(value).tobytes()
+        for value in template_head
     ):
         raise ValueError("zero-head recovery feature template head is not zero")
     candidate = merge_residual_adapter_params(
@@ -289,8 +312,10 @@ def transplant_zero_head_recovery_features(
         )
     )
     output_head_zero = bool(
-        np.all(np.asarray(candidate_aux.dense1_kernel) == 0.0)
-        and np.all(np.asarray(candidate_aux.dense1_bias) == 0.0)
+        np.asarray(candidate_aux.dense1_kernel).tobytes()
+        == np.zeros_like(np.asarray(candidate_aux.dense1_kernel)).tobytes()
+        and np.asarray(candidate_aux.dense1_bias).tobytes()
+        == np.zeros_like(np.asarray(candidate_aux.dense1_bias)).tobytes()
     )
     valid = hidden_kernel_exact and hidden_bias_exact and output_head_zero
     if not valid:
@@ -328,9 +353,20 @@ def resolve_zero_head_feature_transfer_resume_setting(
         or len(requested_sha256) != 64
     ):
         raise ValueError("zero-head recovery feature transfer requires path and SHA")
+    if requested:
+        try:
+            int(requested_sha256, 16)
+        except ValueError as error:
+            raise ValueError(
+                "zero-head recovery feature SHA must be hexadecimal"
+            ) from error
     if requested and not residual_adapter_enabled:
         raise ValueError("zero-head recovery feature transfer requires residual adapter")
     if not is_resume:
+        if requested:
+            raise ValueError(
+                "zero-head recovery feature transfer requires a resumed checkpoint"
+            )
         return requested_path, requested_sha256
     if resumed_hparams is None:
         raise ValueError("zero-head recovery feature resume metadata is missing")
@@ -341,7 +377,14 @@ def resolve_zero_head_feature_transfer_resume_setting(
         "actor_residual_preview_initial_adapter_sha256"
     )
     saved = saved_path is not None or saved_sha256 is not None
+    saved_adapter = resumed_hparams.get("actor_residual_preview_adapter")
+    if not isinstance(saved_adapter, bool):
+        raise ValueError("zero-head recovery feature parent metadata is invalid")
     if residual_adapter_upgrade:
+        if saved_adapter is not False:
+            raise ValueError(
+                "zero-head recovery feature upgrade requires a plain parent"
+            )
         if saved:
             raise ValueError("zero-head recovery feature parent metadata is invalid")
         return requested_path, requested_sha256
