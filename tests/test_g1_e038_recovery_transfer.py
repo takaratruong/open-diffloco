@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import inspect
+
 import numpy as np
 import pytest
 
@@ -164,3 +167,151 @@ def test_zero_seed_is_enforced():
     assert build_parser().parse_args([]).seed == 0
     with pytest.raises(Exception, match="exactly zero"):
         _zero_seed("1")
+
+
+def _paired_evidence() -> dict[str, np.ndarray]:
+    arrays: dict[str, np.ndarray] = {
+        "source_start_phase": _source_start_phase(),
+    }
+    for arm in ("parent", "expert"):
+        arrays.update(
+            {
+                f"{arm}_qpos": np.zeros((120, HORIZON, 36), dtype=np.float64),
+                f"{arm}_phase": np.zeros((120, HORIZON), dtype=np.int32),
+                f"{arm}_parent_action": np.zeros(
+                    (120, HORIZON, 29), dtype=np.float64
+                ),
+                f"{arm}_correction": np.zeros(
+                    (120, HORIZON, 29), dtype=np.float64
+                ),
+                f"{arm}_raw_action": np.zeros(
+                    (120, HORIZON, 29), dtype=np.float64
+                ),
+                f"{arm}_effective_action": np.zeros(
+                    (120, HORIZON, 29), dtype=np.float64
+                ),
+                f"{arm}_alive": np.ones((120, HORIZON), dtype=bool),
+                f"{arm}_terminal": np.zeros((120, HORIZON), dtype=bool),
+                f"{arm}_reward": np.zeros((120, HORIZON), dtype=np.float64),
+                f"{arm}_normalized_termination_errors": np.zeros(
+                    (120, HORIZON, 4), dtype=np.float64
+                ),
+            }
+        )
+    return arrays
+
+
+def test_paired_evidence_requires_exact_tensors_and_action_boundary():
+    from tools.evaluate_g1_e038_recovery_transfer import validate_paired_evidence
+
+    arrays = _paired_evidence()
+    arrays["expert_correction"][0, 0, 0] = 1.5
+    arrays["expert_raw_action"][0, 0, 0] = 1.5
+    arrays["expert_effective_action"][0, 0, 0] = 1.0
+
+    validation = validate_paired_evidence(arrays)
+
+    assert validation["parent_survival"] == [HORIZON] * 120
+    assert validation["expert_survival"] == [HORIZON] * 120
+    assert validation["source_rows"] == [24] * 5
+    assert validation["phase_zero_expert_successes"] == 24
+    assert validation["untouched_newly_recovered"] == 0
+    assert validation["any_survival_regression"] is False
+
+    arrays["expert_effective_action"][0, 0, 0] = 0.9999999999999999
+    with pytest.raises(ValueError, match="effective action"):
+        validate_paired_evidence(arrays)
+
+
+def test_paired_evidence_rejects_unpaired_state_or_nonfinite_tensor():
+    from tools.evaluate_g1_e038_recovery_transfer import validate_paired_evidence
+
+    arrays = _paired_evidence()
+    arrays["expert_qpos"][0, 0, 0] = 1.0
+    with pytest.raises(ValueError, match="initial qpos"):
+        validate_paired_evidence(arrays)
+
+    arrays = _paired_evidence()
+    arrays["parent_reward"][0, 0] = np.nan
+    with pytest.raises(ValueError, match="finite"):
+        validate_paired_evidence(arrays)
+
+
+def test_publish_evaluation_writes_hash_bound_manifest_after_evidence(tmp_path):
+    from tools.evaluate_g1_e038_recovery_transfer import publish_evaluation
+    from tools.prepare_g1_rmr_reference import sha256_file
+
+    manifest = publish_evaluation(
+        output_directory=tmp_path,
+        arrays=_paired_evidence(),
+        provenance={
+            "code_commit": "abc123",
+            "input_sha256": {
+                "parent_checkpoint": "a" * 64,
+                "hparams": "b" * 64,
+                "reference": "c" * 64,
+                "source_bank": "d" * 64,
+                "expert_checkpoint": "e" * 64,
+            },
+            "parameter_sha256_before": {
+                "parent": "f" * 64,
+                "normalizer": "0" * 64,
+                "expert": "1" * 64,
+            },
+            "parameter_sha256_after": {
+                "parent": "f" * 64,
+                "normalizer": "0" * 64,
+                "expert": "1" * 64,
+            },
+        },
+    )
+
+    evidence_path = tmp_path / "paired_rollouts.npz"
+    summary_path = tmp_path / "summary.json"
+    assert evidence_path.is_file()
+    assert summary_path.is_file()
+    assert summary_path.stat().st_mtime_ns >= evidence_path.stat().st_mtime_ns
+    assert manifest["paired_rollouts_sha256"] == sha256_file(evidence_path)
+    assert manifest["parent_survival"] == [HORIZON] * 120
+    assert manifest["expert_survival"] == [HORIZON] * 120
+    assert json.loads(summary_path.read_text(encoding="utf-8")) == manifest
+
+
+def test_parameter_immutability_is_bit_exact():
+    from tools.evaluate_g1_e038_recovery_transfer import (
+        parameter_tree_sha256,
+        validate_parameter_immutability,
+    )
+
+    before = {"layer": {"weight": np.asarray([1.0, 2.0])}}
+    unchanged = {"layer": {"weight": np.asarray([1.0, 2.0])}}
+    changed = {"layer": {"weight": np.asarray([1.0, 2.000000000000001])}}
+
+    digest = parameter_tree_sha256(before)
+    hashes = {"parent": digest, "normalizer": digest, "expert": digest}
+    assert validate_parameter_immutability(hashes, hashes)
+    with pytest.raises(ValueError, match="parameters changed"):
+        validate_parameter_immutability(
+            hashes,
+            {
+                "parent": digest,
+                "normalizer": digest,
+                "expert": parameter_tree_sha256(changed),
+            },
+        )
+    assert digest == parameter_tree_sha256(unchanged)
+
+
+def test_run_evaluation_exposes_all_immutable_inputs_and_output_directory():
+    from tools.evaluate_g1_e038_recovery_transfer import run_evaluation
+
+    assert set(inspect.signature(run_evaluation).parameters) == {
+        "checkpoint_path",
+        "hparams_path",
+        "reference_path",
+        "bank_path",
+        "expert_checkpoint_path",
+        "output_directory",
+        "seed",
+        "code_commit",
+    }
