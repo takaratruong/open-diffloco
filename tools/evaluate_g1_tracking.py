@@ -13,6 +13,10 @@ import jax.numpy as jnp
 import mujoco
 import numpy as np
 
+from src.algorithms.shac.algorithm import load_recovery_support_artifact
+from src.algorithms.shac.progressive_recovery_expert import (
+    apply_state_gated_recovery,
+)
 from src.algorithms.shac.residual_preview_adapter import (
     FrozenPreviewResidualParams,
     PreviewResidualAdapter,
@@ -438,6 +442,10 @@ def _load_policy(
             )
 
             class FrozenResidualCheckpointActor:
+                def __init__(self):
+                    self.parent_actor = parent_actor
+                    self.residual_actor = residual_actor
+
                 def apply(self, params, observations):
                     action, _, _ = apply_frozen_preview_residual(
                         parent_actor,
@@ -514,6 +522,9 @@ def build_parser() -> argparse.ArgumentParser:
     """Builds the replay-free evaluation CLI."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument(
+        "--actor-state-gated-recovery-support", type=Path
+    )
     parser.add_argument("--rmr-action-tape", type=Path)
     parser.add_argument("--rmr-policy-checkpoint", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -761,6 +772,13 @@ def main() -> None:
             "--residual-action-scale requires both --checkpoint and "
             "--rmr-policy-checkpoint"
         )
+    if (
+        args.actor_state_gated_recovery_support is not None
+        and args.checkpoint is None
+    ):
+        parser.error(
+            "--actor-state-gated-recovery-support requires --checkpoint"
+        )
     actor = actor_params = normalizer_state = None
     full_rmr_actor = None
     action_tape = None
@@ -795,6 +813,33 @@ def main() -> None:
             actor_zero_output=not args.random_actor_output_head,
             training_initialization=args.training_initialization,
         )
+    recovery_support = None
+    recovery_support_report = None
+    if args.actor_state_gated_recovery_support is not None:
+        if not isinstance(actor_params, FrozenPreviewResidualParams):
+            parser.error(
+                "state-gated recovery requires a frozen residual checkpoint"
+            )
+        hparams_path = args.checkpoint.resolve().with_name("hparams.json")
+        if not hparams_path.is_file():
+            parser.error("state-gated recovery requires sibling hparams.json")
+        recovery_hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
+        expected_support_sha256 = recovery_hparams.get(
+            "actor_state_gated_recovery_support_sha256"
+        )
+        if not recovery_hparams.get("actor_state_gated_recovery") or not isinstance(
+            expected_support_sha256, str
+        ):
+            parser.error("checkpoint omits state-gated recovery provenance")
+        try:
+            recovery_support, recovery_support_report = (
+                load_recovery_support_artifact(
+                    args.actor_state_gated_recovery_support.resolve(),
+                    expected_sha256=expected_support_sha256,
+                )
+            )
+        except ValueError as error:
+            parser.error(str(error))
     evaluation_key = jax.random.PRNGKey(args.seed)
     reset_key, action_noise_key = jax.random.split(evaluation_key)
     if not args.training_distribution_rollout:
@@ -837,6 +882,8 @@ def main() -> None:
     joint_velocities = []
     reference_joint_positions = []
     position_targets = []
+    recovery_gates = []
+    gated_residual_actions = []
 
     try:
         remaining = remaining_reference_transitions(
@@ -905,10 +952,32 @@ def main() -> None:
                 normalizer_state,
                 policy_obs,
             ).astype(jnp.float32)
-            action = scale_policy_action(
-                actor.apply(actor_params, normalized).astype(jnp.float64),
-                args.action_gain,
-            )
+            if recovery_support is not None:
+                (
+                    gated_action,
+                    _parent_action,
+                    gated_residual,
+                    recovery_gate,
+                ) = apply_state_gated_recovery(
+                    actor.parent_actor,
+                    actor.residual_actor,
+                    actor_params,
+                    normalized,
+                    state.info["phase"],
+                    recovery_support,
+                    history_len=env.actor_history_len,
+                    treatment_frame_dim=env.actor_frame_obs_dim,
+                )
+                recovery_gates.append(np.asarray(recovery_gate))
+                gated_residual_actions.append(np.asarray(gated_residual))
+                action = scale_policy_action(
+                    gated_action.astype(jnp.float64), args.action_gain
+                )
+            else:
+                action = scale_policy_action(
+                    actor.apply(actor_params, normalized).astype(jnp.float64),
+                    args.action_gain,
+                )
         action_mean = action
         action_means.append(np.asarray(action_mean))
         if args.training_distribution_rollout:
@@ -1011,6 +1080,8 @@ def main() -> None:
         joint_velocity=np.asarray(joint_velocities),
         reference_joint_position=np.asarray(reference_joint_positions),
         position_target=np.asarray(position_targets),
+        recovery_gate=np.asarray(recovery_gates),
+        gated_residual_action=np.asarray(gated_residual_actions),
     )
     rollout_name = (
         "training_rollout.mp4"
@@ -1133,6 +1204,48 @@ def main() -> None:
             0.0
             if isinstance(actor_params, FrozenPreviewResidualParams)
             else None
+        ),
+        "actor_state_gated_recovery": recovery_support is not None,
+        "actor_state_gated_recovery_support_sha256": (
+            recovery_support_report["sha256"]
+            if recovery_support_report is not None
+            else None
+        ),
+        "actor_state_gated_recovery_support_bounds": (
+            {
+                "radius": recovery_support_report["radius"],
+                "phase_min": recovery_support_report["phase_min"],
+                "phase_max": recovery_support_report["phase_max"],
+                "taper": recovery_support_report["taper"],
+            }
+            if recovery_support_report is not None
+            else None
+        ),
+        "recovery_gate_active_steps": (
+            int(np.sum(np.asarray(recovery_gates) > 0.0))
+            if recovery_support is not None
+            else 0
+        ),
+        "recovery_gate_activation_fraction": (
+            float(np.mean(np.asarray(recovery_gates) > 0.0))
+            if recovery_support is not None
+            else 0.0
+        ),
+        "recovery_gate_max": (
+            float(np.max(np.asarray(recovery_gates)))
+            if recovery_support is not None
+            else 0.0
+        ),
+        "recovery_gated_residual_rms": (
+            float(
+                np.sqrt(
+                    np.mean(
+                        np.square(np.asarray(gated_residual_actions))
+                    )
+                )
+            )
+            if recovery_support is not None
+            else 0.0
         ),
         **action_summary,
         **stability_summary,

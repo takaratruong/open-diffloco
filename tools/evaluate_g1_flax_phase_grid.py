@@ -15,6 +15,11 @@ import jax.numpy as jnp
 
 from src.core.data_structures import Normalizer
 from src.core.networks import Actor
+from src.algorithms.shac.algorithm import load_recovery_support_artifact
+from src.algorithms.shac.progressive_recovery_expert import (
+    RecoverySupport,
+    apply_state_gated_recovery,
+)
 from src.algorithms.shac.residual_preview_adapter import (
     FrozenPreviewResidualParams,
     PreviewResidualAdapter,
@@ -58,6 +63,8 @@ def build_payload(
     actor_residual_preview_hidden: int = 256,
     actor_residual_preview_trainable_parameter_count: int = 0,
     post_policy_action_clip: bool = True,
+    recovery_support_sha256: str | None = None,
+    recovery_support_bounds: dict[str, int | float] | None = None,
 ) -> dict[str, object]:
     """Build the immutable no-render phase-grid artifact."""
     return {
@@ -78,6 +85,9 @@ def build_payload(
         ),
         "actor_assistance_conditioning_scale": 0.0,
         "post_policy_action_clip": post_policy_action_clip,
+        "actor_state_gated_recovery": recovery_support_sha256 is not None,
+        "actor_state_gated_recovery_support_sha256": recovery_support_sha256,
+        "actor_state_gated_recovery_support_bounds": recovery_support_bounds,
         "results": results,
         "summary": build_phase_grid_summary(
             results,
@@ -195,6 +205,53 @@ def evaluate_actor_action(
     return candidate
 
 
+def evaluate_gated_actor_action(
+    parent_actor,
+    residual_actor: PreviewResidualAdapter,
+    actor_params: FrozenPreviewResidualParams,
+    normalized_observations: jax.Array,
+    phases: jax.Array,
+    support: RecoverySupport,
+    *,
+    history_len: int,
+    treatment_frame_dim: int,
+):
+    """Apply a recovery expert with the exact pre-step phase."""
+    return apply_state_gated_recovery(
+        parent_actor,
+        residual_actor,
+        actor_params,
+        normalized_observations,
+        phases,
+        support,
+        history_len=history_len,
+        treatment_frame_dim=treatment_frame_dim,
+    )
+
+
+def load_checkpoint_recovery_support(
+    checkpoint_path: Path, support_path: Path
+) -> tuple[RecoverySupport, dict[str, object]]:
+    """Bind evaluator support to the candidate checkpoint hparams."""
+    hparams_path = checkpoint_path.resolve().with_name("hparams.json")
+    if not hparams_path.is_file():
+        raise ValueError("gated recovery requires sibling hparams.json")
+    hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
+    if not isinstance(hparams, dict) or not hparams.get(
+        "actor_state_gated_recovery", False
+    ):
+        raise ValueError("checkpoint is not a state-gated recovery treatment")
+    expected_sha256 = hparams.get(
+        "actor_state_gated_recovery_support_sha256"
+    )
+    if not isinstance(expected_sha256, str):
+        raise ValueError("checkpoint recovery support SHA-256 is missing")
+    support, report = load_recovery_support_artifact(
+        support_path.resolve(), expected_sha256=expected_sha256
+    )
+    return support, report
+
+
 def prepare_phase_grid_action(
     action: jax.Array, *, clip_sampled_actor_actions: bool
 ) -> jax.Array:
@@ -226,6 +283,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--actor-residual-preview-hidden", type=int, default=256
+    )
+    parser.add_argument(
+        "--actor-state-gated-recovery-support", type=Path
     )
     parser.add_argument(
         "--solver-profile",
@@ -284,6 +344,15 @@ def main() -> None:
     ):
         raise ValueError("phase grid requires five unique valid phases")
     residual_actor = None
+    recovery_support = None
+    recovery_support_report = None
+    if (
+        args.actor_state_gated_recovery_support is not None
+        and not args.actor_residual_preview_adapter
+    ):
+        raise ValueError(
+            "state-gated recovery evaluation requires the residual adapter"
+        )
     if args.actor_residual_preview_adapter:
         with checkpoint_path.open("rb") as stream:
             checkpoint_state = pickle.load(stream)
@@ -304,26 +373,51 @@ def main() -> None:
             hidden_dim=args.actor_residual_preview_hidden,
         )
         normalizer_state = checkpoint_state.normalizer
+        if args.actor_state_gated_recovery_support is not None:
+            recovery_support, recovery_support_report = (
+                load_checkpoint_recovery_support(
+                    checkpoint_path,
+                    args.actor_state_gated_recovery_support,
+                )
+            )
     else:
         actor, actor_params, normalizer_state = _load_policy(
             env, checkpoint_path, args.seed
         )
     normalizer = Normalizer(env.actor_frame_obs_dim)
 
+    gate_trace: list[float] = []
+    gated_residual_trace: list[jax.Array] = []
+
     def action(state):
         normalized = env.normalize_actor_obs(
             normalizer, normalizer_state, state.obs
         ).astype(jnp.float32)
+        if recovery_support is not None:
+            candidate, _, gated_residual, gate = evaluate_gated_actor_action(
+                actor,
+                residual_actor,
+                actor_params,
+                normalized,
+                state.info["phase"],
+                recovery_support,
+                history_len=ACTOR_HISTORY_LEN,
+                treatment_frame_dim=env.actor_frame_obs_dim,
+            )
+            gate_trace.append(float(gate))
+            gated_residual_trace.append(jnp.asarray(gated_residual))
+        else:
+            candidate = evaluate_actor_action(
+                actor,
+                actor_params,
+                normalized,
+                residual_actor=residual_actor,
+                history_len=ACTOR_HISTORY_LEN,
+                treatment_frame_dim=env.actor_frame_obs_dim,
+            )
         return prepare_phase_grid_action(
             scale_policy_action(
-                evaluate_actor_action(
-                    actor,
-                    actor_params,
-                    normalized,
-                    residual_actor=residual_actor,
-                    history_len=ACTOR_HISTORY_LEN,
-                    treatment_frame_dim=env.actor_frame_obs_dim,
-                ),
+                candidate,
                 1.0,
             ),
             clip_sampled_actor_actions=getattr(
@@ -336,6 +430,8 @@ def main() -> None:
     results = []
     with solver_context(profile):
         for phase in phases:
+            gate_trace.clear()
+            gated_residual_trace.clear()
             result = rollout(
                 env,
                 action,
@@ -344,6 +440,21 @@ def main() -> None:
                 max_steps=reference_transitions - phase,
                 step_fn=compiled_step,
             )
+            if recovery_support is not None:
+                gate_values = jnp.asarray(gate_trace)
+                residual_values = jnp.asarray(gated_residual_trace)
+                result.update(
+                    {
+                        "gate_active_steps": int(jnp.sum(gate_values > 0.0)),
+                        "gate_activation_fraction": float(
+                            jnp.mean(gate_values > 0.0)
+                        ),
+                        "gate_max": float(jnp.max(gate_values)),
+                        "gated_residual_rms": float(
+                            jnp.sqrt(jnp.mean(jnp.square(residual_values)))
+                        ),
+                    }
+                )
             results.append({"phase": phase, **result})
     payload = build_payload(
         results,
@@ -375,6 +486,21 @@ def main() -> None:
                 "clip_sampled_actor_actions",
                 getattr(env, "squash_actor_actions", True),
             )
+        ),
+        recovery_support_sha256=(
+            recovery_support_report["sha256"]
+            if recovery_support_report is not None
+            else None
+        ),
+        recovery_support_bounds=(
+            {
+                "radius": recovery_support_report["radius"],
+                "phase_min": recovery_support_report["phase_min"],
+                "phase_max": recovery_support_report["phase_max"],
+                "taper": recovery_support_report["taper"],
+            }
+            if recovery_support_report is not None
+            else None
         ),
     )
     _write_json(args.output.resolve(), payload)

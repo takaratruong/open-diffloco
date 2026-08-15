@@ -1,3 +1,6 @@
+from pathlib import Path
+
+
 def _row(phase, steps, terminal=False):
     return {
         "phase": phase,
@@ -80,6 +83,17 @@ def test_flax_phase_grid_parser_defaults_absolute_and_accepts_delta():
     )
     assert upstream.env_variant == (
         "g1_tracking_rmr_50hz_upstream_action_penalty"
+    )
+    gated = parser.parse_args(
+        [
+            *required,
+            "--actor-residual-preview-adapter",
+            "--actor-state-gated-recovery-support",
+            "/tmp/support.npz",
+        ]
+    )
+    assert gated.actor_state_gated_recovery_support == Path(
+        "/tmp/support.npz"
     )
 
 
@@ -174,6 +188,62 @@ def test_evaluator_residual_action_matches_training_composition():
     )
 
     np.testing.assert_array_equal(evaluation_action, training_action)
+
+
+def test_gated_evaluator_routes_exact_pre_step_phase():
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+
+    from src.algorithms.shac.progressive_recovery_expert import (
+        RecoverySupport,
+        apply_state_gated_recovery,
+    )
+    from src.algorithms.shac.residual_preview_adapter import (
+        FrozenPreviewResidualParams,
+        PreviewResidualAdapter,
+    )
+    from src.core.networks import Actor
+    from tools.evaluate_g1_flax_phase_grid import evaluate_gated_actor_action
+
+    actor = Actor(2, hidden=(4,), squash=True, layer_norm=False)
+    adapter = PreviewResidualAdapter(action_dim=2, hidden_dim=4)
+    obs = jnp.arange(15, dtype=jnp.float32).reshape(1, 15) / 10.0
+    params = FrozenPreviewResidualParams(
+        parent=actor.init(jax.random.PRNGKey(1), obs),
+        adapter=adapter.init(
+            jax.random.PRNGKey(2), jnp.zeros((1, 5), dtype=jnp.float32)
+        ),
+    )
+    support = RecoverySupport(
+        anchors=jnp.asarray([[1.0, 1.1, 1.2, 1.3, 1.4]]),
+        radius=jnp.asarray(1.0),
+        phase_min=8,
+        phase_max=12,
+        taper=2,
+    )
+    expected = apply_state_gated_recovery(
+        actor,
+        adapter,
+        params,
+        obs,
+        jnp.asarray([10]),
+        support,
+        history_len=3,
+        treatment_frame_dim=5,
+    )
+    actual = evaluate_gated_actor_action(
+        actor,
+        adapter,
+        params,
+        obs,
+        jnp.asarray([10]),
+        support,
+        history_len=3,
+        treatment_frame_dim=5,
+    )
+    for actual_value, expected_value in zip(actual, expected, strict=True):
+        np.testing.assert_array_equal(actual_value, expected_value)
 
 
 def test_phase_grid_applies_training_post_policy_boundary():

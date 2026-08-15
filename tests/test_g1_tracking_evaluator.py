@@ -37,6 +37,22 @@ RMR_ACTIONS = Path(
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    def test_parser_accepts_state_gated_recovery_support(self):
+        args = build_parser().parse_args(
+            [
+                "--checkpoint",
+                "/tmp/policy.pkl",
+                "--output-dir",
+                "/tmp/output",
+                "--actor-state-gated-recovery-support",
+                "/tmp/support.npz",
+            ]
+        )
+        self.assertEqual(
+            args.actor_state_gated_recovery_support,
+            Path("/tmp/support.npz"),
+        )
+
     def test_joint_action_diagnostics_use_actor_order_and_effective_target(self):
         class FakeEnv:
             actor_to_model_permutation = jnp.asarray([1, 2, 0])
