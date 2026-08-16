@@ -101,6 +101,10 @@ def _gradient_arrays() -> dict[str, np.ndarray]:
         "source_index": np.arange(512, dtype=np.int32),
         "phase": np.arange(512, dtype=np.int32) % 499,
         "rng_key": np.zeros((512, 2), dtype=np.uint32),
+        "initial_qpos": np.zeros((512, 36), dtype=np.float64),
+        "initial_qvel": np.zeros((512, 35), dtype=np.float64),
+        "initial_last_act": np.zeros((512, 29), dtype=np.float64),
+        "initial_actor_obs_history": np.zeros((512, 10, 328), dtype=np.float64),
         "noise_tape_a": np.zeros((512, 48, 29), dtype=np.float32),
         "noise_tape_b": np.ones((512, 48, 29), dtype=np.float32),
     }
@@ -113,6 +117,10 @@ def _gradient_arrays() -> dict[str, np.ndarray]:
         arrays[f"{direction}_env_norm"] = np.ones(512, dtype=np.float64)
     arrays["h24_tape_env_cosine"] = np.ones(512, dtype=np.float64)
     arrays["h24_h48_env_cosine"] = np.ones(512, dtype=np.float64)
+    arrays["h24_a_bootstrap_env_cosine"] = np.ones(512, dtype=np.float64)
+    arrays["h24_b_h48_env_cosine"] = np.ones(512, dtype=np.float64)
+    arrays["h24_b_bootstrap_env_cosine"] = np.ones(512, dtype=np.float64)
+    arrays["h48_bootstrap_env_cosine"] = np.ones(512, dtype=np.float64)
     return arrays
 
 
@@ -172,3 +180,77 @@ def test_completion_is_written_after_summary(tmp_path: Path):
     completion = json.loads((tmp_path / "completion.json").read_text())
     assert (tmp_path / "gradient_summary.json").is_file()
     assert completion["summary_sha256"]
+
+
+def test_proposal_specs_are_exact_and_equal_norm():
+    from tools.evaluate_g1_objective_directions import proposal_specs
+
+    specs = proposal_specs()
+
+    assert len(specs) == 12
+    assert [row["direction"] for row in specs] == ["h24"] * 4 + ["h48"] * 4 + ["bootstrap"] * 4
+    assert [row["multiplier"] for row in specs[:4]] == [0.125, 0.25, 0.5, 1.0]
+    assert specs[0]["displacement"] == pytest.approx(
+        0.09495018422603607 * 0.125, rel=0, abs=1e-15
+    )
+    assert specs[-1]["displacement"] == pytest.approx(
+        0.09495018422603607, rel=0, abs=1e-15
+    )
+    assert len({row["label"] for row in specs}) == 12
+
+
+def _line_search_arrays() -> dict[str, np.ndarray]:
+    return {
+        "baseline_carried_survival": np.full(120, 12, dtype=np.int32),
+        "candidate_carried_survival": np.full((12, 120), 12, dtype=np.int32),
+        "selected_proposal_index": np.asarray([-1, -1, -1], dtype=np.int32),
+        "baseline_ordinary_survival": np.asarray([116, 63, 49, 39, 47], dtype=np.int32),
+        "selected_ordinary_survival": np.full((3, 5), -1, dtype=np.int32),
+        "full_gate": np.zeros(3, dtype=bool),
+    }
+
+
+def test_line_search_evidence_requires_complete_bounded_grid():
+    from tools.evaluate_g1_objective_directions import validate_line_search_evidence
+
+    summary = validate_line_search_evidence(_line_search_arrays())
+    assert summary["valid"] is True
+    assert summary["proposal_count"] == 12
+    broken = _line_search_arrays()
+    broken["candidate_carried_survival"][0, 0] = 33
+    with pytest.raises(ValueError, match="H32"):
+        validate_line_search_evidence(broken)
+
+
+def test_final_manifest_binds_gradient_line_search_selection_and_plots(tmp_path: Path):
+    from tools.evaluate_g1_objective_directions import (
+        publish_final_manifest,
+        validate_final_manifest,
+    )
+
+    artifacts = {}
+    for name in (
+        "preflight.json",
+        "gradient_evidence.npz",
+        "gradient_summary.json",
+        "line_search.npz",
+        "line_search.json",
+        "selection.json",
+        "cosine_heatmap.png",
+        "survival_plot.png",
+    ):
+        path = tmp_path / name
+        path.write_bytes(name.encode())
+        artifacts[name] = path
+    completion = publish_final_manifest(
+        tmp_path,
+        artifacts=artifacts,
+        outcome="direction-audit-inconclusive",
+        code_commit="c" * 40,
+        input_sha256={"checkpoint": "d" * 64},
+    )
+    assert validate_final_manifest(tmp_path / "completion.json")["outcome"] == "direction-audit-inconclusive"
+    assert "retained_checkpoint" not in completion
+    artifacts["selection.json"].write_bytes(b"changed")
+    with pytest.raises(ValueError, match="artifact hash"):
+        validate_final_manifest(tmp_path / "completion.json")
