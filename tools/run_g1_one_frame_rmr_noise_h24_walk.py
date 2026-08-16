@@ -3,24 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 from pathlib import Path
+import subprocess
 from statistics import median
 from typing import Any, Mapping, Sequence
 
 import numpy as np
-
-from src.algorithms.shac.algorithm import train
-from src.envs.g1_tracking.solver_profiles import get_solver_profile, solver_context
-from tools.run_g1_fresh_ppo_action_contract_walk import validate_training_artifacts
-from tools.run_g1_rmr_noise_h24_walk import (
-    TOTAL_STEPS as E023_TOTAL_STEPS,
-    build_rmr_noise_h24_kwargs,
-    validate_preflight as validate_e023_preflight,
-)
-from tools.run_g1_tracking_shac import configure_jax
-from tools.run_g1_zero_assistance_consolidation import _write_json_atomically
-
 
 TOTAL_UPDATES = 32
 TRANSITIONS_PER_UPDATE = 512 * 24
@@ -28,6 +19,26 @@ TOTAL_STEPS = TOTAL_UPDATES * TRANSITIONS_PER_UPDATE
 CHECKPOINT_INTERVAL = 16 * TRANSITIONS_PER_UPDATE
 ACTOR_HISTORY_LEN = 1
 ACTOR_FRAME_OBS_DIM = 328
+E023_TOTAL_STEPS = 1_572_864
+EXPECTED_REFERENCE_SHA256 = (
+    "b1197c389887055244f05000a2ebb9cb2748dea26de05bdc6850ed4089dcfdca"
+)
+EXPECTED_MODEL_PATH = Path(
+    "/home/ubuntu/projects/rmr_tracking/source/whole_body_tracking/"
+    "whole_body_tracking/assets/unitree_description/mjcf/g1.xml"
+)
+EXPECTED_MODEL_SHA256 = (
+    "5d76cf92f00dd49d6eb9fae38d7d38e46886848b602ac691051e886c3bcccfb1"
+)
+EXPECTED_CONTROLLER_PATH = Path(
+    "/home/ubuntu/projects/diffsim2real/outputs/rmr_torques_iter4999.npz"
+)
+EXPECTED_CONTROLLER_SHA256 = (
+    "f832285356d8fc10b226b6bbf557520d5323c7c9022ae6dbd00c683b06e5b7ee"
+)
+RMR_WALK_MODEL_999_SHA256 = (
+    "5db9d8371754a635d162c416e192b49ec2064d3133d20eea0df63463d1c8ae03"
+)
 PHASE_CAPS = (124, 99, 74, 49, 24)
 CONTROL_SURVIVAL = {
     16: (42, 36, 48, 49, 24),
@@ -45,8 +56,14 @@ def build_one_frame_kwargs(
     seed: int,
 ) -> dict[str, Any]:
     """Change only actor history and the bounded execution budget from E023."""
+    from tools.run_g1_rmr_noise_h24_walk import build_rmr_noise_h24_kwargs
+
     kwargs = build_rmr_noise_h24_kwargs(profile_name, reference_path, seed)
-    kwargs.update(actor_history_len=ACTOR_HISTORY_LEN, total_steps=TOTAL_STEPS)
+    kwargs.update(
+        actor_history_len=ACTOR_HISTORY_LEN,
+        expected_actor_obs_dim=ACTOR_FRAME_OBS_DIM,
+        total_steps=TOTAL_STEPS,
+    )
     return kwargs
 
 
@@ -121,14 +138,33 @@ def validate_preflight(
     *, repository: Path, reference_path: Path, code_commit: str
 ) -> dict[str, Any]:
     """Bind E023 provenance and the single one-frame scientific delta."""
-    base = validate_e023_preflight(
-        repository=repository,
-        reference_path=reference_path,
-        code_commit=code_commit,
+    repository = repository.resolve()
+    head = _git_output(repository, "rev-parse", "HEAD")
+    if len(code_commit) != 40 or code_commit != head:
+        raise ValueError("runtime code commit does not match registration")
+    if _git_output(repository, "status", "--porcelain"):
+        raise ValueError("runtime code worktree must be clean")
+    reference_path = reference_path.resolve()
+    assets = (
+        (reference_path, EXPECTED_REFERENCE_SHA256, "reference"),
+        (EXPECTED_MODEL_PATH, EXPECTED_MODEL_SHA256, "model"),
+        (EXPECTED_CONTROLLER_PATH, EXPECTED_CONTROLLER_SHA256, "controller"),
     )
+    for path, expected_sha256, label in assets:
+        if not path.is_file() or _sha256_file(path) != expected_sha256:
+            raise ValueError(f"runtime {label} SHA-256 does not match")
     return {
-        **base,
         "protocol": "g1-one-frame-rmr-noise-h24-walk-preflight-v1",
+        "valid": True,
+        "code_commit": head,
+        "reference_path": str(reference_path),
+        "reference_sha256": EXPECTED_REFERENCE_SHA256,
+        "model_path": str(EXPECTED_MODEL_PATH.resolve()),
+        "model_sha256": EXPECTED_MODEL_SHA256,
+        "controller_path": str(EXPECTED_CONTROLLER_PATH.resolve()),
+        "controller_sha256": EXPECTED_CONTROLLER_SHA256,
+        "solver_profile": "g1-4x5",
+        "rmr_walk_model_999_sha256": RMR_WALK_MODEL_999_SHA256,
         "scientific_delta": ["actor_history_len"],
         "actor_history_len": ACTOR_HISTORY_LEN,
         "actor_frame_obs_dim": ACTOR_FRAME_OBS_DIM,
@@ -139,6 +175,34 @@ def validate_preflight(
         "checkpoint_steps": list(expected_checkpoint_steps()),
         "action_noise_schedule_steps": E023_TOTAL_STEPS,
     }
+
+
+def _git_output(repository: Path, *arguments: str) -> str:
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _write_json_atomically(path: Path, document: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps(document, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -166,6 +230,16 @@ def main() -> None:
         code_commit=args.code_commit,
     )
     _write_json_atomically(output_root / "preflight.json", preflight)
+    from src.algorithms.shac.algorithm import train
+    from src.envs.g1_tracking.solver_profiles import (
+        get_solver_profile,
+        solver_context,
+    )
+    from tools.run_g1_fresh_ppo_action_contract_walk import (
+        validate_training_artifacts,
+    )
+    from tools.run_g1_tracking_shac import configure_jax
+
     configure_jax()
     kwargs = build_one_frame_kwargs(
         args.solver_profile, args.reference_path.resolve(), args.seed

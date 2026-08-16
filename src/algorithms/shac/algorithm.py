@@ -16,6 +16,7 @@ import optax
 import numpy as np
 
 from src.core.data_structures import Normalizer, TrainState
+from src.core.actor_input_contract import validate_actor_input_contract
 from src.core.networks import Actor, Critic
 from src.core.rmr_policy import (
     RmrPolicy,
@@ -1625,6 +1626,7 @@ def train(
     checkpoint_steps: tuple[int, ...] | None = None,
     max_episode_length: int = 5000,
     actor_history_len: int = 10,
+    expected_actor_obs_dim: int | None = None,
     actor_observation_noise: bool = False,
     actor_reference_lookahead_steps: tuple[int, ...] = (),
     actor_reference_preview_mode: str = "absolute",
@@ -2592,6 +2594,20 @@ def train(
         if initial_full_actor_policy is not None
         else actor.init(k1, actor_dummy)
     )
+    if expected_actor_obs_dim is not None:
+        try:
+            actor_first_layer_input_dim = int(
+                actor_params["params"]["Dense_0"]["kernel"].shape[0]
+            )
+        except (KeyError, TypeError, AttributeError, IndexError) as error:
+            raise ValueError(
+                "actor parameters do not expose a standard first input layer"
+            ) from error
+        validate_actor_input_contract(
+            expected_input_dim=expected_actor_obs_dim,
+            environment_input_dim=int(env.actor_obs_dim),
+            first_layer_input_dim=actor_first_layer_input_dim,
+        )
     migration_report = None
     residual_adapter_report = None
     residual_muon_report = None
@@ -4516,6 +4532,7 @@ def train(
         ),
         "max_episode_length": max_episode_length,
         "actor_history_len": actor_history_len,
+        "expected_actor_obs_dim": expected_actor_obs_dim,
         "actor_observation_noise": actor_observation_noise,
         "actor_reference_lookahead_steps": list(
             actor_reference_lookahead_steps

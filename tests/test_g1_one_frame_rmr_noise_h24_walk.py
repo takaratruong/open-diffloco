@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -32,7 +34,11 @@ def test_builder_changes_only_history_and_execution_budget() -> None:
         if not np.array_equal(parent.get(key), treatment.get(key))
     }
 
-    assert changed == {"actor_history_len", "total_steps"}
+    assert changed == {
+        "actor_history_len",
+        "expected_actor_obs_dim",
+        "total_steps",
+    }
     assert treatment["actor_history_len"] == 1
     assert treatment["total_steps"] == TOTAL_STEPS == 393_216
     assert treatment["checkpoint_interval"] == 196_608
@@ -40,6 +46,54 @@ def test_builder_changes_only_history_and_execution_budget() -> None:
     assert expected_checkpoint_steps() == (196_608, 393_216)
     assert treatment["actor_reference_lookahead_steps"] == (4, 8, 12)
     assert treatment["actor_reference_preview_mode"] == "delta"
+    assert treatment["expected_actor_obs_dim"] == 328
+
+
+def test_import_does_not_initialize_jax() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "import tools.run_g1_one_frame_rmr_noise_h24_walk; "
+                "assert 'jax' not in sys.modules"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_actor_input_contract_checks_environment_and_first_layer() -> None:
+    from src.core.actor_input_contract import validate_actor_input_contract
+
+    report = validate_actor_input_contract(
+        expected_input_dim=328,
+        environment_input_dim=328,
+        first_layer_input_dim=328,
+    )
+    assert report == {
+        "expected_actor_obs_dim": 328,
+        "environment_actor_obs_dim": 328,
+        "actor_first_layer_input_dim": 328,
+        "valid": True,
+    }
+    with pytest.raises(ValueError):
+        validate_actor_input_contract(
+            expected_input_dim=328,
+            environment_input_dim=329,
+            first_layer_input_dim=328,
+        )
+    with pytest.raises(ValueError):
+        validate_actor_input_contract(
+            expected_input_dim=328,
+            environment_input_dim=328,
+            first_layer_input_dim=329,
+        )
 
 
 @pytest.mark.parametrize(
@@ -107,18 +161,30 @@ def test_selection_uses_first_four_phase_key_and_earliest_tie() -> None:
     assert select_history_checkpoint(tied) == 16
 
 
-def test_preflight_records_one_scientific_delta(monkeypatch) -> None:
+def test_preflight_records_one_scientific_delta(monkeypatch, tmp_path) -> None:
     import tools.run_g1_one_frame_rmr_noise_h24_walk as runner
 
+    reference = tmp_path / "walk.npz"
+    reference.write_bytes(b"reference")
     monkeypatch.setattr(
         runner,
-        "validate_e023_preflight",
-        lambda **_: {"valid": True, "protocol": "parent"},
+        "_git_output",
+        lambda _repository, *arguments: (
+            "a" * 40 if arguments == ("rev-parse", "HEAD") else ""
+        ),
+    )
+    expected_hashes = {
+        reference.resolve(): runner.EXPECTED_REFERENCE_SHA256,
+        runner.EXPECTED_MODEL_PATH: runner.EXPECTED_MODEL_SHA256,
+        runner.EXPECTED_CONTROLLER_PATH: runner.EXPECTED_CONTROLLER_SHA256,
+    }
+    monkeypatch.setattr(
+        runner, "_sha256_file", lambda path: expected_hashes[path]
     )
     report = runner.validate_preflight(
         repository=Path("/repo"),
-        reference_path=Path("/tmp/walk.npz"),
-        code_commit="abc",
+        reference_path=reference,
+        code_commit="a" * 40,
     )
 
     assert report["valid"] is True
