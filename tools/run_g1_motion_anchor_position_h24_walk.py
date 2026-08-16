@@ -321,9 +321,10 @@ def classify_descriptive_full_budget_root_position(
             rows[128], E023_FULL_SURVIVAL[128], strict=True
         )
     )
-    if all(delta >= -2 for delta in deltas) and any(
-        delta >= 10 for delta in deltas[:4]
-    ):
+    material_gain = any(
+        rows[128][index] == PHASE_CAPS[index] for index in (0, 2)
+    )
+    if all(delta >= -2 for delta in deltas) and material_gain:
         return "root-position-full-replication-worthy"
     return "root-position-full-not-promising"
 

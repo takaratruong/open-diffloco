@@ -409,9 +409,10 @@ def test_matched_full_classifier_fails_closed_on_malformed_evidence(
 @pytest.mark.parametrize(
     ("update_128", "expected"),
     [
-        ((126, 97, 67, 49, 24), "root-position-full-replication-worthy"),
-        ((125, 96, 67, 49, 24), "root-position-full-not-promising"),
-        ((130, 90, 67, 49, 24), "root-position-full-not-promising"),
+        ((124, 97, 67, 49, 24), "root-position-full-replication-worthy"),
+        ((123, 96, 67, 49, 24), "root-position-full-not-promising"),
+        ((124, 90, 67, 49, 24), "root-position-full-not-promising"),
+        ((120, 99, 74, 49, 24), "root-position-full-replication-worthy"),
     ],
 )
 def test_descriptive_full_classifier_only_authorizes_replication(
