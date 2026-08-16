@@ -201,7 +201,7 @@
 
 - [ ] **Step 2: Register exactly one approved experiment**
 
-  Write schema-v1 E-20260816-000 with one diagnostic causal change, all six ordered outcomes, exact input/code/environment/model/reference/controller/solver hashes, seed zero, one GPU, 180-minute wall-time budget, and command output rooted at `$DIFFSIM_SEED_DIR`.
+  Write schema-v1 E-20260816-000 with one diagnostic causal change, all eight ordered outcomes, exact input/code/environment/model/reference/controller/solver hashes, seed zero, one GPU, 180-minute wall-time budget, and command output rooted at `$DIFFSIM_SEED_DIR`.
 
 - [ ] **Step 3: Validate and dry-run**
 

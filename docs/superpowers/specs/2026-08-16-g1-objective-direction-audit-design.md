@@ -156,6 +156,10 @@ new retained policy.
   below `0.5`, or at least three phase-bin cosines are below `0.25`, and no
   direction clears the full behavioral gate. Next test matched-noise gradient
   accumulation or larger independent-tape averaging.
+- `current-h24-direction-useful`: an H24 proposal clears carried and ordinary
+  componentwise gates. The local physics direction is behaviorally useful;
+  next test an accept/reject constrained H24 optimizer rather than changing
+  horizon, critic, or activation.
 - `short-horizon-credit-misaligned`: an H48 proposal clears carried and
   ordinary componentwise gates while no H24 proposal does, or H24/H48
   aggregate cosine is nonpositive with H48 strictly better on the registered
@@ -171,13 +175,16 @@ new retained policy.
   H48-A, and bootstrap-A are at least `0.8`, H24 tape agreement is at least
   `0.5`, and no proposal clears both gates. Stop horizon/bootstrap tuning and
   target curvature or behavioral constraints.
+- `direction-audit-inconclusive`: execution is valid but none of the preceding
+  scientific predicates holds. Preserve every artifact and design one narrower
+  discriminator from the measured geometry; do not tune this audit.
 - `invalid-execution`: any provenance, exact-state, common-noise, gradient,
   clipping, CAGrad, proposal, replay-free evaluation, finiteness, or atomic
   artifact gate fails.
 
-Classification is ordered as written except `invalid-execution`, which always
-takes precedence. If multiple scientific predicates remain true, publish the
-earliest label and include all secondary predicates descriptively.
+`invalid-execution` always takes precedence; the remaining labels are ordered
+as written. If multiple scientific predicates remain true, publish the earliest
+label and include all secondary predicates descriptively.
 
 ## Artifacts And Presentation
 
