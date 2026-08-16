@@ -15,6 +15,38 @@ CONTROL = {
 }
 
 
+def test_budget_contracts_are_exact_and_fail_closed() -> None:
+    from tools.run_g1_motion_anchor_position_h24_walk import (
+        EARLY_BUDGET,
+        FULL_BUDGET,
+        resolve_budget,
+    )
+
+    assert EARLY_BUDGET.name == "early"
+    assert EARLY_BUDGET.total_updates == 32
+    assert EARLY_BUDGET.total_steps == 393_216
+    assert EARLY_BUDGET.checkpoint_updates == (16, 32)
+    assert EARLY_BUDGET.checkpoint_steps == (196_608, 393_216)
+    assert FULL_BUDGET.name == "full"
+    assert FULL_BUDGET.total_updates == 128
+    assert FULL_BUDGET.total_steps == 1_572_864
+    assert FULL_BUDGET.checkpoint_updates == (16, 32, 48, 64, 80, 96, 112, 128)
+    assert FULL_BUDGET.checkpoint_steps == (
+        196_608,
+        393_216,
+        589_824,
+        786_432,
+        983_040,
+        1_179_648,
+        1_376_256,
+        1_572_864,
+    )
+    assert resolve_budget("early") is EARLY_BUDGET
+    assert resolve_budget("full") is FULL_BUDGET
+    with pytest.raises(ValueError, match="unknown execution budget"):
+        resolve_budget("long")
+
+
 def test_builder_changes_only_root_position_and_execution_metadata() -> None:
     from tools.run_g1_motion_anchor_position_h24_walk import (
         TOTAL_STEPS,
@@ -49,6 +81,34 @@ def test_builder_changes_only_root_position_and_execution_metadata() -> None:
     assert expected_checkpoint_steps() == (196_608, 393_216)
     assert treatment["actor_reference_lookahead_steps"] == (4, 8, 12)
     assert treatment["actor_reference_preview_mode"] == "delta"
+
+
+def test_full_builder_changes_only_root_position_observation_from_e023() -> None:
+    from tools.run_g1_motion_anchor_position_h24_walk import (
+        FULL_BUDGET,
+        build_motion_anchor_position_kwargs,
+        expected_checkpoint_steps,
+    )
+    from tools.run_g1_rmr_noise_h24_walk import build_rmr_noise_h24_kwargs
+
+    reference = Path("/tmp/walk.npz")
+    parent = build_rmr_noise_h24_kwargs("g1-4x5", reference, 0)
+    treatment = build_motion_anchor_position_kwargs(
+        "g1-4x5", reference, 0, budget=FULL_BUDGET
+    )
+    changed = {
+        key
+        for key in set(parent) | set(treatment)
+        if not np.array_equal(parent.get(key), treatment.get(key))
+    }
+
+    assert changed == {
+        "actor_observe_motion_anchor_position",
+        "expected_actor_obs_dim",
+    }
+    assert treatment["total_steps"] == 1_572_864
+    assert treatment["action_noise_schedule_steps"] == 1_572_864
+    assert expected_checkpoint_steps(FULL_BUDGET) == FULL_BUDGET.checkpoint_steps
 
 
 def test_import_does_not_initialize_jax() -> None:
@@ -187,6 +247,67 @@ def test_preflight_records_only_root_position_semantic_delta(
     assert report["total_updates"] == 32
     assert report["checkpoint_updates"] == [16, 32]
     assert report["action_noise_schedule_steps"] == 1_572_864
+
+
+def test_full_preflight_records_all_archives_without_importing_jax(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tools.run_g1_motion_anchor_position_h24_walk as runner
+
+    monkeypatch.setattr(
+        runner,
+        "validate_e023_preflight",
+        lambda **_: {"protocol": "parent", "valid": True},
+    )
+    report = runner.validate_preflight(
+        repository=Path("/repo"),
+        reference_path=Path("/tmp/walk.npz"),
+        code_commit="a" * 40,
+        budget=runner.FULL_BUDGET,
+    )
+
+    assert report["valid"] is True
+    assert report["budget"] == "full"
+    assert report["total_updates"] == 128
+    assert report["total_steps"] == 1_572_864
+    assert report["checkpoint_updates"] == [16, 32, 48, 64, 80, 96, 112, 128]
+    assert report["checkpoint_steps"] == [
+        196_608,
+        393_216,
+        589_824,
+        786_432,
+        983_040,
+        1_179_648,
+        1_376_256,
+        1_572_864,
+    ]
+
+
+def test_full_artifact_validation_forwards_exact_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tools.run_g1_motion_anchor_position_h24_walk as runner
+
+    captured = {}
+
+    def fake_validator(run_directory, **kwargs):
+        captured["run_directory"] = run_directory
+        captured.update(kwargs)
+        return {"valid": True}
+
+    monkeypatch.setattr(runner, "validate_e023_training_artifacts", fake_validator)
+    kwargs = {"total_steps": runner.FULL_BUDGET.total_steps}
+    report = runner.validate_budget_training_artifacts(
+        Path("/tmp/run"), expected_kwargs=kwargs, budget=runner.FULL_BUDGET
+    )
+
+    assert report == {"valid": True}
+    assert captured["expected_kwargs"] is kwargs
+    assert captured["expected_steps"] == runner.FULL_BUDGET.checkpoint_steps
+    assert captured["total_steps"] == 1_572_864
+    assert captured["protocol"] == (
+        "g1-motion-anchor-position-h24-walk-training-full-v1"
+    )
 
 
 def test_preflight_fails_closed_when_parent_provenance_rejects(
@@ -351,3 +472,22 @@ def test_parser_requires_code_commit() -> None:
         parser.parse_args(
             ["--solver-profile", "g1-4x5", "--reference-path", "/tmp/walk.npz"]
         )
+
+
+def test_parser_defaults_to_early_and_accepts_full_budget() -> None:
+    from tools.run_g1_motion_anchor_position_h24_walk import build_parser
+
+    parser = build_parser()
+    common = [
+        "--solver-profile",
+        "g1-4x5",
+        "--reference-path",
+        "/tmp/walk.npz",
+        "--code-commit",
+        "a" * 40,
+    ]
+
+    assert parser.parse_args(common).budget == "early"
+    assert parser.parse_args([*common, "--budget", "full"]).budget == "full"
+    with pytest.raises(SystemExit):
+        parser.parse_args([*common, "--budget", "long"])

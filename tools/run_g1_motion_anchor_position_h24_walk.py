@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import os
 from pathlib import Path
 from statistics import median
 from typing import Any, Mapping, Sequence
 
 
-TOTAL_UPDATES = 32
 TRANSITIONS_PER_UPDATE = 512 * 24
-TOTAL_STEPS = TOTAL_UPDATES * TRANSITIONS_PER_UPDATE
 CHECKPOINT_INTERVAL = 16 * TRANSITIONS_PER_UPDATE
 ACTOR_HISTORY_LEN = 10
 ACTOR_FRAME_OBS_DIM = 331
@@ -24,15 +23,63 @@ CONTROL_SURVIVAL = {
 }
 
 
-def expected_checkpoint_steps() -> tuple[int, ...]:
-    """Return the fixed update-16 and update-32 archive steps."""
-    return (CHECKPOINT_INTERVAL, TOTAL_STEPS)
+@dataclass(frozen=True)
+class BudgetContract:
+    """Immutable execution-only settings for the E004/E005 runner."""
+
+    name: str
+    total_updates: int
+    checkpoint_updates: tuple[int, ...]
+
+    @property
+    def total_steps(self) -> int:
+        return self.total_updates * TRANSITIONS_PER_UPDATE
+
+    @property
+    def checkpoint_steps(self) -> tuple[int, ...]:
+        return tuple(
+            update * TRANSITIONS_PER_UPDATE for update in self.checkpoint_updates
+        )
+
+
+EARLY_BUDGET = BudgetContract(
+    name="early",
+    total_updates=32,
+    checkpoint_updates=(16, 32),
+)
+FULL_BUDGET = BudgetContract(
+    name="full",
+    total_updates=128,
+    checkpoint_updates=(16, 32, 48, 64, 80, 96, 112, 128),
+)
+_BUDGETS = {budget.name: budget for budget in (EARLY_BUDGET, FULL_BUDGET)}
+
+# Preserve the public E004 constants for existing callers and evidence tooling.
+TOTAL_UPDATES = EARLY_BUDGET.total_updates
+TOTAL_STEPS = EARLY_BUDGET.total_steps
+
+
+def resolve_budget(name: str) -> BudgetContract:
+    """Resolve a registered execution budget and reject unknown aliases."""
+    try:
+        return _BUDGETS[name]
+    except KeyError as error:
+        raise ValueError(f"unknown execution budget: {name}") from error
+
+
+def expected_checkpoint_steps(
+    budget: BudgetContract = EARLY_BUDGET,
+) -> tuple[int, ...]:
+    """Return the exact archive steps for one immutable budget."""
+    return budget.checkpoint_steps
 
 
 def build_motion_anchor_position_kwargs(
     profile_name: str,
     reference_path: str | Path,
     seed: int,
+    *,
+    budget: BudgetContract = EARLY_BUDGET,
 ) -> dict[str, Any]:
     """Apply the sole root-position treatment plus bounded-run metadata."""
     from tools.run_g1_rmr_noise_h24_walk import build_rmr_noise_h24_kwargs
@@ -41,7 +88,7 @@ def build_motion_anchor_position_kwargs(
     kwargs.update(
         actor_observe_motion_anchor_position=True,
         expected_actor_obs_dim=EXPECTED_ACTOR_OBS_DIM,
-        total_steps=TOTAL_STEPS,
+        total_steps=budget.total_steps,
     )
     return kwargs
 
@@ -54,7 +101,11 @@ def validate_e023_preflight(**kwargs: Any) -> dict[str, Any]:
 
 
 def validate_preflight(
-    *, repository: Path, reference_path: Path, code_commit: str
+    *,
+    repository: Path,
+    reference_path: Path,
+    code_commit: str,
+    budget: BudgetContract = EARLY_BUDGET,
 ) -> dict[str, Any]:
     """Bind the E023 runtime and the sole semantic treatment delta."""
     base = validate_e023_preflight(
@@ -62,22 +113,60 @@ def validate_preflight(
         reference_path=reference_path,
         code_commit=code_commit,
     )
-    return {
+    treatment = {
         **base,
-        "protocol": "g1-motion-anchor-position-h24-walk-preflight-v1",
+        "protocol": (
+            "g1-motion-anchor-position-h24-walk-preflight-v1"
+            if budget is EARLY_BUDGET
+            else "g1-motion-anchor-position-h24-walk-preflight-full-v1"
+        ),
         "scientific_delta": ["actor_observe_motion_anchor_position"],
         "actor_observe_motion_anchor_position": True,
         "actor_history_len": ACTOR_HISTORY_LEN,
         "actor_frame_obs_dim": ACTOR_FRAME_OBS_DIM,
         "expected_actor_obs_dim": EXPECTED_ACTOR_OBS_DIM,
         "actor_input_dim": EXPECTED_ACTOR_OBS_DIM,
-        "total_updates": TOTAL_UPDATES,
-        "total_steps": TOTAL_STEPS,
+        "total_updates": budget.total_updates,
+        "total_steps": budget.total_steps,
         "checkpoint_interval": CHECKPOINT_INTERVAL,
-        "checkpoint_updates": [16, 32],
-        "checkpoint_steps": list(expected_checkpoint_steps()),
+        "checkpoint_updates": list(budget.checkpoint_updates),
+        "checkpoint_steps": list(expected_checkpoint_steps(budget)),
         "action_noise_schedule_steps": E023_TOTAL_STEPS,
     }
+    if budget is FULL_BUDGET:
+        treatment["budget"] = budget.name
+    return treatment
+
+
+def validate_e023_training_artifacts(
+    run_directory: Path,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Load the reviewed E023 artifact validator without importing JAX early."""
+    from tools.run_g1_fresh_ppo_action_contract_walk import (
+        validate_training_artifacts,
+    )
+
+    return validate_training_artifacts(run_directory, **kwargs)
+
+
+def validate_budget_training_artifacts(
+    run_directory: Path,
+    *,
+    expected_kwargs: Mapping[str, Any],
+    budget: BudgetContract = EARLY_BUDGET,
+) -> dict[str, Any]:
+    """Require the exact archive set and total for the selected budget."""
+    protocol = "g1-motion-anchor-position-h24-walk-training-v1"
+    if budget is FULL_BUDGET:
+        protocol = "g1-motion-anchor-position-h24-walk-training-full-v1"
+    return validate_e023_training_artifacts(
+        run_directory,
+        expected_kwargs=expected_kwargs,
+        expected_steps=expected_checkpoint_steps(budget),
+        total_steps=budget.total_steps,
+        protocol=protocol,
+    )
 
 
 def _validated_survival(
@@ -155,11 +244,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("g1_motion_anchor_position_h24_walk_runs"),
     )
     parser.add_argument("--code-commit", required=True)
+    parser.add_argument("--budget", choices=tuple(_BUDGETS), default="early")
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
+    budget = resolve_budget(args.budget)
     repository = Path(__file__).resolve().parents[1]
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -167,14 +258,12 @@ def main() -> None:
         repository=repository,
         reference_path=args.reference_path.resolve(),
         code_commit=args.code_commit,
+        budget=budget,
     )
     from src.algorithms.shac.algorithm import train
     from src.envs.g1_tracking.solver_profiles import (
         get_solver_profile,
         solver_context,
-    )
-    from tools.run_g1_fresh_ppo_action_contract_walk import (
-        validate_training_artifacts,
     )
     from tools.run_g1_tracking_shac import configure_jax
     from tools.run_g1_zero_assistance_consolidation import _write_json_atomically
@@ -182,7 +271,10 @@ def main() -> None:
     _write_json_atomically(output_root / "preflight.json", preflight)
     configure_jax()
     kwargs = build_motion_anchor_position_kwargs(
-        args.solver_profile, args.reference_path.resolve(), args.seed
+        args.solver_profile,
+        args.reference_path.resolve(),
+        args.seed,
+        budget=budget,
     )
     previous_directory = Path.cwd()
     try:
@@ -192,12 +284,10 @@ def main() -> None:
     finally:
         os.chdir(previous_directory)
     run_directory = (output_root / relative_save_dir).resolve()
-    validation = validate_training_artifacts(
+    validation = validate_budget_training_artifacts(
         run_directory,
         expected_kwargs=kwargs,
-        expected_steps=expected_checkpoint_steps(),
-        total_steps=TOTAL_STEPS,
-        protocol="g1-motion-anchor-position-h24-walk-training-v1",
+        budget=budget,
     )
     _write_json_atomically(output_root / "training_validation.json", validation)
     print(run_directory)
