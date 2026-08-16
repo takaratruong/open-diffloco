@@ -13,6 +13,10 @@ CONTROL = {
     16: (42, 36, 48, 49, 24),
     32: (45, 50, 53, 49, 24),
 }
+E004_EARLY = {
+    16: (43, 38, 48, 49, 24),
+    32: (51, 66, 55, 49, 24),
+}
 
 
 def test_budget_contracts_are_exact_and_fail_closed() -> None:
@@ -223,6 +227,86 @@ def test_selection_uses_first_four_phase_key_and_earliest_tie() -> None:
     assert select_root_position_checkpoint(tied) == 16
 
 
+@pytest.mark.parametrize(
+    ("update_128", "expected"),
+    [
+        ((117, 99, 67, 49, 24), "root-position-full-advances"),
+        ((114, 99, 67, 49, 24), "root-position-full-parity"),
+        ((120, 95, 67, 49, 24), "root-position-full-mixed"),
+        ((110, 95, 64, 45, 24), "root-position-full-underperforms"),
+    ],
+)
+def test_full_budget_classifier_covers_registered_outcomes(
+    update_128, expected
+) -> None:
+    from tools.run_g1_motion_anchor_position_h24_walk import (
+        classify_full_budget_root_position,
+    )
+
+    treatment = {
+        **E004_EARLY,
+        64: (71, 60, 51, 49, 24),
+        128: update_128,
+    }
+
+    assert classify_full_budget_root_position(treatment) == expected
+
+
+def test_full_budget_advancement_requires_preserving_phase_100() -> None:
+    from tools.run_g1_motion_anchor_position_h24_walk import (
+        classify_full_budget_root_position,
+    )
+
+    treatment = {
+        **E004_EARLY,
+        64: (71, 60, 51, 49, 24),
+        128: (117, 99, 67, 49, 23),
+    }
+
+    assert classify_full_budget_root_position(treatment) == (
+        "root-position-full-parity"
+    )
+
+
+@pytest.mark.parametrize(
+    "treatment",
+    [
+        {**E004_EARLY, 64: (71, 60, 51, 49, 24)},
+        {
+            **E004_EARLY,
+            48: (50, 50, 50, 49, 24),
+            64: (71, 60, 51, 49, 24),
+            128: (116, 99, 67, 49, 24),
+        },
+        {
+            16: (44, 38, 48, 49, 24),
+            32: E004_EARLY[32],
+            64: (71, 60, 51, 49, 24),
+            128: (116, 99, 67, 49, 24),
+        },
+        {
+            16: E004_EARLY[16],
+            32: (51, 65, 55, 49, 24),
+            64: (71, 60, 51, 49, 24),
+            128: (116, 99, 67, 49, 24),
+        },
+        {**E004_EARLY, 64: (71, 60, 51, 49), 128: (116, 99, 67, 49, 24)},
+        {**E004_EARLY, 64: (71, 60, 51, 49, 24), 128: (116.0, 99, 67, 49, 24)},
+        {**E004_EARLY, 64: (71, 60, 51, 49, 24), 128: (125, 99, 67, 49, 24)},
+        {**E004_EARLY, 64: (71, 60, 51, 49, 24), 128: (116, 99, np.nan, 49, 24)},
+    ],
+)
+def test_full_budget_classifier_rejects_invalid_or_noncorroborating_evidence(
+    treatment,
+) -> None:
+    from tools.run_g1_motion_anchor_position_h24_walk import (
+        classify_full_budget_root_position,
+    )
+
+    with pytest.raises(ValueError):
+        classify_full_budget_root_position(treatment)
+
+
 def test_preflight_records_only_root_position_semantic_delta(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -343,7 +427,9 @@ def test_real_preflight_reports_root_position_frame_width(
         model: runner_hash(model),
         controller: runner_hash(controller),
     }
-    monkeypatch.setattr(pure_preflight, "EXPECTED_REFERENCE_SHA256", expected_hashes[reference])
+    monkeypatch.setattr(
+        pure_preflight, "EXPECTED_REFERENCE_SHA256", expected_hashes[reference]
+    )
     monkeypatch.setattr(pure_preflight, "EXPECTED_MODEL_PATH", model)
     monkeypatch.setattr(pure_preflight, "EXPECTED_MODEL_SHA256", expected_hashes[model])
     monkeypatch.setattr(pure_preflight, "EXPECTED_CONTROLLER_PATH", controller)
@@ -353,9 +439,9 @@ def test_real_preflight_reports_root_position_frame_width(
     monkeypatch.setattr(
         pure_preflight,
         "_git_output",
-        lambda _repository, *arguments: "a" * 40
-        if arguments == ("rev-parse", "HEAD")
-        else "",
+        lambda _repository, *arguments: (
+            "a" * 40 if arguments == ("rev-parse", "HEAD") else ""
+        ),
     )
 
     report = runner.validate_preflight(
@@ -423,9 +509,7 @@ def test_real_preflight_rejects_invalid_asset_without_importing_jax() -> None:
         )
         (repository / "tracked.txt").write_text("tracked\n", encoding="utf-8")
         subprocess.run(["git", "add", "tracked.txt"], cwd=repository, check=True)
-        subprocess.run(
-            ["git", "commit", "-qm", "initial"], cwd=repository, check=True
-        )
+        subprocess.run(["git", "commit", "-qm", "initial"], cwd=repository, check=True)
         code_commit = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=repository,

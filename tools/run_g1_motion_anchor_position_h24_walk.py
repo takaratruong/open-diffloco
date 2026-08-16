@@ -21,6 +21,15 @@ CONTROL_SURVIVAL = {
     16: (42, 36, 48, 49, 24),
     32: (45, 50, 53, 49, 24),
 }
+E004_EARLY_SURVIVAL = {
+    16: (43, 38, 48, 49, 24),
+    32: (51, 66, 55, 49, 24),
+}
+E023_FULL_SURVIVAL = {
+    64: (71, 60, 51, 49, 24),
+    128: (116, 99, 67, 49, 24),
+}
+FULL_EVIDENCE_UPDATES = (16, 32, 64, 128)
 
 
 @dataclass(frozen=True)
@@ -169,13 +178,16 @@ def validate_budget_training_artifacts(
     )
 
 
-def _validated_survival(
+def _validated_survival_for_updates(
     treatment: Mapping[int, Sequence[int]],
+    *,
+    expected_updates: Sequence[int],
 ) -> dict[int, tuple[int, ...]]:
-    if set(treatment) != set(CONTROL_SURVIVAL):
-        raise ValueError("survival evidence must contain exactly updates 16 and 32")
+    if set(treatment) != set(expected_updates):
+        expected = ", ".join(str(update) for update in expected_updates)
+        raise ValueError(f"survival evidence must contain exactly updates {expected}")
     validated: dict[int, tuple[int, ...]] = {}
-    for update in sorted(CONTROL_SURVIVAL):
+    for update in expected_updates:
         values = treatment[update]
         if len(values) != len(PHASE_CAPS):
             raise ValueError("each survival vector must contain five phases")
@@ -188,6 +200,15 @@ def _validated_survival(
             row.append(value)
         validated[update] = tuple(row)
     return validated
+
+
+def _validated_survival(
+    treatment: Mapping[int, Sequence[int]],
+) -> dict[int, tuple[int, ...]]:
+    return _validated_survival_for_updates(
+        treatment,
+        expected_updates=tuple(CONTROL_SURVIVAL),
+    )
 
 
 def classify_root_position_ablation(
@@ -205,8 +226,7 @@ def classify_root_position_ablation(
         for update in rows
     }
     if any(
-        all(delta >= 0 for delta in row)
-        and any(delta > 0 for delta in row[:4])
+        all(delta >= 0 for delta in row) and any(delta > 0 for delta in row[:4])
         for row in deltas.values()
     ):
         return "root-position-early-advances"
@@ -231,6 +251,33 @@ def select_root_position_checkpoint(
         return min(values), median(values), sum(values) / len(values), -update
 
     return max(rows, key=key)
+
+
+def classify_full_budget_root_position(
+    treatment: Mapping[int, Sequence[int]],
+) -> str:
+    """Classify matched full-budget evidence after exact E004 corroboration."""
+    rows = _validated_survival_for_updates(
+        treatment,
+        expected_updates=FULL_EVIDENCE_UPDATES,
+    )
+    for update, expected in E004_EARLY_SURVIVAL.items():
+        if rows[update] != expected:
+            raise ValueError(
+                f"update {update} does not exactly corroborate E004 early evidence"
+            )
+    control = E023_FULL_SURVIVAL[128]
+    deltas = tuple(
+        candidate - baseline
+        for candidate, baseline in zip(rows[128], control, strict=True)
+    )
+    if all(delta >= 0 for delta in deltas) and any(delta > 0 for delta in deltas[:4]):
+        return "root-position-full-advances"
+    if all(abs(delta) <= 2 for delta in deltas):
+        return "root-position-full-parity"
+    if any(delta > 2 for delta in deltas) and any(delta < -2 for delta in deltas):
+        return "root-position-full-mixed"
+    return "root-position-full-underperforms"
 
 
 def build_parser() -> argparse.ArgumentParser:
