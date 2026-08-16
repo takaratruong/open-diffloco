@@ -56,6 +56,55 @@ class ShacExactResumeTest(unittest.TestCase):
             False,
         )
 
+    def test_motion_anchor_position_observation_resume_is_fail_closed(self):
+        from src.algorithms.shac.algorithm import (
+            resolve_actor_observe_motion_anchor_position_resume_setting,
+        )
+
+        assert (
+            resolve_actor_observe_motion_anchor_position_resume_setting(
+                None, requested=False
+            )
+            is False
+        )
+        assert (
+            resolve_actor_observe_motion_anchor_position_resume_setting(
+                {"actor_observe_motion_anchor_position": True},
+                requested=True,
+            )
+            is True
+        )
+        with self.assertRaisesRegex(ValueError, "must match the checkpoint"):
+            resolve_actor_observe_motion_anchor_position_resume_setting(
+                None, requested=True
+            )
+        with self.assertRaisesRegex(ValueError, "must match the checkpoint"):
+            resolve_actor_observe_motion_anchor_position_resume_setting(
+                {"actor_observe_motion_anchor_position": False},
+                requested=True,
+            )
+        with self.assertRaisesRegex(ValueError, "must be boolean"):
+            resolve_actor_observe_motion_anchor_position_resume_setting(
+                {"actor_observe_motion_anchor_position": 1},
+                requested=False,
+            )
+
+    def test_expected_actor_input_guard_accepts_only_the_3310_contract(self):
+        from src.core.actor_input_contract import validate_actor_input_contract
+
+        report = validate_actor_input_contract(
+            expected_input_dim=3310,
+            environment_input_dim=3310,
+            first_layer_input_dim=3310,
+        )
+        self.assertTrue(report["valid"])
+        with self.assertRaises(ValueError):
+            validate_actor_input_contract(
+                expected_input_dim=3310,
+                environment_input_dim=3280,
+                first_layer_input_dim=3310,
+            )
+
     def test_reference_path_change_requires_explicit_resume_authority(self):
         from src.algorithms.shac.algorithm import (
             resolve_reference_path_resume_setting,

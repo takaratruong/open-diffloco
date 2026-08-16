@@ -284,6 +284,17 @@ def test_train_exposes_default_off_assistance_and_wires_rollout_telemetry() -> N
     assert '"actor_observe_torso_wrench_assistance"' in source
 
 
+def test_train_forwards_motion_anchor_observation_and_persists_its_contract() -> None:
+    from src.algorithms.shac.algorithm import train
+
+    parameters = inspect.signature(train).parameters
+    assert parameters["actor_observe_motion_anchor_position"].default is False
+
+    source = inspect.getsource(train)
+    assert source.count('"actor_observe_motion_anchor_position": (') >= 2
+    assert "resolve_actor_observe_motion_anchor_position_resume_setting(" in source
+
+
 def test_assistance_conditioning_resume_change_requires_explicit_authority() -> None:
     from src.algorithms.shac.torso_wrench_curriculum import (
         resolve_assistance_conditioning_resume_settings,

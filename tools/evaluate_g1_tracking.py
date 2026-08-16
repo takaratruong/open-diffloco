@@ -171,6 +171,7 @@ def make_evaluation_env(
     actor_history_len: int = 1,
     actor_reference_lookahead_steps: tuple[int, ...] = (),
     actor_reference_preview_mode: str = "absolute",
+    actor_observe_motion_anchor_position: bool = False,
     actor_observation_noise: bool = False,
     domain_randomization: bool = False,
     friction_range: tuple[float, float] = (1.0, 1.0),
@@ -190,6 +191,9 @@ def make_evaluation_env(
         "actor_history_len": actor_history_len,
         "actor_reference_lookahead_steps": actor_reference_lookahead_steps,
         "actor_reference_preview_mode": actor_reference_preview_mode,
+        "actor_observe_motion_anchor_position": (
+            actor_observe_motion_anchor_position
+        ),
         "actor_observation_noise": actor_observation_noise,
         "domain_randomization": domain_randomization,
         "friction_range": friction_range,
@@ -546,6 +550,9 @@ def build_parser() -> argparse.ArgumentParser:
         default="absolute",
     )
     parser.add_argument(
+        "--actor-observe-motion-anchor-position", action="store_true"
+    )
+    parser.add_argument(
         "--reference-residual-control", action="store_true"
     )
     parser.add_argument(
@@ -653,6 +660,9 @@ def main() -> None:
         args.actor_reference_preview_mode = training_hparams[
             "actor_reference_preview_mode"
         ]
+        args.actor_observe_motion_anchor_position = bool(
+            training_hparams.get("actor_observe_motion_anchor_position", False)
+        )
         args.reference_residual_control = bool(
             training_hparams["reference_residual_control"]
         )
@@ -702,6 +712,9 @@ def main() -> None:
             args.actor_reference_lookahead_steps
         ),
         actor_reference_preview_mode=args.actor_reference_preview_mode,
+        actor_observe_motion_anchor_position=(
+            args.actor_observe_motion_anchor_position
+        ),
         actor_observation_noise=visualization_controls.actor_observation_noise,
         domain_randomization=(
             bool(training_hparams["domain_randomization"])
@@ -1156,6 +1169,9 @@ def main() -> None:
         "reference_stride": env.reference_stride,
         "actor_reference_lookahead_steps": list(
             env.actor_reference_lookahead_steps
+        ),
+        "actor_observe_motion_anchor_position": (
+            env.actor_observe_motion_anchor_position
         ),
         "reference_states": env.reference_length,
         "reference_transitions": env.reference_transitions,

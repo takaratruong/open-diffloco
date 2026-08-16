@@ -61,6 +61,7 @@ def build_payload(
     solver_profile: str,
     actor_reference_preview_mode: str,
     actor_history_len: int,
+    actor_observe_motion_anchor_position: bool,
     actor_residual_preview_adapter: bool = False,
     actor_residual_preview_hidden: int = 256,
     actor_residual_preview_trainable_parameter_count: int = 0,
@@ -86,6 +87,9 @@ def build_payload(
         "actor_history_len": actor_history_len,
         "actor_reference_lookahead_steps": list(LOOKAHEAD_STEPS),
         "actor_reference_preview_mode": actor_reference_preview_mode,
+        "actor_observe_motion_anchor_position": (
+            actor_observe_motion_anchor_position
+        ),
         "actor_residual_preview_adapter": actor_residual_preview_adapter,
         "actor_residual_preview_hidden": actor_residual_preview_hidden,
         "actor_residual_preview_trainable_parameter_count": (
@@ -132,6 +136,7 @@ def load_checkpoint_environment_contract(checkpoint_path: Path) -> dict:
         "actor_history_len",
         "actor_reference_lookahead_steps",
         "actor_reference_preview_mode",
+        "actor_observe_motion_anchor_position",
         "reference_residual_control",
         "reference_residual_scale",
         "solver_profile",
@@ -148,6 +153,9 @@ def load_checkpoint_environment_contract(checkpoint_path: Path) -> dict:
         "actor_reference_lookahead_steps": lookahead,
         "actor_reference_preview_mode": hparams[
             "actor_reference_preview_mode"
+        ],
+        "actor_observe_motion_anchor_position": hparams[
+            "actor_observe_motion_anchor_position"
         ],
         "reference_residual_control": hparams[
             "reference_residual_control"
@@ -176,6 +184,9 @@ def load_checkpoint_environment_contract(checkpoint_path: Path) -> dict:
         )
         or tuple(sorted(set(lookahead))) != lookahead
         or contract["actor_reference_preview_mode"] not in {"absolute", "delta"}
+        or not isinstance(
+            contract["actor_observe_motion_anchor_position"], bool
+        )
         or not isinstance(contract["reference_residual_control"], bool)
         or isinstance(contract["reference_residual_scale"], bool)
         or not math.isfinite(float(contract["reference_residual_scale"]))
@@ -344,6 +355,9 @@ def main() -> None:
         actor_reference_preview_mode=contract[
             "actor_reference_preview_mode"
         ],
+        actor_observe_motion_anchor_position=contract[
+            "actor_observe_motion_anchor_position"
+        ],
         reference_residual_control=contract["reference_residual_control"],
         reference_residual_scale=contract["reference_residual_scale"],
     )
@@ -487,6 +501,9 @@ def main() -> None:
             "actor_reference_preview_mode"
         ],
         actor_history_len=contract["actor_history_len"],
+        actor_observe_motion_anchor_position=contract[
+            "actor_observe_motion_anchor_position"
+        ],
         actor_residual_preview_adapter=(
             args.actor_residual_preview_adapter
         ),

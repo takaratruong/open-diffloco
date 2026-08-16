@@ -647,6 +647,28 @@ def resolve_preview_adapter_resume_setting(
     return saved
 
 
+def resolve_actor_observe_motion_anchor_position_resume_setting(
+    resumed_hparams: dict[str, object] | None, *, requested: bool
+) -> bool:
+    """Keep the motion-anchor observation boundary identical on resume."""
+    if not isinstance(requested, bool):
+        raise ValueError("actor_observe_motion_anchor_position must be boolean")
+    saved = (
+        False
+        if resumed_hparams is None
+        else resumed_hparams.get("actor_observe_motion_anchor_position", False)
+    )
+    if not isinstance(saved, bool):
+        raise ValueError(
+            "checkpoint actor_observe_motion_anchor_position must be boolean"
+        )
+    if requested != saved:
+        raise ValueError(
+            "actor_observe_motion_anchor_position must match the checkpoint"
+        )
+    return saved
+
+
 def resolve_residual_preview_adapter_resume_setting(
     resumed_hparams: dict[str, object] | None,
     *,
@@ -1628,6 +1650,7 @@ def train(
     actor_history_len: int = 10,
     expected_actor_obs_dim: int | None = None,
     actor_observation_noise: bool = False,
+    actor_observe_motion_anchor_position: bool = False,
     actor_reference_lookahead_steps: tuple[int, ...] = (),
     actor_reference_preview_mode: str = "absolute",
     allow_resume_actor_reference_lookahead_upgrade: bool = False,
@@ -1756,6 +1779,8 @@ def train(
                                                       resumed scalar-boundary change.
         allow_resume_reference_path_change: Explicitly authorize a resumed
                                             reference treatment.
+        actor_observe_motion_anchor_position: Add the motion-anchor position
+                                               error to every G1 actor frame.
         kp_range: (lo, hi) absolute range for actuator position gain per episode
         kd_range: (lo, hi) absolute range for actuator velocity gain per episode
         push_velocity_range: Interval root x/y velocity disturbance range.
@@ -2126,6 +2151,12 @@ def train(
             resumed_hparams,
             requested=actor_preview_adapter,
         )
+        actor_observe_motion_anchor_position = (
+            resolve_actor_observe_motion_anchor_position_resume_setting(
+                resumed_hparams,
+                requested=actor_observe_motion_anchor_position,
+            )
+        )
         (
             actor_residual_preview_adapter,
             actor_residual_preview_hidden,
@@ -2467,6 +2498,9 @@ def train(
                 "reference_residual_scale": reference_residual_scale,
                 "domain_randomization": domain_randomization,
                 "actor_observation_noise": actor_observation_noise,
+                "actor_observe_motion_anchor_position": (
+                    actor_observe_motion_anchor_position
+                ),
                 "actor_reference_lookahead_steps": (
                     actor_reference_lookahead_steps
                 ),
@@ -4534,6 +4568,9 @@ def train(
         "actor_history_len": actor_history_len,
         "expected_actor_obs_dim": expected_actor_obs_dim,
         "actor_observation_noise": actor_observation_noise,
+        "actor_observe_motion_anchor_position": (
+            actor_observe_motion_anchor_position
+        ),
         "actor_reference_lookahead_steps": list(
             actor_reference_lookahead_steps
         ),

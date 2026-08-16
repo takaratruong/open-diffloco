@@ -32,6 +32,7 @@ def test_flax_phase_grid_payload_records_exact_suffix_completion():
         solver_profile="g1-4x5",
         actor_reference_preview_mode="delta",
         actor_history_len=1,
+        actor_observe_motion_anchor_position=True,
         actor_residual_preview_adapter=True,
         actor_residual_preview_hidden=256,
         actor_residual_preview_trainable_parameter_count=91_677,
@@ -49,6 +50,7 @@ def test_flax_phase_grid_payload_records_exact_suffix_completion():
     assert payload["actor_history_len"] == 1
     assert payload["actor_reference_lookahead_steps"] == [4, 8, 12]
     assert payload["actor_reference_preview_mode"] == "delta"
+    assert payload["actor_observe_motion_anchor_position"] is True
     assert payload["actor_residual_preview_adapter"] is True
     assert payload["actor_residual_preview_hidden"] == 256
     assert payload["actor_residual_preview_trainable_parameter_count"] == 91_677
@@ -127,6 +129,7 @@ def test_phase_grid_loads_environment_contract_from_checkpoint_hparams(
                 "env_variant": "g1_tracking_rmr_50hz_action_parity",
                 "reference_stride": 1,
                 "actor_history_len": 10,
+                "actor_observe_motion_anchor_position": True,
                 "actor_reference_lookahead_steps": [4, 8, 12],
                 "actor_reference_preview_mode": "delta",
                 "reference_residual_control": True,
@@ -144,6 +147,7 @@ def test_phase_grid_loads_environment_contract_from_checkpoint_hparams(
         "env_variant": "g1_tracking_rmr_50hz_action_parity",
         "reference_stride": 1,
         "actor_history_len": 10,
+        "actor_observe_motion_anchor_position": True,
         "actor_reference_lookahead_steps": (4, 8, 12),
         "actor_reference_preview_mode": "delta",
         "reference_residual_control": True,
