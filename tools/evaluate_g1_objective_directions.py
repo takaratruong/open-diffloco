@@ -509,6 +509,21 @@ def _first_terminal_survival(
     return np.where(has_terminal, first, limits).astype(np.int32)
 
 
+def ordinary_steps_from_done(done_trace: list[bool], *, maximum_steps: int) -> int:
+    """Match the canonical phase-grid count, including the terminal transition."""
+    if (
+        maximum_steps < 1
+        or not done_trace
+        or len(done_trace) > maximum_steps
+        or any(not isinstance(value, (bool, np.bool_)) for value in done_trace)
+        or (not done_trace[-1] and len(done_trace) != maximum_steps)
+    ):
+        raise ValueError("ordinary done trace does not match its rollout limit")
+    if any(done_trace[:-1]):
+        raise ValueError("ordinary done trace continued after termination")
+    return len(done_trace)
+
+
 def _plot_diagnostics(
     output_directory: Path,
     *,
@@ -603,7 +618,7 @@ def run_gradient_capture(
         _load_all_bank_rows,
         validate_parent_checkpoint,
     )
-    from tools.evaluate_g1_tracking import _load_policy
+    from tools.evaluate_g1_tracking import _load_policy, build_compiled_step
     from tools.run_g1_action_sequence_recovery_oracle import _build_environment
     from tools.run_g1_root_recovery_continuation import validate_runtime_assets
 
@@ -1100,20 +1115,48 @@ def run_gradient_capture(
             selected_indices[direction_index] = int(selected["proposal_index"])
 
     ordinary_phases = np.asarray((0, 100, 200, 300, 400), dtype=np.int32)
-    ordinary_keys = jax.random.split(jax.random.PRNGKey(seed + 90_000), 5)
-    with solver_context(profile):
-        ordinary_states = jax.jit(jax.vmap(env.reset_at_phase))(
-            ordinary_keys,
-            jnp.zeros(5, dtype=jnp.float64),
-            jnp.asarray(ordinary_phases),
-        )
     ordinary_limits = 499 - ordinary_phases
-    baseline_ordinary = rollout_survival(
-        adapter_params,
-        ordinary_states,
-        horizon=499,
-        maximum_steps=ordinary_limits,
-    )
+    compiled_step = build_compiled_step(env)
+
+    def evaluate_ordinary(params: Any) -> np.ndarray:
+        survival: list[int] = []
+        with solver_context(profile):
+            for phase, maximum in zip(
+                ordinary_phases, ordinary_limits, strict=True
+            ):
+                state = env.reset_at_phase(
+                    jax.random.PRNGKey(seed),
+                    jnp.asarray(0.0, dtype=jnp.float64),
+                    jnp.asarray(phase, dtype=jnp.int32),
+                )
+                done_trace: list[bool] = []
+                for _ in range(int(maximum)):
+                    normalized_obs = env.normalize_actor_obs(
+                        actor_normalizer, actor_norm_state, state.obs
+                    ).astype(jnp.float32)
+                    action, _, _ = apply_frozen_preview_residual(
+                        actor,
+                        residual,
+                        FrozenPreviewResidualParams(parent_params, params),
+                        normalized_obs,
+                        history_len=env.actor_history_len,
+                        treatment_frame_dim=env.actor_frame_obs_dim,
+                    )
+                    if clip_actions:
+                        action = jnp.clip(action, -1.0, 1.0)
+                    state = compiled_step(state, action.astype(jnp.float64))
+                    done = bool(np.asarray(state.done) > 0.5)
+                    done_trace.append(done)
+                    if done:
+                        break
+                survival.append(
+                    ordinary_steps_from_done(
+                        done_trace, maximum_steps=int(maximum)
+                    )
+                )
+        return np.asarray(survival, dtype=np.int32)
+
+    baseline_ordinary = evaluate_ordinary(adapter_params)
     if tuple(map(int, baseline_ordinary)) != ORDINARY_BASELINE:
         raise ValueError(
             f"E023 ordinary baseline drifted: {baseline_ordinary.tolist()}"
@@ -1123,12 +1166,7 @@ def run_gradient_capture(
     for direction_index, proposal_index in enumerate(selected_indices):
         if proposal_index < 0:
             continue
-        survival = rollout_survival(
-            candidates[int(proposal_index)],
-            ordinary_states,
-            horizon=499,
-            maximum_steps=ordinary_limits,
-        )
+        survival = evaluate_ordinary(candidates[int(proposal_index)])
         selected_ordinary[direction_index] = survival
         full_gate[direction_index] = ordinary_componentwise_safe(
             survival.tolist(), ORDINARY_BASELINE

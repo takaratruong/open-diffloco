@@ -274,3 +274,12 @@ def test_parser_exposes_non_scientific_compiled_smoke():
     )
 
     assert args.smoke is True
+
+
+def test_ordinary_survival_counts_the_terminal_transition():
+    from tools.evaluate_g1_objective_directions import ordinary_steps_from_done
+
+    assert ordinary_steps_from_done([False, False, True], maximum_steps=9) == 3
+    assert ordinary_steps_from_done([False, False, False], maximum_steps=3) == 3
+    with pytest.raises(ValueError, match="done trace"):
+        ordinary_steps_from_done([False], maximum_steps=3)
