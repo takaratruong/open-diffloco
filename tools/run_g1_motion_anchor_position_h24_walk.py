@@ -68,6 +68,15 @@ TOTAL_UPDATES = EARLY_BUDGET.total_updates
 TOTAL_STEPS = EARLY_BUDGET.total_steps
 
 
+def _canonicalize_budget(budget: BudgetContract) -> BudgetContract:
+    if not isinstance(budget, BudgetContract):
+        raise ValueError("unregistered execution budget")
+    canonical = _BUDGETS.get(budget.name)
+    if canonical != budget:
+        raise ValueError("unregistered execution budget")
+    return canonical
+
+
 def resolve_budget(name: str) -> BudgetContract:
     """Resolve a registered execution budget and reject unknown aliases."""
     try:
@@ -80,7 +89,7 @@ def expected_checkpoint_steps(
     budget: BudgetContract = EARLY_BUDGET,
 ) -> tuple[int, ...]:
     """Return the exact archive steps for one immutable budget."""
-    return budget.checkpoint_steps
+    return _canonicalize_budget(budget).checkpoint_steps
 
 
 def build_motion_anchor_position_kwargs(
@@ -93,6 +102,7 @@ def build_motion_anchor_position_kwargs(
     """Apply the sole root-position treatment plus bounded-run metadata."""
     from tools.run_g1_rmr_noise_h24_walk import build_rmr_noise_h24_kwargs
 
+    budget = _canonicalize_budget(budget)
     kwargs = build_rmr_noise_h24_kwargs(profile_name, reference_path, seed)
     kwargs.update(
         actor_observe_motion_anchor_position=True,
@@ -117,6 +127,7 @@ def validate_preflight(
     budget: BudgetContract = EARLY_BUDGET,
 ) -> dict[str, Any]:
     """Bind the E023 runtime and the sole semantic treatment delta."""
+    budget = _canonicalize_budget(budget)
     base = validate_e023_preflight(
         repository=repository,
         reference_path=reference_path,
@@ -166,6 +177,7 @@ def validate_budget_training_artifacts(
     budget: BudgetContract = EARLY_BUDGET,
 ) -> dict[str, Any]:
     """Require the exact archive set and total for the selected budget."""
+    budget = _canonicalize_budget(budget)
     protocol = "g1-motion-anchor-position-h24-walk-training-v1"
     if budget is FULL_BUDGET:
         protocol = "g1-motion-anchor-position-h24-walk-training-full-v1"

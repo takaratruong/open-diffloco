@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import argparse
+from contextlib import nullcontext
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import types
 
 import numpy as np
 import pytest
@@ -49,6 +52,57 @@ def test_budget_contracts_are_exact_and_fail_closed() -> None:
     assert resolve_budget("full") is FULL_BUDGET
     with pytest.raises(ValueError, match="unknown execution budget"):
         resolve_budget("long")
+
+
+def test_public_budget_apis_canonicalize_copies_and_reject_custom_contracts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tools.run_g1_motion_anchor_position_h24_walk as runner
+
+    full_copy = runner.BudgetContract(
+        name="full",
+        total_updates=128,
+        checkpoint_updates=(16, 32, 48, 64, 80, 96, 112, 128),
+    )
+    custom = runner.BudgetContract(
+        name="full",
+        total_updates=64,
+        checkpoint_updates=(16, 32, 48, 64),
+    )
+    monkeypatch.setattr(
+        runner,
+        "validate_e023_preflight",
+        lambda **_: {"protocol": "parent", "valid": True},
+    )
+
+    report = runner.validate_preflight(
+        repository=Path("/repo"),
+        reference_path=Path("/tmp/walk.npz"),
+        code_commit="a" * 40,
+        budget=full_copy,
+    )
+
+    assert report["protocol"] == (
+        "g1-motion-anchor-position-h24-walk-preflight-full-v1"
+    )
+    assert report["budget"] == "full"
+    with pytest.raises(ValueError, match="unregistered execution budget"):
+        runner.expected_checkpoint_steps(custom)
+    with pytest.raises(ValueError, match="unregistered execution budget"):
+        runner.build_motion_anchor_position_kwargs(
+            "g1-4x5", Path("/tmp/walk.npz"), 0, budget=custom
+        )
+    with pytest.raises(ValueError, match="unregistered execution budget"):
+        runner.validate_preflight(
+            repository=Path("/repo"),
+            reference_path=Path("/tmp/walk.npz"),
+            code_commit="a" * 40,
+            budget=custom,
+        )
+    with pytest.raises(ValueError, match="unregistered execution budget"):
+        runner.validate_budget_training_artifacts(
+            Path("/tmp/run"), expected_kwargs={}, budget=custom
+        )
 
 
 def test_builder_changes_only_root_position_and_execution_metadata() -> None:
@@ -367,6 +421,37 @@ def test_full_preflight_records_all_archives_without_importing_jax(
     ]
 
 
+def test_full_preflight_path_does_not_import_jax() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                (
+                    "import sys",
+                    "from pathlib import Path",
+                    "import tools.run_g1_motion_anchor_position_h24_walk as runner",
+                    "runner.validate_e023_preflight = lambda **_: "
+                    "{'protocol': 'parent', 'valid': True}",
+                    "report = runner.validate_preflight(",
+                    "    repository=Path('/repo'),",
+                    "    reference_path=Path('/tmp/walk.npz'),",
+                    "    code_commit='a' * 40,",
+                    "    budget=runner.FULL_BUDGET,",
+                    ")",
+                    "assert report['budget'] == 'full'",
+                    "assert 'jax' not in sys.modules",
+                )
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_full_artifact_validation_forwards_exact_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -575,3 +660,91 @@ def test_parser_defaults_to_early_and_accepts_full_budget() -> None:
     assert parser.parse_args([*common, "--budget", "full"]).budget == "full"
     with pytest.raises(SystemExit):
         parser.parse_args([*common, "--budget", "long"])
+
+
+def test_main_threads_full_budget_to_training_and_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tools.run_g1_motion_anchor_position_h24_walk as runner
+
+    reference = tmp_path / "walk.npz"
+    reference.write_bytes(b"reference")
+    output_root = tmp_path / "output"
+    args = argparse.Namespace(
+        solver_profile="g1-4x5",
+        reference_path=reference,
+        seed=0,
+        output_root=output_root,
+        code_commit="a" * 40,
+        budget="full",
+    )
+    captured = {}
+
+    class FakeParser:
+        def parse_args(self):
+            return args
+
+    def fake_preflight(**kwargs):
+        captured["preflight_budget"] = kwargs["budget"]
+        return {"valid": True}
+
+    def fake_builder(profile_name, reference_path, seed, *, budget):
+        captured["builder_budget"] = budget
+        return {"total_steps": budget.total_steps}
+
+    def fake_train(**kwargs):
+        captured["train_kwargs"] = kwargs
+        return None, "run"
+
+    def fake_validator(run_directory, *, expected_kwargs, budget):
+        captured["validation_run_directory"] = run_directory
+        captured["validation_kwargs"] = expected_kwargs
+        captured["validation_budget"] = budget
+        return {"valid": True}
+
+    monkeypatch.setattr(runner, "build_parser", lambda: FakeParser())
+    monkeypatch.setattr(runner, "validate_preflight", fake_preflight)
+    monkeypatch.setattr(runner, "build_motion_anchor_position_kwargs", fake_builder)
+    monkeypatch.setattr(runner, "validate_budget_training_artifacts", fake_validator)
+    monkeypatch.setitem(
+        sys.modules,
+        "src.algorithms.shac.algorithm",
+        types.SimpleNamespace(train=fake_train),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "src.envs.g1_tracking.solver_profiles",
+        types.SimpleNamespace(
+            get_solver_profile=lambda name: name,
+            solver_context=lambda _profile: nullcontext(),
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tools.run_g1_tracking_shac",
+        types.SimpleNamespace(configure_jax=lambda: None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tools.run_g1_zero_assistance_consolidation",
+        types.SimpleNamespace(_write_json_atomically=lambda *_args: None),
+    )
+
+    runner.main()
+
+    assert captured["preflight_budget"] is runner.FULL_BUDGET
+    assert captured["builder_budget"] is runner.FULL_BUDGET
+    assert captured["train_kwargs"] == {"total_steps": 1_572_864}
+    assert captured["validation_kwargs"] == captured["train_kwargs"]
+    assert captured["validation_budget"] is runner.FULL_BUDGET
+    assert captured["validation_budget"].checkpoint_steps == (
+        196_608,
+        393_216,
+        589_824,
+        786_432,
+        983_040,
+        1_179_648,
+        1_376_256,
+        1_572_864,
+    )
+    assert captured["validation_run_directory"] == output_root / "run"
