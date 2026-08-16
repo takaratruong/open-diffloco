@@ -222,6 +222,22 @@ def test_line_search_evidence_requires_complete_bounded_grid():
         validate_line_search_evidence(broken)
 
 
+def test_line_search_accepts_only_registered_two_step_baseline_replay_tolerance():
+    from tools.evaluate_g1_objective_directions import validate_line_search_evidence
+
+    within = _line_search_arrays()
+    within["baseline_ordinary_survival"] = np.asarray(
+        [115, 62, 48, 38, 45], dtype=np.int32
+    )
+    assert validate_line_search_evidence(within)["valid"] is True
+    outside = _line_search_arrays()
+    outside["baseline_ordinary_survival"] = np.asarray(
+        [113, 63, 49, 39, 47], dtype=np.int32
+    )
+    with pytest.raises(ValueError, match="replay tolerance"):
+        validate_line_search_evidence(outside)
+
+
 def test_final_manifest_binds_gradient_line_search_selection_and_plots(tmp_path: Path):
     from tools.evaluate_g1_objective_directions import (
         publish_final_manifest,
