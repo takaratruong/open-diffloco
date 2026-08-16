@@ -60,6 +60,7 @@ def build_payload(
     reference_sha256: str,
     solver_profile: str,
     actor_reference_preview_mode: str,
+    actor_history_len: int,
     actor_residual_preview_adapter: bool = False,
     actor_residual_preview_hidden: int = 256,
     actor_residual_preview_trainable_parameter_count: int = 0,
@@ -70,6 +71,8 @@ def build_payload(
     code_provenance: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """Build the immutable no-render phase-grid artifact."""
+    if isinstance(actor_history_len, bool) or actor_history_len < 1:
+        raise ValueError("actor history length must be positive")
     return {
         "protocol": "g1-flax-dance-replay-free-five-phase-v1",
         "seed": seed,
@@ -80,7 +83,7 @@ def build_payload(
         "reference_sha256": reference_sha256,
         "reference_transitions": reference_transitions,
         "solver_profile": solver_profile,
-        "actor_history_len": ACTOR_HISTORY_LEN,
+        "actor_history_len": actor_history_len,
         "actor_reference_lookahead_steps": list(LOOKAHEAD_STEPS),
         "actor_reference_preview_mode": actor_reference_preview_mode,
         "actor_residual_preview_adapter": actor_residual_preview_adapter,
@@ -416,7 +419,7 @@ def main() -> None:
                 normalized,
                 state.info["phase"],
                 recovery_support,
-                history_len=ACTOR_HISTORY_LEN,
+                history_len=contract["actor_history_len"],
                 treatment_frame_dim=env.actor_frame_obs_dim,
             )
             gate_trace.append(float(gate))
@@ -427,7 +430,7 @@ def main() -> None:
                 actor_params,
                 normalized,
                 residual_actor=residual_actor,
-                history_len=ACTOR_HISTORY_LEN,
+                history_len=contract["actor_history_len"],
                 treatment_frame_dim=env.actor_frame_obs_dim,
             )
         return prepare_phase_grid_action(
@@ -483,6 +486,7 @@ def main() -> None:
         actor_reference_preview_mode=contract[
             "actor_reference_preview_mode"
         ],
+        actor_history_len=contract["actor_history_len"],
         actor_residual_preview_adapter=(
             args.actor_residual_preview_adapter
         ),

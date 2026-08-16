@@ -31,6 +31,7 @@ def test_flax_phase_grid_payload_records_exact_suffix_completion():
         reference_sha256="b" * 64,
         solver_profile="g1-4x5",
         actor_reference_preview_mode="delta",
+        actor_history_len=1,
         actor_residual_preview_adapter=True,
         actor_residual_preview_hidden=256,
         actor_residual_preview_trainable_parameter_count=91_677,
@@ -45,7 +46,7 @@ def test_flax_phase_grid_payload_records_exact_suffix_completion():
     assert payload["summary"]["survival"] == [499, 399, 299, 199, 99]
     assert payload["summary"]["completed_suffix"] == [True] * 5
     assert payload["results"] == results
-    assert payload["actor_history_len"] == 10
+    assert payload["actor_history_len"] == 1
     assert payload["actor_reference_lookahead_steps"] == [4, 8, 12]
     assert payload["actor_reference_preview_mode"] == "delta"
     assert payload["actor_residual_preview_adapter"] is True
@@ -283,3 +284,10 @@ def test_flax_phase_grid_routes_rollouts_through_one_compiled_step():
 
     assert "compiled_step = build_compiled_step(env)" in source
     assert source.count("step_fn=compiled_step") == 1
+
+
+def test_flax_phase_grid_main_does_not_hardcode_history_for_actor_paths():
+    source = Path("tools/evaluate_g1_flax_phase_grid.py").read_text()
+
+    assert "history_len=ACTOR_HISTORY_LEN" not in source
+    assert source.count('history_len=contract["actor_history_len"]') >= 2
