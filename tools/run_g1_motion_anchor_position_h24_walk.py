@@ -307,6 +307,27 @@ def classify_matched_full_budget_root_position(
     return _classify_update_128(rows[128])
 
 
+def classify_descriptive_full_budget_root_position(
+    treatment: Mapping[int, Sequence[int]],
+) -> str:
+    """Decide only whether a stochastic single run warrants paired replication."""
+    rows = _validated_survival_for_updates(
+        treatment,
+        expected_updates=tuple(E023_FULL_SURVIVAL),
+    )
+    deltas = tuple(
+        candidate - baseline
+        for candidate, baseline in zip(
+            rows[128], E023_FULL_SURVIVAL[128], strict=True
+        )
+    )
+    if all(delta >= -2 for delta in deltas) and any(
+        delta >= 10 for delta in deltas[:4]
+    ):
+        return "root-position-full-replication-worthy"
+    return "root-position-full-not-promising"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--solver-profile", required=True, choices=("g1-4x5",))

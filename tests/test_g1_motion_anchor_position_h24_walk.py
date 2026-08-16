@@ -406,6 +406,26 @@ def test_matched_full_classifier_fails_closed_on_malformed_evidence(
         classify_matched_full_budget_root_position(treatment)
 
 
+@pytest.mark.parametrize(
+    ("update_128", "expected"),
+    [
+        ((126, 97, 67, 49, 24), "root-position-full-replication-worthy"),
+        ((125, 96, 67, 49, 24), "root-position-full-not-promising"),
+        ((130, 90, 67, 49, 24), "root-position-full-not-promising"),
+    ],
+)
+def test_descriptive_full_classifier_only_authorizes_replication(
+    update_128, expected
+) -> None:
+    from tools.run_g1_motion_anchor_position_h24_walk import (
+        classify_descriptive_full_budget_root_position,
+    )
+
+    assert classify_descriptive_full_budget_root_position(
+        {64: (71, 60, 51, 49, 24), 128: update_128}
+    ) == expected
+
+
 def test_preflight_records_only_root_position_semantic_delta(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
