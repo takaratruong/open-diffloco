@@ -206,6 +206,54 @@ def test_preflight_fails_closed_when_parent_provenance_rejects(
         )
 
 
+def test_real_preflight_reports_root_position_frame_width(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tools.run_g1_motion_anchor_position_h24_walk as runner
+    import tools.run_g1_one_frame_rmr_noise_h24_walk as pure_preflight
+
+    reference = tmp_path / "walk.npz"
+    model = tmp_path / "g1.xml"
+    controller = tmp_path / "controller.npz"
+    for path in (reference, model, controller):
+        path.write_bytes(path.name.encode("utf-8"))
+    expected_hashes = {
+        reference: runner_hash(reference),
+        model: runner_hash(model),
+        controller: runner_hash(controller),
+    }
+    monkeypatch.setattr(pure_preflight, "EXPECTED_REFERENCE_SHA256", expected_hashes[reference])
+    monkeypatch.setattr(pure_preflight, "EXPECTED_MODEL_PATH", model)
+    monkeypatch.setattr(pure_preflight, "EXPECTED_MODEL_SHA256", expected_hashes[model])
+    monkeypatch.setattr(pure_preflight, "EXPECTED_CONTROLLER_PATH", controller)
+    monkeypatch.setattr(
+        pure_preflight, "EXPECTED_CONTROLLER_SHA256", expected_hashes[controller]
+    )
+    monkeypatch.setattr(
+        pure_preflight,
+        "_git_output",
+        lambda _repository, *arguments: "a" * 40
+        if arguments == ("rev-parse", "HEAD")
+        else "",
+    )
+
+    report = runner.validate_preflight(
+        repository=tmp_path,
+        reference_path=reference,
+        code_commit="a" * 40,
+    )
+
+    assert report["actor_frame_obs_dim"] == 331
+    assert report["actor_history_len"] == 10
+    assert report["actor_input_dim"] == 3_310
+
+
+def runner_hash(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def test_real_preflight_rejects_invalid_code_without_importing_jax() -> None:
     repository = Path(__file__).resolve().parents[1]
     completed = subprocess.run(

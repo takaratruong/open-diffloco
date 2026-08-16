@@ -14,6 +14,7 @@ TRANSITIONS_PER_UPDATE = 512 * 24
 TOTAL_STEPS = TOTAL_UPDATES * TRANSITIONS_PER_UPDATE
 CHECKPOINT_INTERVAL = 16 * TRANSITIONS_PER_UPDATE
 ACTOR_HISTORY_LEN = 10
+ACTOR_FRAME_OBS_DIM = 331
 EXPECTED_ACTOR_OBS_DIM = 3_310
 E023_TOTAL_STEPS = 1_572_864
 PHASE_CAPS = (124, 99, 74, 49, 24)
@@ -67,6 +68,7 @@ def validate_preflight(
         "scientific_delta": ["actor_observe_motion_anchor_position"],
         "actor_observe_motion_anchor_position": True,
         "actor_history_len": ACTOR_HISTORY_LEN,
+        "actor_frame_obs_dim": ACTOR_FRAME_OBS_DIM,
         "expected_actor_obs_dim": EXPECTED_ACTOR_OBS_DIM,
         "actor_input_dim": EXPECTED_ACTOR_OBS_DIM,
         "total_updates": TOTAL_UPDATES,
