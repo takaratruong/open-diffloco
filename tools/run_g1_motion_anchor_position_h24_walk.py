@@ -46,8 +46,8 @@ def build_motion_anchor_position_kwargs(
 
 
 def validate_e023_preflight(**kwargs: Any) -> dict[str, Any]:
-    """Lazily reuse the E023 provenance and asset gate."""
-    from tools.run_g1_rmr_noise_h24_walk import validate_preflight
+    """Reuse E023's pure provenance and asset gate before trainer imports."""
+    from tools.run_g1_one_frame_rmr_noise_h24_walk import validate_preflight
 
     return validate_preflight(**kwargs)
 
@@ -67,10 +67,12 @@ def validate_preflight(
         "scientific_delta": ["actor_observe_motion_anchor_position"],
         "actor_observe_motion_anchor_position": True,
         "actor_history_len": ACTOR_HISTORY_LEN,
+        "expected_actor_obs_dim": EXPECTED_ACTOR_OBS_DIM,
         "actor_input_dim": EXPECTED_ACTOR_OBS_DIM,
         "total_updates": TOTAL_UPDATES,
         "total_steps": TOTAL_STEPS,
         "checkpoint_interval": CHECKPOINT_INTERVAL,
+        "checkpoint_updates": [16, 32],
         "checkpoint_steps": list(expected_checkpoint_steps()),
         "action_noise_schedule_steps": E023_TOTAL_STEPS,
     }

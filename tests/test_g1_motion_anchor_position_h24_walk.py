@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 import numpy as np
 import pytest
@@ -184,6 +185,7 @@ def test_preflight_records_only_root_position_semantic_delta(
     assert report["actor_history_len"] == 10
     assert report["actor_input_dim"] == 3_310
     assert report["total_updates"] == 32
+    assert report["checkpoint_updates"] == [16, 32]
     assert report["action_noise_schedule_steps"] == 1_572_864
 
 
@@ -202,6 +204,95 @@ def test_preflight_fails_closed_when_parent_provenance_rejects(
             reference_path=Path("/tmp/walk.npz"),
             code_commit="a" * 40,
         )
+
+
+def test_real_preflight_rejects_invalid_code_without_importing_jax() -> None:
+    repository = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                (
+                    "import sys",
+                    "from pathlib import Path",
+                    "from tools.run_g1_motion_anchor_position_h24_walk "
+                    "import validate_preflight",
+                    "try:",
+                    "    validate_preflight("
+                    f"repository=Path({str(repository)!r}), "
+                    "reference_path=Path('/missing.npz'), "
+                    "code_commit='not-a-commit')",
+                    "except ValueError as error:",
+                    "    assert 'runtime code commit' in str(error)",
+                    "else:",
+                    "    raise AssertionError('invalid code commit was accepted')",
+                    "assert 'jax' not in sys.modules",
+                )
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_real_preflight_rejects_invalid_asset_without_importing_jax() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        repository = Path(directory) / "repository"
+        repository.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=repository,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"], cwd=repository, check=True
+        )
+        (repository / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=repository, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "initial"], cwd=repository, check=True
+        )
+        code_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "\n".join(
+                    (
+                        "import sys",
+                        "from pathlib import Path",
+                        "from tools.run_g1_motion_anchor_position_h24_walk "
+                        "import validate_preflight",
+                        "try:",
+                        "    validate_preflight("
+                        f"repository=Path({str(repository)!r}), "
+                        "reference_path=Path('/missing.npz'), "
+                        f"code_commit={code_commit!r})",
+                        "except ValueError as error:",
+                        "    assert 'runtime reference SHA-256' in str(error)",
+                        "else:",
+                        "    raise AssertionError('invalid reference was accepted')",
+                        "assert 'jax' not in sys.modules",
+                    )
+                ),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_parser_requires_code_commit() -> None:
