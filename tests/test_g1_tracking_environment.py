@@ -869,6 +869,126 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
             atol=1e-5,
         )
 
+    def test_motion_anchor_position_observation_is_default_off(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        default_env = G1TrackingEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+        )
+        explicit_false_env = G1TrackingEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=1,
+            actor_observe_motion_anchor_position=False,
+        )
+        default_state = default_env.reset_at_phase(
+            jax.random.PRNGKey(79), jnp.array(0.0), jnp.array(37)
+        )
+        explicit_false_state = explicit_false_env.reset_at_phase(
+            jax.random.PRNGKey(79), jnp.array(0.0), jnp.array(37)
+        )
+
+        self.assertFalse(default_env.actor_observe_motion_anchor_position)
+        self.assertFalse(explicit_false_env.actor_observe_motion_anchor_position)
+        self.assertEqual(default_env.actor_frame_obs_dim, 154)
+        self.assertEqual(default_env.actor_obs_dim, 154)
+        np.testing.assert_array_equal(
+            default_state.obs, explicit_false_state.obs
+        )
+        np.testing.assert_array_equal(
+            default_env.actor_noise_mask, explicit_false_env.actor_noise_mask
+        )
+
+    def test_motion_anchor_position_observation_has_expected_order_and_shape(self):
+        from src.envs.g1_tracking.environment import (
+            G1TrackingEnv,
+            _quat_apply,
+            _quat_inv,
+            _rotation_6d,
+        )
+
+        env = G1TrackingEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_history_len=10,
+            actor_reference_lookahead_steps=(4, 8, 12),
+            actor_observe_motion_anchor_position=True,
+        )
+        phase = jnp.array(37)
+        state = env.reset_at_phase(
+            jax.random.PRNGKey(83), jnp.array(0.0), phase
+        )
+        translated_data = mjx.forward(
+            env.mjx_model,
+            state.data.replace(qpos=state.data.qpos.at[:3].add(
+                jnp.array([0.3, -0.2, 0.1])
+            )),
+        )
+        anchor_position, anchor_orientation = env._anchor_relative_reference(
+            translated_data, phase
+        )
+        frame = np.asarray(env._get_actor_obs(translated_data, state.info))
+        actor_order = np.asarray(env.model_to_actor_permutation)
+        expected_command = np.concatenate(
+            (
+                np.asarray(env.qpos_reference[phase, 7:])[actor_order],
+                np.asarray(env.qvel_reference[phase, 6:])[actor_order],
+            )
+        )
+
+        self.assertTrue(env.actor_observe_motion_anchor_position)
+        self.assertEqual(env.actor_frame_obs_dim, 331)
+        self.assertEqual(env.actor_obs_dim, 3310)
+        self.assertEqual(state.obs.shape, (3310,))
+        np.testing.assert_allclose(frame[:58], expected_command, atol=1e-12)
+        np.testing.assert_allclose(frame[58:61], anchor_position, atol=1e-12)
+        np.testing.assert_allclose(
+            frame[61:67],
+            np.asarray(_rotation_6d(anchor_orientation)),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            frame[67:70],
+            np.asarray(
+                _quat_apply(
+                    _quat_inv(translated_data.qpos[3:7]),
+                    translated_data.qvel[3:6],
+                )
+            ),
+            atol=1e-12,
+        )
+
+    def test_motion_anchor_position_noise_mask_and_option_are_validated(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        env = G1TrackingEnv(
+            xml_path=str(MODEL),
+            reference_path=str(REFERENCE),
+            controller_path=str(CONTROLLER),
+            actor_observation_noise=True,
+            actor_observe_motion_anchor_position=True,
+        )
+
+        mask = np.asarray(env.actor_noise_mask)
+        self.assertEqual(mask.shape, (157,))
+        np.testing.assert_array_equal(mask[:61], 0.0)
+        np.testing.assert_allclose(mask[61:67], 0.05, rtol=0.0, atol=1e-7)
+        np.testing.assert_allclose(mask[67:70], 0.2, rtol=0.0, atol=1e-7)
+        np.testing.assert_allclose(mask[70:99], 0.01, rtol=0.0, atol=1e-7)
+        np.testing.assert_allclose(mask[99:128], 0.01, rtol=0.0, atol=1e-7)
+        np.testing.assert_array_equal(mask[128:157], 0.0)
+        for value in (1, None):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    ValueError, "actor_observe_motion_anchor_position"
+                ):
+                    G1TrackingEnv(actor_observe_motion_anchor_position=value)
+
     def test_actor_observation_appends_multiscale_future_reference(self):
         from src.envs.g1_tracking.environment import G1TrackingEnv
 

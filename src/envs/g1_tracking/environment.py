@@ -127,6 +127,7 @@ class G1TrackingEnv:
         controller_path: str = DEFAULT_CONTROLLER_PATH,
         actor_history_len: int = 1,
         actor_observation_noise: bool = False,
+        actor_observe_motion_anchor_position: bool = False,
         actor_joint_velocity_noise_scale: float = 0.01,
         squash_actor_actions_override: bool | None = None,
         actor_reference_lookahead_steps: tuple[int, ...] = (),
@@ -167,6 +168,13 @@ class G1TrackingEnv:
         if not isinstance(actor_observation_noise, bool):
             raise ValueError("actor_observation_noise must be boolean")
         self.actor_observation_noise = actor_observation_noise
+        if not isinstance(actor_observe_motion_anchor_position, bool):
+            raise ValueError(
+                "actor_observe_motion_anchor_position must be boolean"
+            )
+        self.actor_observe_motion_anchor_position = (
+            actor_observe_motion_anchor_position
+        )
         if (
             isinstance(actor_joint_velocity_noise_scale, bool)
             or not np.isfinite(actor_joint_velocity_noise_scale)
@@ -626,7 +634,11 @@ class G1TrackingEnv:
         self.actor_future_reference_dim = (
             58 * len(self.actor_reference_lookahead_steps)
         )
-        self.actor_frame_obs_dim = 154 + self.actor_future_reference_dim
+        self.actor_frame_obs_dim = (
+            154
+            + 3 * self.actor_observe_motion_anchor_position
+            + self.actor_future_reference_dim
+        )
         self.actor_obs_dim = self.actor_frame_obs_dim * actor_history_len
         if carried_context is not None:
             carried_last_act, carried_actor_obs_history = carried_context
@@ -657,6 +669,7 @@ class G1TrackingEnv:
         self.actor_noise_mask = jp.concatenate(
             (
                 jp.zeros(58),
+                jp.zeros(3 * self.actor_observe_motion_anchor_position),
                 jp.full(6, 0.05),
                 jp.full(3, 0.2),
                 jp.full(29, 0.01),
@@ -779,13 +792,20 @@ class G1TrackingEnv:
 
     def _get_actor_obs(self, data: mjx.Data, info: dict) -> jax.Array:
         phase = info["phase"]
-        _, anchor_orientation = self._anchor_relative_reference(data, phase)
+        anchor_position, anchor_orientation = self._anchor_relative_reference(
+            data, phase
+        )
         root_inverse = _quat_inv(data.qpos[3:7])
         actor_order = self.model_to_actor_permutation
         return jp.concatenate(
             (
                 self.qpos_reference[phase, 7:][actor_order],
                 self.qvel_reference[phase, 6:][actor_order],
+                *(
+                    (anchor_position,)
+                    if self.actor_observe_motion_anchor_position
+                    else ()
+                ),
                 _rotation_6d(anchor_orientation),
                 _quat_apply(root_inverse, data.qvel[3:6]),
                 (data.qpos[7:] - self.default_joints)[actor_order],
