@@ -37,6 +37,31 @@ RMR_ACTIONS = Path(
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    def test_training_hparams_restore_motion_anchor_position_strictly(self):
+        from tools.evaluate_g1_tracking import (
+            resolve_training_motion_anchor_position_observation,
+        )
+
+        self.assertFalse(
+            resolve_training_motion_anchor_position_observation({})
+        )
+        self.assertTrue(
+            resolve_training_motion_anchor_position_observation(
+                {"actor_observe_motion_anchor_position": True}
+            )
+        )
+        self.assertFalse(
+            resolve_training_motion_anchor_position_observation(
+                {"actor_observe_motion_anchor_position": False}
+            )
+        )
+        for invalid in ("false", 1, None):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "must be boolean"):
+                    resolve_training_motion_anchor_position_observation(
+                        {"actor_observe_motion_anchor_position": invalid}
+                    )
+
     def test_parser_accepts_state_gated_recovery_support(self):
         args = build_parser().parse_args(
             [

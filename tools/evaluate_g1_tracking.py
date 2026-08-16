@@ -218,6 +218,18 @@ def make_evaluation_env(
     return get_go2_env_class(variant)(**kwargs)
 
 
+def resolve_training_motion_anchor_position_observation(
+    hparams: dict[str, object],
+) -> bool:
+    """Restore the checkpoint's observation boundary without coercion."""
+    value = hparams.get("actor_observe_motion_anchor_position", False)
+    if not isinstance(value, bool):
+        raise ValueError(
+            "actor_observe_motion_anchor_position hparam must be boolean"
+        )
+    return value
+
+
 def remaining_reference_transitions(
     reference_length: int, phase: int, reference_stride: int
 ) -> int:
@@ -660,8 +672,10 @@ def main() -> None:
         args.actor_reference_preview_mode = training_hparams[
             "actor_reference_preview_mode"
         ]
-        args.actor_observe_motion_anchor_position = bool(
-            training_hparams.get("actor_observe_motion_anchor_position", False)
+        args.actor_observe_motion_anchor_position = (
+            resolve_training_motion_anchor_position_observation(
+                training_hparams
+            )
         )
         args.reference_residual_control = bool(
             training_hparams["reference_residual_control"]
