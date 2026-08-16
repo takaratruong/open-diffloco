@@ -254,3 +254,23 @@ def test_final_manifest_binds_gradient_line_search_selection_and_plots(tmp_path:
     artifacts["selection.json"].write_bytes(b"changed")
     with pytest.raises(ValueError, match="artifact hash"):
         validate_final_manifest(tmp_path / "completion.json")
+
+
+def test_parser_exposes_non_scientific_compiled_smoke():
+    from tools.evaluate_g1_objective_directions import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "--checkpoint", "/tmp/checkpoint.pkl",
+            "--hparams", "/tmp/hparams.json",
+            "--reference-path", "/tmp/reference.npz",
+            "--source-bank", "/tmp/bank.npz",
+            "--expert-checkpoint", "/tmp/expert.pkl",
+            "--output-directory", "/tmp/output",
+            "--code-commit", "a" * 40,
+            "--solver-profile", "g1-4x5",
+            "--smoke",
+        ]
+    )
+
+    assert args.smoke is True

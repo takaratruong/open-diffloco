@@ -574,6 +574,7 @@ def run_gradient_capture(
     seed: int,
     code_commit: str,
     repository: Path,
+    smoke: bool = False,
 ) -> dict[str, object]:
     """Capture four training-effective adapter directions on one frozen batch."""
     import jax
@@ -793,6 +794,52 @@ def run_gradient_capture(
         return -(total + running + final_bootstrap) / horizon
 
     tapes = build_fixed_noise_tapes(seed)
+
+    if smoke:
+        one_state = jax.tree_util.tree_map(lambda value: value[0], states)
+        one_tape = jnp.asarray(tapes["a"][0])
+
+        def smoke_gradient(*, horizon: int, bootstrap_scale: float):
+            function = jax.jit(
+                jax.grad(
+                    lambda adapter: loss(
+                        adapter,
+                        one_state,
+                        one_tape[:horizon],
+                        bootstrap_scale,
+                        horizon=horizon,
+                    )
+                )
+            )
+            with solver_context(profile):
+                return jax.device_get(function(adapter_params))
+
+        h24_smoke = smoke_gradient(horizon=24, bootstrap_scale=0.0)
+        h48_smoke = smoke_gradient(horizon=48, bootstrap_scale=0.0)
+        full_smoke = smoke_gradient(horizon=24, bootstrap_scale=1.0)
+        bootstrap_smoke = jax.tree_util.tree_map(
+            lambda full, immediate: full - immediate, full_smoke, h24_smoke
+        )
+        norms = {
+            "h24": float(np.linalg.norm(_tree_vector(h24_smoke))),
+            "h48": float(np.linalg.norm(_tree_vector(h48_smoke))),
+            "bootstrap": float(np.linalg.norm(_tree_vector(bootstrap_smoke))),
+        }
+        if any(not np.isfinite(value) or value <= 0.0 for value in norms.values()):
+            raise ValueError("compiled objective-direction smoke gradient is invalid")
+        smoke_summary = {
+            "valid": True,
+            "scientific": False,
+            "protocol": f"{PROTOCOL}-compiled-smoke",
+            "code_commit": code_commit,
+            "common_noise_prefix": validate_common_noise_prefix(
+                tapes["a"][:, :24], tapes["a"]
+            ),
+            "gradient_norms": norms,
+            "input_sha256": preflight["input_sha256"],
+        }
+        _atomic_json(output_directory.resolve() / "smoke_summary.json", smoke_summary)
+        return smoke_summary
 
     def capture(noise: np.ndarray, *, horizon: int, bootstrap_scale: float):
         gradient_fn = jax.jit(
@@ -1191,6 +1238,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repository", type=Path, default=Path.cwd())
     parser.add_argument("--solver-profile", choices=("g1-4x5",), required=True)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--smoke", action="store_true")
     return parser
 
 
@@ -1209,6 +1257,7 @@ def main() -> None:
         seed=args.seed,
         code_commit=args.code_commit,
         repository=args.repository,
+        smoke=args.smoke,
     )
     print(json.dumps(manifest, indent=2, sort_keys=True))
 
