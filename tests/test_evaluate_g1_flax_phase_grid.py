@@ -116,6 +116,7 @@ def test_phase_grid_loads_environment_contract_from_checkpoint_hparams(
     tmp_path,
 ):
     import json
+    import pytest
 
     from tools.evaluate_g1_flax_phase_grid import (
         load_checkpoint_environment_contract,
@@ -123,31 +124,10 @@ def test_phase_grid_loads_environment_contract_from_checkpoint_hparams(
 
     checkpoint = tmp_path / "checkpoint_step_098304.pkl"
     checkpoint.write_bytes(b"checkpoint")
-    (tmp_path / "hparams.json").write_text(
-        json.dumps(
-            {
-                "env_variant": "g1_tracking_rmr_50hz_action_parity",
-                "reference_stride": 1,
-                "actor_history_len": 10,
-                "actor_observe_motion_anchor_position": True,
-                "actor_reference_lookahead_steps": [4, 8, 12],
-                "actor_reference_preview_mode": "delta",
-                "reference_residual_control": True,
-                "reference_residual_scale": 1.0,
-                "solver_profile": "g1-4x5",
-                "squash_actor_mean": False,
-                "clip_sampled_actor_actions": False,
-            }
-        )
-    )
-
-    contract = load_checkpoint_environment_contract(checkpoint)
-
-    assert contract == {
+    hparams = {
         "env_variant": "g1_tracking_rmr_50hz_action_parity",
         "reference_stride": 1,
         "actor_history_len": 10,
-        "actor_observe_motion_anchor_position": True,
         "actor_reference_lookahead_steps": (4, 8, 12),
         "actor_reference_preview_mode": "delta",
         "reference_residual_control": True,
@@ -156,6 +136,33 @@ def test_phase_grid_loads_environment_contract_from_checkpoint_hparams(
         "squash_actor_mean": False,
         "clip_sampled_actor_actions": False,
     }
+    expected = {
+        **hparams,
+        "actor_reference_lookahead_steps": (4, 8, 12),
+    }
+
+    for stored, expected_value in ((None, False), (False, False), (True, True)):
+        candidate = dict(hparams)
+        candidate["actor_reference_lookahead_steps"] = [4, 8, 12]
+        if stored is not None:
+            candidate["actor_observe_motion_anchor_position"] = stored
+        (tmp_path / "hparams.json").write_text(json.dumps(candidate))
+
+        contract = load_checkpoint_environment_contract(checkpoint)
+
+        assert contract == {
+            **expected,
+            "actor_observe_motion_anchor_position": expected_value,
+        }
+
+    for invalid in ("false", 1, None):
+        candidate = dict(hparams)
+        candidate["actor_reference_lookahead_steps"] = [4, 8, 12]
+        candidate["actor_observe_motion_anchor_position"] = invalid
+        (tmp_path / "hparams.json").write_text(json.dumps(candidate))
+
+        with pytest.raises(ValueError, match="evaluation contract is invalid"):
+            load_checkpoint_environment_contract(checkpoint)
 
 
 def test_evaluator_residual_action_matches_training_composition():

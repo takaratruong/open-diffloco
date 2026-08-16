@@ -136,7 +136,6 @@ def load_checkpoint_environment_contract(checkpoint_path: Path) -> dict:
         "actor_history_len",
         "actor_reference_lookahead_steps",
         "actor_reference_preview_mode",
-        "actor_observe_motion_anchor_position",
         "reference_residual_control",
         "reference_residual_scale",
         "solver_profile",
@@ -154,9 +153,9 @@ def load_checkpoint_environment_contract(checkpoint_path: Path) -> dict:
         "actor_reference_preview_mode": hparams[
             "actor_reference_preview_mode"
         ],
-        "actor_observe_motion_anchor_position": hparams[
-            "actor_observe_motion_anchor_position"
-        ],
+        "actor_observe_motion_anchor_position": hparams.get(
+            "actor_observe_motion_anchor_position", False
+        ),
         "reference_residual_control": hparams[
             "reference_residual_control"
         ],
