@@ -361,6 +361,51 @@ def test_full_budget_classifier_rejects_invalid_or_noncorroborating_evidence(
         classify_full_budget_root_position(treatment)
 
 
+@pytest.mark.parametrize(
+    ("update_128", "expected"),
+    [
+        ((117, 99, 67, 49, 24), "root-position-full-advances"),
+        ((114, 99, 67, 49, 24), "root-position-full-parity"),
+        ((120, 95, 67, 49, 24), "root-position-full-mixed"),
+        ((110, 95, 64, 45, 24), "root-position-full-underperforms"),
+    ],
+)
+def test_matched_full_classifier_uses_only_full_budget_evidence(
+    update_128, expected
+) -> None:
+    from tools.run_g1_motion_anchor_position_h24_walk import (
+        classify_matched_full_budget_root_position,
+    )
+
+    assert classify_matched_full_budget_root_position(
+        {64: (71, 60, 51, 49, 24), 128: update_128}
+    ) == expected
+
+
+@pytest.mark.parametrize(
+    "treatment",
+    [
+        {64: (71, 60, 51, 49, 24)},
+        {
+            16: (42, 36, 49, 47, 24),
+            64: (71, 60, 51, 49, 24),
+            128: (116, 99, 67, 49, 24),
+        },
+        {64: (71, 60, 51, 49), 128: (116, 99, 67, 49, 24)},
+        {64: (71, 60, 51, 49, 24), 128: (116.0, 99, 67, 49, 24)},
+    ],
+)
+def test_matched_full_classifier_fails_closed_on_malformed_evidence(
+    treatment,
+) -> None:
+    from tools.run_g1_motion_anchor_position_h24_walk import (
+        classify_matched_full_budget_root_position,
+    )
+
+    with pytest.raises(ValueError):
+        classify_matched_full_budget_root_position(treatment)
+
+
 def test_preflight_records_only_root_position_semantic_delta(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -278,10 +278,14 @@ def classify_full_budget_root_position(
             raise ValueError(
                 f"update {update} does not exactly corroborate E004 early evidence"
             )
+    return _classify_update_128(rows[128])
+
+
+def _classify_update_128(update_128: Sequence[int]) -> str:
     control = E023_FULL_SURVIVAL[128]
     deltas = tuple(
         candidate - baseline
-        for candidate, baseline in zip(rows[128], control, strict=True)
+        for candidate, baseline in zip(update_128, control, strict=True)
     )
     if all(delta >= 0 for delta in deltas) and any(delta > 0 for delta in deltas[:4]):
         return "root-position-full-advances"
@@ -290,6 +294,17 @@ def classify_full_budget_root_position(
     if any(delta > 2 for delta in deltas) and any(delta < -2 for delta in deltas):
         return "root-position-full-mixed"
     return "root-position-full-underperforms"
+
+
+def classify_matched_full_budget_root_position(
+    treatment: Mapping[int, Sequence[int]],
+) -> str:
+    """Classify the matched full-budget checkpoints without stochastic replay gates."""
+    rows = _validated_survival_for_updates(
+        treatment,
+        expected_updates=tuple(E023_FULL_SURVIVAL),
+    )
+    return _classify_update_128(rows[128])
 
 
 def build_parser() -> argparse.ArgumentParser:
