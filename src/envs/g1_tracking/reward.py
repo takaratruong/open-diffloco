@@ -20,6 +20,19 @@ def _position_error(target: jax.Array, actual: jax.Array) -> jax.Array:
     return jp.sum(jp.square(target - actual), axis=-1)
 
 
+def _velocity_tracking_kernel(
+    normalized_mean_squared_error: jax.Array,
+    kernel: str,
+) -> jax.Array:
+    if kernel == "exponential":
+        return jp.exp(-normalized_mean_squared_error)
+    if kernel == "pseudo_huber":
+        # Matches exp(-x)'s value and first derivative at x=0, while its
+        # residual gradient approaches a nonzero constant for large errors.
+        return 2.0 - jp.sqrt(1.0 + 2.0 * normalized_mean_squared_error)
+    raise ValueError(f"unknown tracking velocity kernel: {kernel}")
+
+
 def termination_margin_penalty(
     *,
     anchor_z_error: jax.Array,
@@ -100,6 +113,7 @@ def rmr_tracking_reward(
     actual_body_lin_vel: jax.Array,
     target_body_ang_vel: jax.Array,
     actual_body_ang_vel: jax.Array,
+    velocity_kernel: str = "exponential",
 ) -> tuple[jax.Array, Mapping[str, jax.Array]]:
     """Computes the six default RMR tracking terms and their weighted sum.
 
@@ -130,17 +144,19 @@ def rmr_tracking_reward(
             )
             / 0.4**2
         ),
-        "body_linear_velocity": jp.exp(
-            -jp.mean(
+        "body_linear_velocity": _velocity_tracking_kernel(
+            jp.mean(
                 _position_error(target_body_lin_vel, actual_body_lin_vel), axis=-1
             )
-            / 1.0**2
+            / 1.0**2,
+            velocity_kernel,
         ),
-        "body_angular_velocity": jp.exp(
-            -jp.mean(
+        "body_angular_velocity": _velocity_tracking_kernel(
+            jp.mean(
                 _position_error(target_body_ang_vel, actual_body_ang_vel), axis=-1
             )
-            / 3.14**2
+            / 3.14**2,
+            velocity_kernel,
         ),
     }
     reward = (

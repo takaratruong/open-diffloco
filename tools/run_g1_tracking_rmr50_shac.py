@@ -42,6 +42,8 @@ def build_train_kwargs(
     effort_limit_scale: float = 1.0,
     termination_margin_weight: float = 0.0,
     allow_resume_termination_margin_change: bool = False,
+    tracking_velocity_kernel: str = "exponential",
+    allow_resume_tracking_velocity_kernel_change: bool = False,
     reference_reset_noise_scale: float = 0.0,
     carried_reset_bank_path: str | Path | None = None,
     carried_reset_probability: float = 0.0,
@@ -124,6 +126,12 @@ def build_train_kwargs(
     if not isinstance(allow_resume_termination_margin_change, bool):
         raise ValueError(
             "allow_resume_termination_margin_change must be boolean"
+        )
+    if tracking_velocity_kernel not in {"exponential", "pseudo_huber"}:
+        raise ValueError("tracking velocity kernel is invalid")
+    if not isinstance(allow_resume_tracking_velocity_kernel_change, bool):
+        raise ValueError(
+            "allow_resume_tracking_velocity_kernel_change must be boolean"
         )
     if (
         isinstance(reference_reset_noise_scale, bool)
@@ -209,6 +217,10 @@ def build_train_kwargs(
             "allow_resume_termination_margin_change": (
                 allow_resume_termination_margin_change
             ),
+            "tracking_velocity_kernel": tracking_velocity_kernel,
+            "allow_resume_tracking_velocity_kernel_change": (
+                allow_resume_tracking_velocity_kernel_change
+            ),
             "reference_reset_noise_scale": reference_reset_noise_scale,
             "carried_reset_bank_path": (
                 None
@@ -285,6 +297,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--allow-resume-termination-margin-change",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--tracking-velocity-kernel",
+        choices=("exponential", "pseudo_huber"),
+        default="exponential",
+    )
+    parser.add_argument(
+        "--allow-resume-tracking-velocity-kernel-change",
         action="store_true",
     )
     parser.add_argument(
@@ -372,6 +393,10 @@ def main() -> None:
                 ),
                 allow_resume_termination_margin_change=(
                     args.allow_resume_termination_margin_change
+                ),
+                tracking_velocity_kernel=args.tracking_velocity_kernel,
+                allow_resume_tracking_velocity_kernel_change=(
+                    args.allow_resume_tracking_velocity_kernel_change
                 ),
                 reference_reset_noise_scale=(
                     args.reference_reset_noise_scale

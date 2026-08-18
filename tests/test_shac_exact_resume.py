@@ -18,6 +18,77 @@ class _EnvState:
 
 
 class ShacExactResumeTest(unittest.TestCase):
+    def test_tracking_velocity_kernel_resume_is_explicit_and_fail_closed(self):
+        from src.algorithms.shac.algorithm import (
+            resolve_tracking_velocity_kernel_resume_setting,
+        )
+
+        self.assertEqual(
+            resolve_tracking_velocity_kernel_resume_setting(
+                None,
+                requested="pseudo_huber",
+                allow_change=False,
+                is_resume=False,
+            ),
+            "pseudo_huber",
+        )
+        self.assertEqual(
+            resolve_tracking_velocity_kernel_resume_setting(
+                {},
+                requested="exponential",
+                allow_change=False,
+                is_resume=True,
+            ),
+            "exponential",
+        )
+        with self.assertRaisesRegex(ValueError, "hparams"):
+            resolve_tracking_velocity_kernel_resume_setting(
+                None,
+                requested="exponential",
+                allow_change=False,
+                is_resume=True,
+            )
+        with self.assertRaisesRegex(ValueError, "must match the checkpoint"):
+            resolve_tracking_velocity_kernel_resume_setting(
+                {"tracking_velocity_kernel": "exponential"},
+                requested="pseudo_huber",
+                allow_change=False,
+                is_resume=True,
+            )
+        self.assertEqual(
+            resolve_tracking_velocity_kernel_resume_setting(
+                {"tracking_velocity_kernel": "exponential"},
+                requested="pseudo_huber",
+                allow_change=True,
+                is_resume=True,
+            ),
+            "pseudo_huber",
+        )
+        for invalid in ("unknown", 1, None):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "velocity kernel"):
+                    resolve_tracking_velocity_kernel_resume_setting(
+                        {"tracking_velocity_kernel": invalid},
+                        requested="exponential",
+                        allow_change=False,
+                        is_resume=True,
+                    )
+
+    def test_tracking_velocity_kernel_train_settings_preserve_legacy_default(self):
+        from src.algorithms.shac.algorithm import train
+
+        parameters = inspect.signature(train).parameters
+
+        self.assertEqual(
+            parameters["tracking_velocity_kernel"].default, "exponential"
+        )
+        self.assertIs(
+            parameters[
+                "allow_resume_tracking_velocity_kernel_change"
+            ].default,
+            False,
+        )
+
     def test_future_reference_train_settings_are_default_off(self):
         from src.algorithms.shac.algorithm import train
 

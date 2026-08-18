@@ -151,6 +151,7 @@ class G1TrackingEnv:
         effort_limit_scale: float = 1.0,
         action_magnitude_weight: float = 0.0,
         termination_margin_weight: float = 0.0,
+        tracking_velocity_kernel: str = "exponential",
         reference_reset_noise_scale: float = 0.0,
         reference_root_reset_noise_multiplier: float = 1.0,
         reference_root_reset_noise_probability: float = 0.0,
@@ -253,6 +254,12 @@ class G1TrackingEnv:
                 "action_magnitude_weight must be non-negative and finite"
             )
         self.action_magnitude_weight = float(action_magnitude_weight)
+        if tracking_velocity_kernel not in {"exponential", "pseudo_huber"}:
+            raise ValueError(
+                "tracking_velocity_kernel must be 'exponential' or "
+                "'pseudo_huber'"
+            )
+        self.tracking_velocity_kernel = tracking_velocity_kernel
         if (
             isinstance(termination_margin_weight, bool)
             or not np.isfinite(termination_margin_weight)
@@ -773,6 +780,7 @@ class G1TrackingEnv:
             actual_body_lin_vel=body_lin_vel,
             target_body_ang_vel=self.body_ang_vel_reference[phase],
             actual_body_ang_vel=body_ang_vel,
+            velocity_kernel=self.tracking_velocity_kernel,
         )
 
     def _anchor_relative_reference(

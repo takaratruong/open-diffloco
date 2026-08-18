@@ -37,6 +37,27 @@ RMR_ACTIONS = Path(
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    def test_training_hparams_restore_tracking_velocity_kernel_strictly(self):
+        from tools.evaluate_g1_tracking import (
+            resolve_training_tracking_velocity_kernel,
+        )
+
+        self.assertEqual(
+            resolve_training_tracking_velocity_kernel({}), "exponential"
+        )
+        self.assertEqual(
+            resolve_training_tracking_velocity_kernel(
+                {"tracking_velocity_kernel": "pseudo_huber"}
+            ),
+            "pseudo_huber",
+        )
+        for invalid in ("unknown", 1, None):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "velocity kernel"):
+                    resolve_training_tracking_velocity_kernel(
+                        {"tracking_velocity_kernel": invalid}
+                    )
+
     def test_training_hparams_restore_motion_anchor_position_strictly(self):
         from tools.evaluate_g1_tracking import (
             resolve_training_motion_anchor_position_observation,
@@ -688,6 +709,26 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         self.assertTrue(candidate.actor_observe_motion_anchor_position)
         self.assertEqual(candidate.actor_frame_obs_dim, 331)
         self.assertEqual(candidate.actor_obs_dim, 3310)
+
+    def test_evaluator_forwards_tracking_velocity_kernel(self):
+        candidate = make_evaluation_env(
+            "g1_tracking_rmr_50hz_source_step",
+            tracking_velocity_kernel="pseudo_huber",
+        )
+
+        self.assertEqual(candidate.tracking_velocity_kernel, "pseudo_huber")
+
+    def test_evaluator_cli_accepts_tracking_velocity_kernel(self):
+        args = build_parser().parse_args(
+            [
+                "--output-dir",
+                "/tmp/g1-evaluation",
+                "--tracking-velocity-kernel",
+                "pseudo_huber",
+            ]
+        )
+
+        self.assertEqual(args.tracking_velocity_kernel, "pseudo_huber")
 
     def test_evaluator_cli_accepts_motion_anchor_position_observation(self):
         args = build_parser().parse_args(

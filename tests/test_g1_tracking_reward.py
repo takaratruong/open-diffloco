@@ -98,6 +98,50 @@ class RMRTrackingRewardTest(unittest.TestCase):
         self.assertTrue(bool(jnp.isfinite(gradient)))
         self.assertLess(float(gradient), 0.0)
 
+    def test_pseudo_huber_velocity_kernel_matches_registered_formula(self):
+        actual_body_lin_vel = self.body_lin_vel.at[0, 1].set(1.0)
+
+        reward, components = self.reward(
+            actual_body_lin_vel=actual_body_lin_vel,
+            velocity_kernel="pseudo_huber",
+        )
+
+        expected_linear_velocity = 2.0 - math.sqrt(2.0)
+        self.assertAlmostEqual(
+            float(components["body_linear_velocity"]),
+            expected_linear_velocity,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(components["body_angular_velocity"]), 1.0, places=6
+        )
+        self.assertAlmostEqual(
+            float(reward), 4.0 + expected_linear_velocity, places=6
+        )
+
+    def test_pseudo_huber_velocity_gradient_remains_informative_far_from_target(self):
+        def velocity_component(error, kernel):
+            _, components = self.reward(
+                actual_body_lin_vel=self.body_lin_vel.at[0, 0].set(error),
+                velocity_kernel=kernel,
+            )
+            return components["body_linear_velocity"]
+
+        pseudo_huber_gradient = jax.grad(
+            lambda error: velocity_component(error, "pseudo_huber")
+        )(jnp.array(10.0))
+        exponential_gradient = jax.grad(
+            lambda error: velocity_component(error, "exponential")
+        )(jnp.array(10.0))
+
+        self.assertTrue(bool(jnp.isfinite(pseudo_huber_gradient)))
+        self.assertLess(float(pseudo_huber_gradient), -0.1)
+        self.assertLess(abs(float(exponential_gradient)), 1e-10)
+
+    def test_tracking_reward_rejects_unknown_velocity_kernel(self):
+        with self.assertRaisesRegex(ValueError, "velocity kernel"):
+            self.reward(velocity_kernel="not-a-kernel")
+
     def test_termination_margin_penalty_activates_before_hard_limits(self):
         from src.envs.g1_tracking.reward import termination_margin_penalty
 

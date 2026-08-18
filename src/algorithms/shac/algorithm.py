@@ -669,6 +669,38 @@ def resolve_actor_observe_motion_anchor_position_resume_setting(
     return saved
 
 
+def resolve_tracking_velocity_kernel_resume_setting(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested: str,
+    allow_change: bool,
+    is_resume: bool,
+) -> str:
+    """Restore the exact velocity objective unless change is authorized."""
+    valid = {"exponential", "pseudo_huber"}
+    if requested not in valid:
+        raise ValueError("requested tracking velocity kernel is invalid")
+    if not isinstance(allow_change, bool):
+        raise ValueError(
+            "allow_resume_tracking_velocity_kernel_change must be boolean"
+        )
+    if not isinstance(is_resume, bool):
+        raise ValueError("is_resume must be boolean")
+    if not is_resume:
+        return requested
+    if resumed_hparams is None:
+        raise ValueError("resume hparams are required for the velocity kernel")
+    saved = resumed_hparams.get("tracking_velocity_kernel", "exponential")
+    if saved not in valid:
+        raise ValueError("checkpoint tracking velocity kernel is invalid")
+    if saved != requested and not allow_change:
+        raise ValueError(
+            "tracking velocity kernel must match the checkpoint unless "
+            "allow_resume_tracking_velocity_kernel_change is enabled"
+        )
+    return requested
+
+
 def resolve_residual_preview_adapter_resume_setting(
     resumed_hparams: dict[str, object] | None,
     *,
@@ -1696,6 +1728,8 @@ def train(
     effort_limit_scale: float = 1.0,
     termination_margin_weight: float = 0.0,
     allow_resume_termination_margin_change: bool = False,
+    tracking_velocity_kernel: str = "exponential",
+    allow_resume_tracking_velocity_kernel_change: bool = False,
     reference_reset_noise_scale: float = 0.0,
     reference_root_reset_noise_multiplier: float = 1.0,
     reference_root_reset_noise_probability: float = 0.0,
@@ -1748,6 +1782,10 @@ def train(
                                    margin surrogate weight.
         allow_resume_termination_margin_change: Explicitly permit a resumed
                                                  objective-treatment change.
+        tracking_velocity_kernel: Kernel used by G1 linear/angular velocity
+                                  tracking terms.
+        allow_resume_tracking_velocity_kernel_change: Explicitly permit a
+                                                       resumed kernel change.
         reference_reset_noise_scale: Scale of upstream RMR reference-reset
                                      perturbations; zero preserves exact RSI.
         reference_root_reset_noise_multiplier: Multiplier applied only to root
@@ -1975,6 +2013,12 @@ def train(
         raise ValueError(
             "allow_resume_termination_margin_change must be boolean"
         )
+    if tracking_velocity_kernel not in {"exponential", "pseudo_huber"}:
+        raise ValueError("tracking velocity kernel is invalid")
+    if not isinstance(allow_resume_tracking_velocity_kernel_change, bool):
+        raise ValueError(
+            "allow_resume_tracking_velocity_kernel_change must be boolean"
+        )
     if not isinstance(allow_resume_carried_reset_change, bool):
         raise ValueError(
             "allow_resume_carried_reset_change must be boolean"
@@ -2116,6 +2160,14 @@ def train(
 
     if resume_from:
         resumed_state, resumed_hparams, resumed_step = load_checkpoint(resume_from)
+        tracking_velocity_kernel = (
+            resolve_tracking_velocity_kernel_resume_setting(
+                resumed_hparams,
+                requested=tracking_velocity_kernel,
+                allow_change=allow_resume_tracking_velocity_kernel_change,
+                is_resume=True,
+            )
+        )
         (
             reference_path,
             reference_path_migration_report,
@@ -2487,6 +2539,7 @@ def train(
             {
                 "effort_limit_scale": effort_limit_scale,
                 "termination_margin_weight": termination_margin_weight,
+                "tracking_velocity_kernel": tracking_velocity_kernel,
                 "reference_reset_noise_scale": reference_reset_noise_scale,
                 "reference_root_reset_noise_multiplier": (
                     reference_root_reset_noise_multiplier
@@ -4484,6 +4537,10 @@ def train(
         "termination_margin_weight": termination_margin_weight,
         "allow_resume_termination_margin_change": (
             allow_resume_termination_margin_change
+        ),
+        "tracking_velocity_kernel": tracking_velocity_kernel,
+        "allow_resume_tracking_velocity_kernel_change": (
+            allow_resume_tracking_velocity_kernel_change
         ),
         "reference_reset_noise_scale": reference_reset_noise_scale,
         "reference_root_reset_noise_multiplier": (

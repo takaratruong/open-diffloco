@@ -195,6 +195,42 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
                 ):
                     G1TrackingEnv(termination_margin_weight=weight)
 
+    def test_tracking_velocity_kernel_is_explicit_and_validated(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        pseudo_huber = G1TrackingEnv(
+            tracking_velocity_kernel="pseudo_huber"
+        )
+
+        self.assertEqual(self.env.tracking_velocity_kernel, "exponential")
+        self.assertEqual(
+            pseudo_huber.tracking_velocity_kernel, "pseudo_huber"
+        )
+        with self.assertRaisesRegex(ValueError, "tracking_velocity_kernel"):
+            G1TrackingEnv(tracking_velocity_kernel="not-a-kernel")
+
+    def test_environment_forwards_pseudo_huber_velocity_kernel(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        env = G1TrackingEnv(tracking_velocity_kernel="pseudo_huber")
+        phase = jnp.array(0)
+        target_body_pos = env.body_pos_reference[phase]
+        target_body_quat = env.body_quat_reference[phase]
+        actual_body_lin_vel = env.body_lin_vel_reference[phase].at[0, 0].add(1.0)
+
+        _, components = env._tracking_reward_from_body_state(
+            {"phase": phase},
+            target_body_pos,
+            target_body_quat,
+            actual_body_lin_vel,
+            env.body_ang_vel_reference[phase],
+        )
+
+        expected = 2.0 - math.sqrt(1.0 + 2.0 / len(env.body_ids))
+        self.assertAlmostEqual(
+            float(components["body_linear_velocity"]), expected, places=6
+        )
+
     def test_open_diffloco_factory_selects_tracking_environment(self):
         from src.envs.g1_tracking.environment import G1TrackingEnv
         from src.envs.go2.environment import get_go2_env_class

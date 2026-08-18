@@ -365,6 +365,38 @@ class G1TrackingRunnerTest(unittest.TestCase):
 
         self.assertTrue(kwargs["allow_resume_termination_margin_change"])
 
+    def test_native_rmr_runner_transports_tracking_velocity_kernel(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        kwargs = build_train_kwargs(
+            steps=65_536,
+            num_envs=256,
+            seed=3,
+            checkpoint_interval=16_384,
+            validated_task=True,
+            tracking_velocity_kernel="pseudo_huber",
+        )
+
+        self.assertEqual(kwargs["tracking_velocity_kernel"], "pseudo_huber")
+        self.assertFalse(
+            kwargs["allow_resume_tracking_velocity_kernel_change"]
+        )
+
+    def test_native_rmr_runner_rejects_invalid_tracking_velocity_kernel(self):
+        from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
+
+        for kernel in ("unknown", 1, None):
+            with self.subTest(kernel=kernel):
+                with self.assertRaisesRegex(ValueError, "velocity kernel"):
+                    build_train_kwargs(
+                        steps=65_536,
+                        num_envs=256,
+                        seed=3,
+                        checkpoint_interval=16_384,
+                        validated_task=True,
+                        tracking_velocity_kernel=kernel,
+                    )
+
     def test_native_rmr_runner_transports_reference_reset_noise_scale(self):
         from tools.run_g1_tracking_rmr50_shac import build_train_kwargs
 

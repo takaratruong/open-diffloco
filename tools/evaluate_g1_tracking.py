@@ -172,6 +172,7 @@ def make_evaluation_env(
     actor_reference_lookahead_steps: tuple[int, ...] = (),
     actor_reference_preview_mode: str = "absolute",
     actor_observe_motion_anchor_position: bool = False,
+    tracking_velocity_kernel: str = "exponential",
     actor_observation_noise: bool = False,
     domain_randomization: bool = False,
     friction_range: tuple[float, float] = (1.0, 1.0),
@@ -194,6 +195,7 @@ def make_evaluation_env(
         "actor_observe_motion_anchor_position": (
             actor_observe_motion_anchor_position
         ),
+        "tracking_velocity_kernel": tracking_velocity_kernel,
         "actor_observation_noise": actor_observation_noise,
         "domain_randomization": domain_randomization,
         "friction_range": friction_range,
@@ -227,6 +229,16 @@ def resolve_training_motion_anchor_position_observation(
         raise ValueError(
             "actor_observe_motion_anchor_position hparam must be boolean"
         )
+    return value
+
+
+def resolve_training_tracking_velocity_kernel(
+    hparams: dict[str, object],
+) -> str:
+    """Restore the checkpoint reward kernel without coercion."""
+    value = hparams.get("tracking_velocity_kernel", "exponential")
+    if value not in {"exponential", "pseudo_huber"}:
+        raise ValueError("training tracking velocity kernel is invalid")
     return value
 
 
@@ -565,6 +577,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--actor-observe-motion-anchor-position", action="store_true"
     )
     parser.add_argument(
+        "--tracking-velocity-kernel",
+        choices=("exponential", "pseudo_huber"),
+        default="exponential",
+    )
+    parser.add_argument(
         "--reference-residual-control", action="store_true"
     )
     parser.add_argument(
@@ -677,6 +694,9 @@ def main() -> None:
                 training_hparams
             )
         )
+        args.tracking_velocity_kernel = (
+            resolve_training_tracking_velocity_kernel(training_hparams)
+        )
         args.reference_residual_control = bool(
             training_hparams["reference_residual_control"]
         )
@@ -729,6 +749,7 @@ def main() -> None:
         actor_observe_motion_anchor_position=(
             args.actor_observe_motion_anchor_position
         ),
+        tracking_velocity_kernel=args.tracking_velocity_kernel,
         actor_observation_noise=visualization_controls.actor_observation_noise,
         domain_randomization=(
             bool(training_hparams["domain_randomization"])
@@ -1187,6 +1208,7 @@ def main() -> None:
         "actor_observe_motion_anchor_position": (
             env.actor_observe_motion_anchor_position
         ),
+        "tracking_velocity_kernel": env.tracking_velocity_kernel,
         "reference_states": env.reference_length,
         "reference_transitions": env.reference_transitions,
         "evaluation_start_phase": start_phase,
