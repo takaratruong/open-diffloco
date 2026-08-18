@@ -33,6 +33,7 @@ def test_flax_phase_grid_payload_records_exact_suffix_completion():
         actor_reference_preview_mode="delta",
         actor_history_len=1,
         actor_observe_motion_anchor_position=True,
+        tracking_velocity_kernel="pseudo_huber",
         actor_residual_preview_adapter=True,
         actor_residual_preview_hidden=256,
         actor_residual_preview_trainable_parameter_count=91_677,
@@ -51,6 +52,7 @@ def test_flax_phase_grid_payload_records_exact_suffix_completion():
     assert payload["actor_reference_lookahead_steps"] == [4, 8, 12]
     assert payload["actor_reference_preview_mode"] == "delta"
     assert payload["actor_observe_motion_anchor_position"] is True
+    assert payload["tracking_velocity_kernel"] == "pseudo_huber"
     assert payload["actor_residual_preview_adapter"] is True
     assert payload["actor_residual_preview_hidden"] == 256
     assert payload["actor_residual_preview_trainable_parameter_count"] == 91_677
@@ -139,6 +141,7 @@ def test_phase_grid_loads_environment_contract_from_checkpoint_hparams(
     expected = {
         **hparams,
         "actor_reference_lookahead_steps": (4, 8, 12),
+        "tracking_velocity_kernel": "exponential",
     }
 
     for stored, expected_value in ((None, False), (False, False), (True, True)):
@@ -154,6 +157,18 @@ def test_phase_grid_loads_environment_contract_from_checkpoint_hparams(
             **expected,
             "actor_observe_motion_anchor_position": expected_value,
         }
+
+    candidate = dict(hparams)
+    candidate["actor_reference_lookahead_steps"] = [4, 8, 12]
+    candidate["tracking_velocity_kernel"] = "pseudo_huber"
+    (tmp_path / "hparams.json").write_text(json.dumps(candidate))
+    contract = load_checkpoint_environment_contract(checkpoint)
+    assert contract["tracking_velocity_kernel"] == "pseudo_huber"
+
+    candidate["tracking_velocity_kernel"] = "unknown"
+    (tmp_path / "hparams.json").write_text(json.dumps(candidate))
+    with pytest.raises(ValueError, match="evaluation contract is invalid"):
+        load_checkpoint_environment_contract(checkpoint)
 
     for invalid in ("false", 1, None):
         candidate = dict(hparams)
