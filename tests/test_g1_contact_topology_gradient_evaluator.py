@@ -13,6 +13,7 @@ from tools.evaluate_g1_contact_topology_gradients import (
     build_fixed_phase_population,
     classify_contact_topology_gradient_audit,
     compare_solver_gradients,
+    validate_forward_identity,
     validate_completion,
 )
 
@@ -129,3 +130,11 @@ def test_completion_reopens_and_rejects_tampering(tmp_path: Path) -> None:
     artifact.write_text('{"valid": false}\n', encoding="utf-8")
     with pytest.raises(ValueError, match="artifact hash"):
         validate_completion(completion_path)
+
+
+def test_forward_identity_names_first_different_array_and_error() -> None:
+    left = {"qpos": np.asarray([[1.0, 2.0]]), "done": np.asarray([False])}
+    right = {"qpos": np.asarray([[1.0, 2.25]]), "done": np.asarray([False])}
+
+    with pytest.raises(ValueError, match=r"qpos.*max_abs=0.25"):
+        validate_forward_identity(left, right, label="smoke")

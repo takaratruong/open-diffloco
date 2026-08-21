@@ -197,6 +197,32 @@ def validate_completion(path: Path) -> dict[str, object]:
     return payload
 
 
+def validate_forward_identity(
+    ordinary: Mapping[str, np.ndarray],
+    truncated: Mapping[str, np.ndarray],
+    *,
+    label: str,
+) -> bool:
+    """Require exact primal identity and localize the first mismatch."""
+
+    if set(ordinary) != set(truncated):
+        raise ValueError(f"{label} forward schemas differ")
+    for name in sorted(ordinary):
+        left = np.asarray(ordinary[name])
+        right = np.asarray(truncated[name])
+        if left.shape != right.shape or left.dtype != right.dtype:
+            raise ValueError(f"{label} forward {name} shape/dtype differs")
+        if np.array_equal(left, right):
+            continue
+        if np.issubdtype(left.dtype, np.number):
+            difference = np.abs(left.astype(np.float64) - right.astype(np.float64))
+            detail = f"max_abs={float(np.nanmax(difference)):.17g}"
+        else:
+            detail = f"different_count={int(np.sum(left != right))}"
+        raise ValueError(f"{label} forward {name} differs: {detail}")
+    return True
+
+
 def _tree_vector(tree: Any) -> np.ndarray:
     leaves = [np.asarray(leaf).reshape(-1) for leaf in __import__("jax").tree_util.tree_leaves(tree)]
     return np.concatenate(leaves).astype(np.float64, copy=False)
@@ -449,11 +475,11 @@ def run_gradient_capture(
     if smoke:
         ordinary = captures[("e023", SOLVERS[0], "ordinary")]
         truncated = captures[("e023", SOLVERS[0], "contact_truncated")]
-        for key in ordinary["auxiliary"]:
-            if not np.array_equal(
-                ordinary["auxiliary"][key], truncated["auxiliary"][key]
-            ):
-                raise ValueError("smoke forward paths are not bit-identical")
+        validate_forward_identity(
+            ordinary["auxiliary"],
+            truncated["auxiliary"],
+            label="smoke",
+        )
         norms = {
             mode: float(
                 np.linalg.norm(
@@ -491,9 +517,11 @@ def run_gradient_capture(
         for solver_name in SOLVERS:
             ordinary_aux = captures[(actor_name, solver_name, "ordinary")]["auxiliary"]
             truncated_aux = captures[(actor_name, solver_name, "contact_truncated")]["auxiliary"]
-            for key in ordinary_aux:
-                if not np.array_equal(ordinary_aux[key], truncated_aux[key]):
-                    raise ValueError("ordinary/truncated forward evidence differs")
+            validate_forward_identity(
+                ordinary_aux,
+                truncated_aux,
+                label=f"{actor_name}/{solver_name}",
+            )
             for mode in MODES:
                 capture = captures[(actor_name, solver_name, mode)]
                 aggregated = aggregate_audit_direction(
