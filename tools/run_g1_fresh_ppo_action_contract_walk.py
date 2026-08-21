@@ -90,6 +90,7 @@ def _validate_cagrad_row(
     *,
     step: int,
     expected_action_noise: Any = 0.2,
+    expected_actor_bootstrap_scale: float = 0.0,
 ) -> None:
     vectors = {
         key: np.asarray(row.get(key), dtype=np.float64)
@@ -140,7 +141,8 @@ def _validate_cagrad_row(
             for key in scalar_keys
         )
         or float(row["actor_cagrad_combined_norm"]) <= 0.0
-        or row.get("actor_bootstrap_scale_current") != 0.0
+        or row.get("actor_bootstrap_scale_current")
+        != expected_actor_bootstrap_scale
         or not action_noise_valid
     ):
         raise ValueError(f"checkpoint {step} CAGrad telemetry is invalid")
@@ -156,6 +158,7 @@ def validate_training_artifacts(
     expected_steps: tuple[int, ...] | None = None,
     total_steps: int = TOTAL_STEPS,
     protocol: str = "g1-fresh-ppo-action-contract-walk-training-v1",
+    expected_actor_bootstrap_scale: float = 0.0,
 ) -> dict[str, Any]:
     """Fail closed on drift, incomplete checkpoints, or nonfinite learning."""
     run_directory = run_directory.resolve()
@@ -247,6 +250,7 @@ def validate_training_artifacts(
             rows_by_step[step],
             step=step,
             expected_action_noise=expected_action_noise,
+            expected_actor_bootstrap_scale=expected_actor_bootstrap_scale,
         )
 
     diagnostics = json.loads(
