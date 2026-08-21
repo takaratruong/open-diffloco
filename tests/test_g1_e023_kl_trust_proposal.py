@@ -113,6 +113,10 @@ def test_preflight_adds_exact_source_and_single_update_contract(monkeypatch, tmp
     assert report["protocol"] == "g1-e023-kl-trust-proposal-preflight-v1"
     assert report["start_step"] == runner.START_STEP
     assert report["end_step"] == runner.END_STEP
+    assert report["total_steps"] == runner.END_STEP
+    assert report["total_updates"] == 129
+    assert report["checkpoint_interval"] == runner.CHECKPOINT_INTERVAL
+    assert report["checkpoint_updates"] == 1
     assert report["checkpoint_steps"] == [runner.END_STEP]
     assert report["scientific_delta"] == [
         "resume_from",

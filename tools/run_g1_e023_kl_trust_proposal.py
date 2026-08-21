@@ -85,7 +85,11 @@ def validate_preflight(
         "hparams_sha256": EXPECTED_RESUME_HPARAMS_SHA256,
         "start_step": START_STEP,
         "end_step": END_STEP,
+        "total_steps": END_STEP,
+        "total_updates": 129,
         "additional_updates": 1,
+        "checkpoint_interval": CHECKPOINT_INTERVAL,
+        "checkpoint_updates": 1,
         "checkpoint_steps": list(expected_checkpoint_steps()),
         "scientific_delta": [
             "resume_from",
