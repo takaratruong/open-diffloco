@@ -512,8 +512,18 @@ def select_kl_behavioral_candidate(
     source_survival: Sequence[int] = E023_FLOORS,
 ) -> dict[str, Any]:
     """Select the largest KL-feasible candidate preserving every E023 phase."""
-    if tuple(source_survival) != E023_FLOORS:
-        raise ValueError("source survival does not match the protected E023 floor")
+    if (
+        len(source_survival) != len(E023_FLOORS)
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < floor
+            for value, floor in zip(
+                source_survival, E023_FLOORS, strict=True
+            )
+        )
+    ):
+        raise ValueError("source survival is below the protected E023 floor")
     candidates = _validated_rows(rows)
     kl_feasible = [row for row in candidates if row["kl_feasible"]]
     safe = [
@@ -543,7 +553,7 @@ def select_kl_behavioral_candidate(
     return {
         "protocol": "g1-e023-kl-behavioral-selection-v1",
         "valid": True,
-        "source_survival": list(E023_FLOORS),
+        "source_survival": list(source_survival),
         "outcome": outcome,
         "selected_alpha": selected_alpha,
     }
@@ -618,8 +628,13 @@ def build_phase_selection(
     ):
         raise ValueError("proximity candidate grid is invalid")
     source = _phase_grid_evidence(source_phase_grid)
-    if tuple(source["survival"]) != E023_FLOORS:
-        raise ValueError("source phase grid does not match protected E023")
+    if any(
+        value < floor
+        for value, floor in zip(
+            source["survival"], E023_FLOORS, strict=True
+        )
+    ):
+        raise ValueError("source phase grid is below protected E023")
     rows: list[dict[str, Any]] = []
     for proximity, phase_grid in zip(
         proximity_rows, candidate_phase_grids, strict=True
@@ -636,7 +651,9 @@ def build_phase_selection(
                 ),
             }
         )
-    selection = select_kl_behavioral_candidate(rows)
+    selection = select_kl_behavioral_candidate(
+        rows, source_survival=source["survival"]
+    )
     return {
         **selection,
         "source_tracking_metrics": source["tracking_metrics"],

@@ -401,6 +401,11 @@ def test_build_phase_selection_joins_kl_and_replay_free_evidence():
     assert selection["selected_alpha"] == 0.25
     assert selection["candidates"][2]["survival"] == [117, 99, 67, 49, 24]
 
+    above_floor_source = build_phase_selection(
+        proximity, _phase_grid((117, 99, 69, 49, 24)), grids
+    )
+    assert above_floor_source["source_survival"] == [117, 99, 69, 49, 24]
+
 
 def test_build_phase_selection_rejects_kernel_and_source_floor_drift():
     from tools.evaluate_g1_e023_kl_behavioral_trust import (
