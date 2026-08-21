@@ -12,6 +12,10 @@ from mujoco import mjx
 
 from src.core.contact import contact_stiffness
 from src.core.data_structures import EnvState
+from src.envs.g1_tracking.contact_topology import (
+    contact_topology_event,
+    grouped_foot_support,
+)
 from src.envs.g1_tracking.controller import load_rmr_controller
 from src.envs.g1_tracking.reference import (
     RMR_G1_BODY_NAMES,
@@ -693,6 +697,9 @@ class G1TrackingEnv:
         # first task discriminator.
         left_foot = self.body_ids[3]
         right_foot = self.body_ids[6]
+        self._support_foot_body_ids = jp.asarray(
+            [left_foot, right_foot], dtype=jp.int32
+        )
         self._foot_body_ids = jp.array(
             [left_foot, right_foot, left_foot, right_foot], dtype=jp.int32
         )
@@ -722,6 +729,17 @@ class G1TrackingEnv:
             jp.stack(quaternions),
             jp.stack(linear_velocities),
             jp.stack(angular_velocities),
+        )
+
+    def foot_support_signature(self, data: mjx.Data) -> jax.Array:
+        """Return grouped active-contact support for left and right feet."""
+
+        contact = data._impl.contact
+        return grouped_foot_support(
+            contact.geom,
+            contact.efc_address,
+            self.mjx_model.geom_bodyid,
+            self._support_foot_body_ids,
         )
 
     def _aligned_reference_body_targets(
@@ -910,6 +928,7 @@ class G1TrackingEnv:
             "foot_normal_forces": jp.zeros(4),
             "terminal": jp.array(0.0),
             "transition_contact_stiffness": jp.array(0.0),
+            "transition_contact_topology_event": jp.array(False),
             "reset_was_carried": jp.array(False),
             **randomization,
         }
@@ -1472,6 +1491,7 @@ class G1TrackingEnv:
 
     @functools.partial(jax.checkpoint, static_argnums=(0,))
     def step(self, state: EnvState, action: jax.Array) -> EnvState:
+        previous_foot_support = self.foot_support_signature(state.data)
         action = self._prepare_action(action)
         position_target = self.position_target(state, action, prepared=True)
         model = self._get_randomized_model(state.info)
@@ -1547,6 +1567,12 @@ class G1TrackingEnv:
         done, terminal = self._termination(
             data, pre_reset_info, body_pos, body_quat
         )
+        transition_foot_support = self.foot_support_signature(data)
+        transition_contact_topology_event = contact_topology_event(
+            previous_foot_support,
+            transition_foot_support,
+            done=done,
+        )
 
         bootstrap_actor_frame = self._get_actor_obs(data, pre_reset_info)
         bootstrap_history = jp.concatenate(
@@ -1597,6 +1623,9 @@ class G1TrackingEnv:
             "bootstrap_obs": bootstrap_history.reshape(-1),
             "bootstrap_critic_obs": bootstrap_critic_obs,
             "transition_contact_stiffness": transition_contact_stiffness,
+            "transition_contact_topology_event": (
+                transition_contact_topology_event
+            ),
         }
         next_actor_frame = self._get_actor_obs(next_data, next_info)
         continued_history = jp.concatenate(

@@ -1196,6 +1196,53 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         self.assertTrue(np.isfinite(np.asarray(next_state.data.qpos)).all())
         self.assertTrue(np.isfinite(float(next_state.reward)))
 
+    def test_environment_exposes_grouped_left_right_support(self):
+        env = self.env
+        state = env.reset_at_phase(
+            jax.random.PRNGKey(41), jnp.array(0.0), jnp.array(0)
+        )
+
+        support = env.foot_support_signature(state.data)
+
+        self.assertEqual(support.shape, (2,))
+        self.assertEqual(support.dtype, jnp.bool_)
+        np.testing.assert_array_equal(
+            env._support_foot_body_ids,
+            np.asarray([env.body_ids[3], env.body_ids[6]]),
+        )
+
+    def test_step_persists_nonreset_contact_topology_event(self):
+        env = self.env
+        state = env.reset_at_phase(
+            jax.random.PRNGKey(42), jnp.array(0.0), jnp.array(0)
+        )
+        before = env.foot_support_signature(state.data)
+
+        next_state = env.step(state, jnp.zeros(env.action_dim))
+        after = env.foot_support_signature(next_state.data)
+
+        expected = bool(jnp.any(before != after))
+        self.assertEqual(
+            bool(next_state.info["transition_contact_topology_event"]),
+            expected,
+        )
+
+    def test_terminal_reset_is_not_reported_as_contact_topology_event(self):
+        env = self.env
+        final_phase = env.reference_length - 1
+        state = env.reset_at_phase(
+            jax.random.PRNGKey(43),
+            jnp.array(0.0),
+            jnp.array(final_phase),
+        )
+
+        next_state = env.step(state, jnp.zeros(env.action_dim))
+
+        self.assertTrue(bool(next_state.done))
+        self.assertFalse(
+            bool(next_state.info["transition_contact_topology_event"])
+        )
+
     def test_termination_thresholds_match_upstream_rmr(self):
         from src.envs.g1_tracking.environment import _quat_mul
 
