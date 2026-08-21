@@ -36,8 +36,8 @@ change the fixed population, actor, loss, solver, or outcome gates.
 - Modify: `tests/test_g1_tracking_environment.py`
 
 **Interfaces:**
-- Consumes: MJX `data.contact.geom`, `data.contact.efc_address`, model `geom_bodyid`, and exact left/right ankle-roll body IDs.
-- Produces: `grouped_foot_support(contact_geom, efc_address, geom_bodyid, foot_body_ids) -> jax.Array`; `contact_topology_event(previous, current, *, done) -> jax.Array`; `G1TrackingEnv.foot_support_signature(data) -> jax.Array`; `state.info["transition_contact_topology_event"]`.
+- Consumes: MJX `data.contact.geom`, signed `data.contact.dist`, model `geom_bodyid`, and exact left/right ankle-roll body IDs.
+- Produces: `grouped_foot_support(contact_geom, contact_distance, geom_bodyid, foot_body_ids) -> jax.Array`; `contact_topology_event(previous, current, *, done) -> jax.Array`; `G1TrackingEnv.foot_support_signature(data) -> jax.Array`; `state.info["transition_contact_topology_event"]`.
 
 - [ ] **Step 1: Write pure RED tests**
 
@@ -73,18 +73,18 @@ Expected: collection fails because `src.envs.g1_tracking.contact_topology` does 
 - [ ] **Step 3: Implement the pure topology functions**
 
 ```python
-def grouped_foot_support(contact_geom, efc_address, geom_bodyid, foot_body_ids):
+def grouped_foot_support(contact_geom, contact_distance, geom_bodyid, foot_body_ids):
     pairs = jp.asarray(contact_geom)
-    addresses = jp.asarray(efc_address)
+    distances = jp.asarray(contact_distance)
     body_for_geom = jp.asarray(geom_bodyid)
     feet = jp.asarray(foot_body_ids)
     if pairs.ndim != 2 or pairs.shape[-1] != 2:
         raise ValueError("contact_geom must have shape (N, 2)")
-    if addresses.shape != pairs.shape[:1] or feet.shape != (2,):
+    if distances.shape != pairs.shape[:1] or feet.shape != (2,):
         raise ValueError("contact topology inputs have incompatible shapes")
     safe_pairs = jp.clip(pairs, 0, body_for_geom.shape[0] - 1)
     pair_bodies = body_for_geom[safe_pairs]
-    active = addresses >= 0
+    active = distances <= 0.0
     return jp.any(
         active[None, :, None]
         & (pair_bodies[None, :, :] == feet[:, None, None]),

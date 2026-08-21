@@ -738,7 +738,7 @@ class G1TrackingEnv:
         contact = data._impl.contact
         return grouped_foot_support(
             contact.geom,
-            contact.efc_address,
+            contact.dist,
             self.mjx_model.geom_bodyid,
             self._support_foot_body_ids,
         )
@@ -749,7 +749,7 @@ class G1TrackingEnv:
         contact = data._impl.contact
         return grouped_body_pair_contacts(
             contact.geom,
-            contact.efc_address,
+            contact.dist,
             self.mjx_model.geom_bodyid,
             body_count=self.mj_model.nbody,
         )

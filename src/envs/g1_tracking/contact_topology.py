@@ -8,20 +8,20 @@ import jax.numpy as jp
 
 def grouped_foot_support(
     contact_geom: jax.Array,
-    efc_address: jax.Array,
+    contact_distance: jax.Array,
     geom_bodyid: jax.Array,
     foot_body_ids: jax.Array,
 ) -> jax.Array:
     """Return active left/right support from every collision geom per foot."""
 
     pairs = jp.asarray(contact_geom)
-    addresses = jp.asarray(efc_address)
+    distances = jp.asarray(contact_distance)
     body_for_geom = jp.asarray(geom_bodyid)
     feet = jp.asarray(foot_body_ids)
     if (
         pairs.ndim != 2
         or pairs.shape[-1] != 2
-        or addresses.shape != pairs.shape[:1]
+        or distances.shape != pairs.shape[:1]
         or body_for_geom.ndim != 1
         or body_for_geom.shape[0] < 1
         or feet.shape != (2,)
@@ -30,7 +30,7 @@ def grouped_foot_support(
 
     safe_pairs = jp.clip(pairs, 0, body_for_geom.shape[0] - 1)
     pair_bodies = body_for_geom[safe_pairs]
-    active = addresses >= 0
+    active = distances <= 0.0
     return jp.any(
         active[None, :, None]
         & (pair_bodies[None, :, :] == feet[:, None, None]),
@@ -40,7 +40,7 @@ def grouped_foot_support(
 
 def grouped_body_pair_contacts(
     contact_geom: jax.Array,
-    efc_address: jax.Array,
+    contact_distance: jax.Array,
     geom_bodyid: jax.Array,
     *,
     body_count: int,
@@ -48,12 +48,12 @@ def grouped_body_pair_contacts(
     """Return one active-contact bit per unordered pair of model bodies."""
 
     pairs = jp.asarray(contact_geom)
-    addresses = jp.asarray(efc_address)
+    distances = jp.asarray(contact_distance)
     body_for_geom = jp.asarray(geom_bodyid)
     if (
         pairs.ndim != 2
         or pairs.shape[-1] != 2
-        or addresses.shape != pairs.shape[:1]
+        or distances.shape != pairs.shape[:1]
         or body_for_geom.ndim != 1
         or body_for_geom.shape[0] < 1
         or not isinstance(body_count, int)
@@ -65,7 +65,7 @@ def grouped_body_pair_contacts(
     pair_bodies = body_for_geom[safe_pairs]
     lower = jp.minimum(pair_bodies[:, 0], pair_bodies[:, 1])
     upper = jp.maximum(pair_bodies[:, 0], pair_bodies[:, 1])
-    active = (addresses >= 0) & (lower != upper)
+    active = (distances <= 0.0) & (lower != upper)
     flat_index = lower * body_count + upper
     counts = jp.zeros((body_count * body_count,), dtype=jp.int32).at[
         flat_index

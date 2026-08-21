@@ -12,11 +12,10 @@ from src.envs.g1_tracking.contact_topology import (
 def test_grouped_support_uses_all_geometries_and_ignores_inactive_rows() -> None:
     geom_bodyid = jp.asarray([0, 7, 7, 13, 18])
     contact_geom = jp.asarray([[1, 0], [2, 4], [3, 0], [4, 0]])
-    efc_address = jp.asarray([0, -1, 3, 6])
 
     actual = grouped_foot_support(
         contact_geom,
-        efc_address,
+        jp.asarray([-0.1, 0.2, -0.3, -0.4]),
         geom_bodyid,
         jp.asarray([7, 13]),
     )
@@ -27,7 +26,7 @@ def test_grouped_support_uses_all_geometries_and_ignores_inactive_rows() -> None
 def test_grouped_support_ignores_active_nonfoot_contacts() -> None:
     actual = grouped_foot_support(
         jp.asarray([[0, 3], [3, 4]]),
-        jp.asarray([0, 3]),
+        jp.asarray([-0.1, -0.2]),
         jp.asarray([0, 7, 13, 18, 19]),
         jp.asarray([7, 13]),
     )
@@ -38,7 +37,7 @@ def test_grouped_support_ignores_active_nonfoot_contacts() -> None:
 def test_grouped_body_pairs_collapse_duplicate_contact_points() -> None:
     signature = grouped_body_pair_contacts(
         jp.asarray([[0, 1], [0, 2], [3, 4], [1, 4]]),
-        jp.asarray([0, 3, 6, -1]),
+        jp.asarray([-0.1, -0.2, -0.3, 0.1]),
         jp.asarray([0, 7, 7, 13, 18]),
         body_count=20,
     )
