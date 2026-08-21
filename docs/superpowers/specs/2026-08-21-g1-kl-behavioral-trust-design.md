@@ -44,10 +44,11 @@ actor normalizer bit-exactly. The one-update normalizer is not interpolated or
 selected: as in PPO's frozen rollout batch, proximity is measured and deployed
 under the observation transform that generated the batch.
 
-Candidate checkpoints are evaluation-only: they contain the source TrainState
-with only actor parameters replaced by the interpolated actor. They may not be
-resumed for training because their optimizer moments do not represent the
-interpolated update. A successful discriminator authorizes a new optimizer
+Candidate checkpoints are compact evaluation-only records containing the
+interpolated actor parameters and the bit-exact source normalizer. They omit
+environment, critic, optimizer, and RNG state and therefore cannot be resumed
+for training. This avoids six 428 MB copies of irrelevant and misleading
+optimizer state. A successful discriminator authorizes a new optimizer
 implementation; it does not promote an interpolation artifact into a training
 parent.
 

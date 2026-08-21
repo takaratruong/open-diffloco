@@ -14,7 +14,7 @@
 - Proposal is exactly one effective-512 H24 five-bin CAGrad update ending at `1_585_152`.
 - Candidate alphas are exactly `(1, 0.5, 0.25, 0.125, 0.0625, 0.03125)`.
 - Mean per-dimension KL must be at most `0.01`; per-state p95 KL must be at most `0.02`.
-- All candidate checkpoints retain the source normalizer and all non-actor TrainState leaves bit-exactly and are marked evaluation-only.
+- All candidate checkpoints are compact actor-plus-source-normalizer records marked evaluation-only and non-resumable.
 - Behavioral floors are exactly `(116, 99, 67, 49, 24)` at phases `(0, 25, 50, 75, 100)`.
 - Do not alter SHAC, the reward, the environment, the solver, the state distribution, or the E023 action-noise schedule.
 - Use TDD: observe each focused test fail for the intended missing behavior before production edits.
@@ -135,11 +135,11 @@ Run focused tests and neighboring continuation-runner tests, Ruff, py_compile, a
 
 - [ ] **Step 1: Write checkpoint-builder RED tests**
 
-Use small real `TrainState` fixtures. Require each output state to preserve every non-actor leaf and source normalizer bit-exactly, interpolate only actor parameters, carry its alpha in a hash-bound manifest, and be labeled `evaluation_only: true` and `resumable: false`.
+Use small actor and normalizer fixtures. Require each output state to contain only interpolated actor parameters and the source normalizer bit-exactly, carry its alpha in a hash-bound manifest, and be labeled `evaluation_only: true` and `resumable: false`.
 
 - [ ] **Step 2: Implement atomic candidate publication**
 
-Load source/proposal once, validate identical actor structure and source identity, create six states with `source_state.replace(actor_params=...)`, write each pickle through a same-directory temporary plus `os.replace`, then hash every checkpoint into the atomic manifest.
+Load source/proposal once, validate identical actor structure and source identity, create six compact `EvaluationActorState(actor_params, source_normalizer)` records, write each pickle through a same-directory temporary plus `os.replace`, then hash every checkpoint into the atomic manifest.
 
 - [ ] **Step 3: Write real-bank actor/KL RED tests**
 
