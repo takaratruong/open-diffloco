@@ -9,6 +9,30 @@ import jax
 import jax.numpy as jp
 
 
+@jax.custom_vjp
+def _identity_with_event_barrier(
+    value: jax.Array, event: jax.Array
+) -> jax.Array:
+    return value
+
+
+def _identity_with_event_barrier_fwd(value, event):
+    return value, event
+
+
+def _identity_with_event_barrier_bwd(event, cotangent):
+    return (
+        jp.where(event, jp.zeros_like(cotangent), cotangent),
+        None,
+    )
+
+
+_identity_with_event_barrier.defvjp(
+    _identity_with_event_barrier_fwd,
+    _identity_with_event_barrier_bwd,
+)
+
+
 def contact_gradient_barrier(
     tree: Any,
     event: jax.Array,
@@ -23,12 +47,14 @@ def contact_gradient_barrier(
         jp.asarray(event, dtype=jp.bool_)
         & jp.asarray(enabled, dtype=jp.bool_)
     )
-    return jax.tree_util.tree_map(
-        lambda value: jp.where(
-            stopped_event, jax.lax.stop_gradient(value), value
-        ),
-        tree,
-    )
+
+    def barrier(value):
+        dtype = getattr(value, "dtype", None)
+        if dtype is None or not jp.issubdtype(dtype, jp.inexact):
+            return value
+        return _identity_with_event_barrier(value, stopped_event)
+
+    return jax.tree_util.tree_map(barrier, tree)
 
 
 def contact_topology_event_from_info(
