@@ -189,3 +189,18 @@ def test_resume_settings_require_complete_metadata_and_explicit_authority():
         is_resume=True,
         allow_change=True,
     ) == ("/tmp/teacher.npz", "a" * 64, 0.5)
+
+
+def test_legacy_resume_without_teacher_metadata_preserves_disabled_treatment():
+    from src.algorithms.shac.recovery_teacher import (
+        resolve_recovery_teacher_resume_settings,
+    )
+
+    assert resolve_recovery_teacher_resume_settings(
+        requested_path=None,
+        requested_sha256=None,
+        requested_ratio=0.0,
+        resumed_hparams={},
+        is_resume=True,
+        allow_change=False,
+    ) == (None, None, 0.0)

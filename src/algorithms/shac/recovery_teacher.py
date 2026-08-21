@@ -372,9 +372,11 @@ def resolve_recovery_teacher_resume_settings(
     if any(present) and not all(present):
         raise ValueError("recovery teacher resume metadata is incomplete")
     if not any(present):
+        saved = (None, None, 0.0)
+        if requested == saved:
+            return requested
         if not allow_change:
             raise ValueError("recovery teacher resume metadata is missing")
-        saved = (None, None, 0.0)
     else:
         saved_enabled = metadata["actor_recovery_teacher_enabled"]
         if not isinstance(saved_enabled, bool):
