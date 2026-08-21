@@ -272,6 +272,7 @@ def run_gradient_capture(
     import jax
     import jax.numpy as jnp
 
+    from src.algorithms.shac.gradients import per_env_gradient_statistics
     from src.algorithms.shac.objective_direction_audit import aggregate_audit_direction
     from src.core.data_structures import Normalizer
     from src.envs.g1_tracking.environment import DEFAULT_CONTROLLER_PATH
@@ -312,7 +313,7 @@ def run_gradient_capture(
         matches = np.flatnonzero(phases == smoke_phase)
         if matches.size == 0:
             raise ValueError("smoke phase is not registered")
-        selected = matches[:1]
+        selected = matches
         phases = phases[selected]
         noise = noise[selected]
     count = int(phases.shape[0])
@@ -565,13 +566,30 @@ def run_gradient_capture(
             truncated["auxiliary"],
             label="smoke",
         )
-        vectors = {
-            mode: _tree_vector(
-                captures[("e023", SOLVERS[0], mode)]["gradients"]
-            )
+        gradients_by_mode = {
+            mode: captures[("e023", SOLVERS[0], mode)]["gradients"]
             for mode in MODES
         }
-        norms = {mode: float(np.linalg.norm(vector)) for mode, vector in vectors.items()}
+        vectors = {
+            mode: _tree_vector(gradients)
+            for mode, gradients in gradients_by_mode.items()
+        }
+        finite_env_counts = {
+            mode: int(
+                np.sum(
+                    np.asarray(
+                        per_env_gradient_statistics(gradients)["finite_by_env"]
+                    )
+                )
+            )
+            for mode, gradients in gradients_by_mode.items()
+        }
+        norms = {
+            mode: float(
+                np.linalg.norm(np.where(np.isfinite(vector), vector, 0.0))
+            )
+            for mode, vector in vectors.items()
+        }
         gradient_diagnostics = {
             mode: {
                 "finite_fraction": float(np.mean(np.isfinite(vector))),
@@ -579,11 +597,17 @@ def run_gradient_capture(
                     np.max(np.abs(vector[np.isfinite(vector)]), initial=0.0)
                 ),
                 "norm": norms[mode],
+                "finite_env_count": finite_env_counts[mode],
             }
             for mode, vector in vectors.items()
         }
         event_count = int(np.sum(ordinary["auxiliary"]["event"]))
-        if any(not math.isfinite(value) or value <= 0.0 for value in norms.values()):
+        if any(
+            finite_env_counts[mode] <= 0
+            or not math.isfinite(norms[mode])
+            or norms[mode] <= 0.0
+            for mode in MODES
+        ):
             raise ValueError(
                 "smoke gradients are not finite and nonzero: "
                 f"{gradient_diagnostics}"

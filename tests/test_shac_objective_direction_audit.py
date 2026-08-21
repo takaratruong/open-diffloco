@@ -75,6 +75,26 @@ def test_aggregate_audit_direction_clips_before_five_bin_cagrad() -> None:
     assert np.isfinite(np.asarray(result.cosine_matrix)).all()
 
 
+def test_aggregate_audit_direction_drops_nonfinite_environments() -> None:
+    gradients = {
+        "p": jnp.asarray([[jnp.nan], [1.0], [1.0], [1.0], [1.0], [1.0]])
+    }
+    phases = jnp.asarray([0, 0, 20, 40, 60, 80], dtype=jnp.int32)
+
+    result = aggregate_audit_direction(
+        gradients,
+        phases,
+        phase_count=100,
+        clip_norm=1.0,
+        alpha=0.5,
+        iterations=32,
+    )
+
+    assert result.valid is True
+    assert result.env_counts.tolist() == [1, 1, 1, 1, 1]
+    np.testing.assert_allclose(np.asarray(result.task_gradients["p"]), 1.0)
+
+
 def test_select_carried_safe_candidate_uses_registered_ordering() -> None:
     baseline = [3, 3, 3]
     rows = [

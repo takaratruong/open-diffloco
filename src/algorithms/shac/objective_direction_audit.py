@@ -103,7 +103,6 @@ def aggregate_audit_direction(
     iterations: int,
 ) -> AuditDirection:
     """Clip per environment, average by phase, and form the CAGrad direction."""
-    _require_finite_tree(per_env_gradients)
     accumulator = accumulate_phase_gradients(
         per_env_gradients,
         jp.asarray(phases, dtype=jp.int32),
