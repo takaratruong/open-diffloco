@@ -565,17 +565,29 @@ def run_gradient_capture(
             truncated["auxiliary"],
             label="smoke",
         )
-        norms = {
-            mode: float(
-                np.linalg.norm(
-                    _tree_vector(captures[("e023", SOLVERS[0], mode)]["gradients"])
-                )
+        vectors = {
+            mode: _tree_vector(
+                captures[("e023", SOLVERS[0], mode)]["gradients"]
             )
             for mode in MODES
         }
+        norms = {mode: float(np.linalg.norm(vector)) for mode, vector in vectors.items()}
+        gradient_diagnostics = {
+            mode: {
+                "finite_fraction": float(np.mean(np.isfinite(vector))),
+                "max_abs_finite": float(
+                    np.max(np.abs(vector[np.isfinite(vector)]), initial=0.0)
+                ),
+                "norm": norms[mode],
+            }
+            for mode, vector in vectors.items()
+        }
         event_count = int(np.sum(ordinary["auxiliary"]["event"]))
         if any(not math.isfinite(value) or value <= 0.0 for value in norms.values()):
-            raise ValueError("smoke gradients are not finite and nonzero")
+            raise ValueError(
+                "smoke gradients are not finite and nonzero: "
+                f"{gradient_diagnostics}"
+            )
         report = {
             "valid": True,
             "scientific": False,
@@ -583,6 +595,7 @@ def run_gradient_capture(
             "phase": smoke_phase,
             "event_count": event_count,
             "gradient_norms": norms,
+            "gradient_diagnostics": gradient_diagnostics,
             **source,
         }
         _atomic_json(output_directory / "smoke_summary.json", report)
