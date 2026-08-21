@@ -216,7 +216,13 @@ def validate_forward_identity(
             continue
         if np.issubdtype(left.dtype, np.number):
             difference = np.abs(left.astype(np.float64) - right.astype(np.float64))
-            detail = f"max_abs={float(np.nanmax(difference)):.17g}"
+            mismatch = np.argwhere(left != right)
+            first = tuple(int(index) for index in mismatch[0])
+            detail = (
+                f"first_index={first}, left={left[first]!r}, "
+                f"right={right[first]!r}, "
+                f"max_abs={float(np.nanmax(difference)):.17g}"
+            )
         else:
             detail = f"different_count={int(np.sum(left != right))}"
         raise ValueError(f"{label} forward {name} differs: {detail}")
