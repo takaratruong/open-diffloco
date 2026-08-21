@@ -209,6 +209,7 @@ def test_build_evaluation_candidate_contains_only_actor_and_source_normalizer():
     assert not hasattr(candidate, "ignored")
     assert candidate.evaluation_only is True
     assert candidate.resumable is False
+    assert candidate.__class__.__module__ == "types"
 
 
 @pytest.mark.skipif(

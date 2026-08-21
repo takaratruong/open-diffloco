@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -11,6 +10,7 @@ from pathlib import Path
 import pickle
 import subprocess
 import sys
+from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 import jax
@@ -50,14 +50,9 @@ EXPECTED_REFERENCE_SHA256 = (
 )
 
 
-@dataclass(frozen=True)
-class EvaluationActorState:
-    """Compact actor artifact that is intentionally impossible to resume."""
-
-    actor_params: Any
-    normalizer: Any
-    evaluation_only: bool = True
-    resumable: bool = False
+# A standard-library type keeps artifacts importable whether this tool is invoked
+# as a module or as a script; a script-local dataclass would pickle as __main__.
+EvaluationActorState = SimpleNamespace
 
 
 def _sha256(path: Path) -> str:
@@ -141,6 +136,8 @@ def build_evaluation_candidate(
             alpha=alpha,
         ),
         normalizer=source_state.normalizer,
+        evaluation_only=True,
+        resumable=False,
     )
 
 
