@@ -138,3 +138,5 @@ class TrainState:
     ldm_params: Any = None
     ldm_opt: Any = None
     replay_buffer: Any = None
+    ahac_horizon: Any = None
+    ahac_dual: Any = None

@@ -10,6 +10,7 @@ import mujoco
 import numpy as np
 from mujoco import mjx
 
+from src.core.contact import contact_stiffness
 from src.core.data_structures import EnvState
 from src.envs.g1_tracking.controller import load_rmr_controller
 from src.envs.g1_tracking.reference import (
@@ -908,6 +909,7 @@ class G1TrackingEnv:
             "foot_bump_ou": jp.zeros((4, 3)),
             "foot_normal_forces": jp.zeros(4),
             "terminal": jp.array(0.0),
+            "transition_contact_stiffness": jp.array(0.0),
             "reset_was_carried": jp.array(False),
             **randomization,
         }
@@ -981,6 +983,7 @@ class G1TrackingEnv:
         zero = jp.float32(0.0)
         return {
             "contact_force": zero,
+            "contact_stiffness": zero,
             "anchor_position_error": zero,
             "anchor_orientation_error": zero,
             "body_position_error": zero,
@@ -1494,6 +1497,10 @@ class G1TrackingEnv:
         data, _ = jax.lax.scan(
             physics_step, state.data, None, length=self.n_frames
         )
+        transition_contact_stiffness = contact_stiffness(
+            data.qfrc_constraint,
+            data.qacc,
+        )
         next_phase = jp.minimum(
             state.info["phase"] + self.reference_stride,
             self.reference_length - 1,
@@ -1589,6 +1596,7 @@ class G1TrackingEnv:
             "terminal": terminal,
             "bootstrap_obs": bootstrap_history.reshape(-1),
             "bootstrap_critic_obs": bootstrap_critic_obs,
+            "transition_contact_stiffness": transition_contact_stiffness,
         }
         next_actor_frame = self._get_actor_obs(next_data, next_info)
         continued_history = jp.concatenate(
@@ -1640,6 +1648,7 @@ class G1TrackingEnv:
         contact_force = jp.sum(jp.abs(data.qfrc_constraint[:6]))
         metrics = {
             "contact_force": contact_force,
+            "contact_stiffness": transition_contact_stiffness,
             "anchor_position_error": anchor_position_error,
             "anchor_orientation_error": anchor_orientation_error,
             "body_position_error": body_position_error,

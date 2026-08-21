@@ -12,8 +12,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jp
 
-
-ROOT_DOF_COUNT = 6
+from src.core.contact import contact_stiffness as contact_stiffness
 
 
 class HorizonDualUpdate(NamedTuple):
@@ -24,28 +23,12 @@ class HorizonDualUpdate(NamedTuple):
     valid: jax.Array
 
 
-def contact_stiffness(
-    qfrc_constraint: jax.Array,
-    qacc: jax.Array,
-) -> jax.Array:
-    """Return AHAC's force-over-modified-acceleration contact proxy.
+class CriticValueLoss(NamedTuple):
+    """Double- or single-head value-fit diagnostics."""
 
-    MuJoCo exposes matching six-dimensional floating-base constraint force and
-    acceleration vectors.  Using only these root coordinates avoids mixing
-    unrelated joint-space dimensions and is the direct MJX analogue of the
-    spatial force/acceleration normalization in the AHAC reference code.
-    """
-
-    constraint = jp.asarray(qfrc_constraint)
-    acceleration = jp.asarray(qacc)
-    if constraint.shape != acceleration.shape:
-        raise ValueError("constraint force and acceleration shapes must be matching")
-    if not constraint.shape or constraint.shape[-1] < ROOT_DOF_COUNT:
-        raise ValueError("contact stiffness inputs require at least six coordinates")
-    root_force = constraint[..., :ROOT_DOF_COUNT]
-    root_acceleration = acceleration[..., :ROOT_DOF_COUNT]
-    modified_acceleration = jp.maximum(jp.abs(root_acceleration), 1.0)
-    return jp.linalg.norm(root_force / modified_acceleration, axis=-1)
+    total: jax.Array
+    head_losses: jax.Array
+    disagreement: jax.Array
 
 
 def active_horizon_mask(horizon: jax.Array, maximum: int) -> jax.Array:
@@ -136,3 +119,110 @@ def critic_convergence(
         & (tolerance_array > 0.0)
         & (jp.mean(jp.abs(jp.diff(recent))) < tolerance_array)
     )
+
+
+def conservative_value(values: jax.Array, *, double: bool) -> jax.Array:
+    """Return AHAC's minimum head or the legacy singleton critic value."""
+
+    values = jp.asarray(values)
+    expected = 2 if double else 1
+    if not values.shape or values.shape[-1] != expected:
+        raise ValueError(f"critic values must end in exactly {expected} head(s)")
+    return jp.min(values, axis=-1) if double else jp.squeeze(values, axis=-1)
+
+
+def critic_value_loss(
+    predictions: jax.Array,
+    targets: jax.Array,
+    *,
+    double: bool,
+    active_mask: jax.Array | None = None,
+) -> CriticValueLoss:
+    """Fit every critic head to one stopped-gradient TD(lambda) target."""
+
+    predictions = jp.asarray(predictions)
+    targets = jp.asarray(targets)
+    expected = 2 if double else 1
+    if predictions.shape[:-1] != targets.shape or predictions.shape[-1] != expected:
+        raise ValueError("critic predictions and targets have incompatible shapes")
+    squared_error = jp.square(predictions - targets[..., None])
+    if active_mask is None:
+        weights = jp.ones_like(targets)
+    else:
+        weights = jp.asarray(active_mask, dtype=predictions.dtype)
+        if weights.shape != targets.shape:
+            raise ValueError("critic active mask must match targets")
+    denominator = jp.maximum(jp.sum(weights), 1.0)
+    head_losses = jp.sum(
+        squared_error * weights[..., None],
+        axis=tuple(range(targets.ndim)),
+    ) / denominator
+    disagreement = (
+        jp.sum(
+            jp.abs(predictions[..., 0] - predictions[..., 1]) * weights
+        )
+        / denominator
+        if double
+        else jp.asarray(0.0, dtype=predictions.dtype)
+    )
+    return CriticValueLoss(
+        total=jp.mean(head_losses),
+        head_losses=head_losses,
+        disagreement=disagreement,
+    )
+
+
+def select_active_tree(previous, candidate, active: jax.Array):
+    """Choose a candidate pytree only for an active static-scan slot."""
+
+    active = jp.asarray(active, dtype=jp.bool_)
+    return jax.tree_util.tree_map(
+        lambda old, new: jp.where(active, new, old),
+        previous,
+        candidate,
+    )
+
+
+AHAC_RESUME_KEYS = (
+    "ahac",
+    "ahac_horizon_min",
+    "ahac_horizon_max",
+    "ahac_contact_threshold",
+    "ahac_dual_lr",
+    "ahac_critic_max_iterations",
+    "ahac_critic_tolerance",
+)
+
+
+def resolve_ahac_resume_settings(
+    *,
+    requested: dict[str, object],
+    resumed_hparams: dict[str, object] | None,
+    is_resume: bool,
+    allow_change: bool,
+) -> dict[str, object]:
+    """Fail closed when a resumed checkpoint changes the AHAC treatment."""
+
+    missing_requested = [key for key in AHAC_RESUME_KEYS if key not in requested]
+    if missing_requested:
+        raise ValueError(f"requested AHAC settings omit {missing_requested}")
+    resolved = {key: requested[key] for key in AHAC_RESUME_KEYS}
+    if not is_resume:
+        return resolved
+    metadata_incomplete = resumed_hparams is None or any(
+        key not in resumed_hparams for key in AHAC_RESUME_KEYS
+    )
+    if metadata_incomplete:
+        saved_ahac = False if resumed_hparams is None else resumed_hparams.get("ahac", False)
+        if not bool(resolved["ahac"]) and not bool(saved_ahac):
+            # Checkpoints created before AHAC existed have no AHAC metadata.  They
+            # are unambiguously legacy SHAC when the resumed treatment also keeps
+            # AHAC disabled, so preserve that path without requiring migration.
+            return resolved
+        if not allow_change:
+            raise ValueError("AHAC resume metadata is missing or incomplete")
+        return resolved
+    saved = {key: resumed_hparams[key] for key in AHAC_RESUME_KEYS}
+    if saved != resolved and not allow_change:
+        raise ValueError("AHAC settings must match the checkpoint")
+    return resolved

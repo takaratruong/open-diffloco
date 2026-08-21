@@ -50,6 +50,18 @@ class Critic(nn.Module):
         return nn.Dense(1)(x)
 
 
+class DoubleCritic(nn.Module):
+    """Two independent state-value critics used by AHAC."""
+
+    hidden: Sequence[int] = (512, 256, 128)
+
+    @nn.compact
+    def __call__(self, x):
+        value_0 = Critic(hidden=self.hidden, name="critic_0")(x)
+        value_1 = Critic(hidden=self.hidden, name="critic_1")(x)
+        return jp.concatenate((value_0, value_1), axis=-1)
+
+
 class LearnedDynamicsModel(nn.Module):
     """Predict normalized observation residual from obs/action."""
 

@@ -17,7 +17,7 @@ import numpy as np
 
 from src.core.data_structures import Normalizer, TrainState
 from src.core.actor_input_contract import validate_actor_input_contract
-from src.core.networks import Actor, Critic
+from src.core.networks import Actor, Critic, DoubleCritic
 from src.core.rmr_policy import (
     RmrPolicy,
     apply_trainable_rmr_policy,
@@ -33,6 +33,15 @@ from src.core.utils import compute_grad_norm
 from src.algorithms.shac.gradients import (
     aggregate_per_env_gradients,
     per_env_gradient_statistics,
+)
+from src.algorithms.shac.ahac import (
+    active_horizon_mask,
+    conservative_value,
+    critic_convergence,
+    critic_value_loss,
+    resolve_ahac_resume_settings,
+    select_active_tree,
+    update_horizon_dual,
 )
 from src.algorithms.shac.cagrad import (
     accumulate_phase_gradients,
@@ -344,6 +353,55 @@ def build_checkpoint_cagrad_telemetry(metrics) -> dict[str, object]:
     }
 
 
+def build_checkpoint_ahac_telemetry(metrics) -> dict[str, object]:
+    """Serialize and fail closed on checkpoint-aligned AHAC evidence."""
+
+    float_names = (
+        "horizon",
+        "horizon_before_update",
+        "dual_mean",
+        "dual_max",
+        "contact_stiffness_mean",
+        "contact_stiffness_max",
+        "contact_threshold",
+        "critic_head_disagreement",
+    )
+    values = {
+        name: float(metrics[f"ahac_{name}"])
+        for name in float_names
+    }
+    loss_history = np.asarray(
+        metrics["ahac_critic_loss_history"], dtype=np.float64
+    )
+    head_losses = np.asarray(
+        metrics["ahac_critic_head_losses"], dtype=np.float64
+    )
+    active_transitions = int(metrics["ahac_active_transitions"])
+    critic_iterations_executed = int(metrics["ahac_critic_iterations"])
+    if (
+        not all(math.isfinite(value) for value in values.values())
+        or loss_history.shape != (5,)
+        or not np.all(np.isfinite(loss_history))
+        or head_losses.shape != (2,)
+        or not np.all(np.isfinite(head_losses))
+    ):
+        raise ValueError("AHAC telemetry must be finite and complete")
+    if active_transitions < 1 or critic_iterations_executed < 1:
+        raise ValueError("AHAC telemetry counts must be positive")
+    valid = bool(metrics["ahac_horizon_valid"])
+    if not valid:
+        raise ValueError("AHAC horizon/dual telemetry is invalid")
+    return {
+        **{f"ahac_{name}": value for name, value in values.items()},
+        "ahac_active_transitions": active_transitions,
+        "ahac_critic_iterations": critic_iterations_executed,
+        "ahac_critic_converged": bool(metrics["ahac_critic_converged"]),
+        "ahac_critic_loss_history": loss_history.tolist(),
+        "ahac_critic_head_losses": head_losses.tolist(),
+        "ahac_valid": True,
+    }
+
+
 def build_checkpoint_recovery_teacher_telemetry(
     metrics, *, max_ratio: float
 ) -> dict[str, object]:
@@ -402,10 +460,11 @@ def should_persist_checkpoint_metrics(
     *,
     actor_cagrad: bool,
     frozen_preview_treatment: bool,
+    ahac: bool = False,
 ) -> bool:
     """Persist validity evidence for every checkpointed CAGrad treatment."""
     return checkpoint_path is not None and (
-        actor_cagrad or frozen_preview_treatment
+        actor_cagrad or frozen_preview_treatment or ahac
     )
 
 
@@ -1717,6 +1776,14 @@ def train(
     actor_bootstrap_scale: float = 1.0,
     actor_bootstrap_delay_steps: int = 0,
     allow_resume_actor_bootstrap_scale_change: bool = False,
+    ahac: bool = False,
+    ahac_horizon_min: int = 8,
+    ahac_horizon_max: int = 24,
+    ahac_contact_threshold: float = 500.0,
+    ahac_dual_lr: float = 5e-4,
+    ahac_critic_max_iterations: int = 64,
+    ahac_critic_tolerance: float = 0.2,
+    allow_resume_ahac_change: bool = False,
     actor_hidden: tuple[int, ...] = (512, 256, 128),
     actor_layer_norm: bool = True,
     actor_zero_output: bool = True,
@@ -2000,6 +2067,32 @@ def train(
     ):
         raise ValueError(
             "actor_bootstrap_delay_steps must be a non-negative integer"
+        )
+    if not isinstance(ahac, bool):
+        raise ValueError("ahac must be boolean")
+    if not isinstance(allow_resume_ahac_change, bool):
+        raise ValueError("allow_resume_ahac_change must be boolean")
+    for name, value in (
+        ("ahac_horizon_min", ahac_horizon_min),
+        ("ahac_horizon_max", ahac_horizon_max),
+        ("ahac_critic_max_iterations", ahac_critic_max_iterations),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{name} must be a positive integer")
+    if ahac_horizon_max < ahac_horizon_min:
+        raise ValueError("AHAC maximum horizon must be at least its minimum")
+    if ahac and unroll_length != ahac_horizon_max:
+        raise ValueError("AHAC unroll length must equal its maximum horizon")
+    for name, value in (
+        ("ahac_contact_threshold", ahac_contact_threshold),
+        ("ahac_dual_lr", ahac_dual_lr),
+        ("ahac_critic_tolerance", ahac_critic_tolerance),
+    ):
+        if isinstance(value, bool) or not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name} must be positive and finite")
+    if ahac and (actor_bootstrap_scale != 1.0 or actor_bootstrap_delay_steps != 0):
+        raise ValueError(
+            "AHAC requires actor bootstrap scale 1.0 with zero delay"
         )
     if (
         isinstance(termination_margin_weight, bool)
@@ -2435,6 +2528,7 @@ def train(
             initial_full_actor_policy=initial_full_actor_policy,
             env_variant=env_variant,
         )
+
         validate_residual_preview_adapter_configuration(
             enabled=actor_residual_preview_adapter,
             hidden_dim=actor_residual_preview_hidden,
@@ -2450,6 +2544,21 @@ def train(
             initial_full_actor_policy=initial_full_actor_policy,
             env_variant=env_variant,
         )
+
+    resolve_ahac_resume_settings(
+        requested={
+            "ahac": ahac,
+            "ahac_horizon_min": ahac_horizon_min,
+            "ahac_horizon_max": ahac_horizon_max,
+            "ahac_contact_threshold": ahac_contact_threshold,
+            "ahac_dual_lr": ahac_dual_lr,
+            "ahac_critic_max_iterations": ahac_critic_max_iterations,
+            "ahac_critic_tolerance": ahac_critic_tolerance,
+        },
+        resumed_hparams=resumed_hparams,
+        is_resume=resume_from is not None,
+        allow_change=allow_resume_ahac_change,
+    )
 
     if resume_from is None:
         (
@@ -2631,9 +2740,10 @@ def train(
 
     # Create save directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_dir = f"training_runs/shac_{timestamp}"
+    algorithm_name = "ahac" if ahac else "shac"
+    save_dir = f"training_runs/{algorithm_name}_{timestamp}"
     os.makedirs(save_dir, exist_ok=True)
-    print(f"Algorithm: SHAC, Save dir: {save_dir}")
+    print(f"Algorithm: {algorithm_name.upper()}, Save dir: {save_dir}")
     print(
         f"Domain randomization: action_noise={action_noise_std_start}->{action_noise_std_end}, "
         f"friction={friction_range}, mass={mass_range}, "
@@ -2672,7 +2782,7 @@ def train(
         action_dim=env.action_dim,
         hidden_dim=actor_residual_preview_hidden,
     )
-    critic = Critic()
+    critic = DoubleCritic() if ahac else Critic()
 
     actor_dummy = jp.zeros((1, env.actor_obs_dim), dtype=jp.float32)
     critic_dummy = jp.zeros((1, env.critic_obs_dim), dtype=jp.float32)
@@ -2886,6 +2996,7 @@ def train(
         randomization,
         current_noise_std,
         current_actor_bootstrap_scale,
+        current_ahac_horizon,
     ):
         """Short-horizon actor objective with sampled perturbations."""
         (
@@ -2897,7 +3008,13 @@ def train(
 
         def rollout_step(carry, inputs):
             state, foot_bump_ou = carry
-            noise_t, velocity_push_t, terrain_bump_innov_t = inputs
+            noise_t, velocity_push_t, terrain_bump_innov_t, rollout_index = inputs
+            active = (
+                rollout_index
+                < jp.floor(current_ahac_horizon + 0.5).astype(jp.int32)
+                if ahac
+                else jp.asarray(True)
+            )
 
             push_due = (state.info["step"] > 0) & (
                 (state.info["step"] % _push_interval_steps) == 0
@@ -3072,33 +3189,55 @@ def train(
                     reference_stride=env.reference_stride,
                     reference_length=env.reference_length,
                 )
-            next_state = env.step(state, noisy_action)
-            foot_bump_ou = jp.where(next_state.done, jp.zeros((4, 3)), foot_bump_ou)
+            candidate_next_state = env.step(state, noisy_action)
+            candidate_foot_bump_ou = jp.where(
+                candidate_next_state.done,
+                jp.zeros((4, 3)),
+                foot_bump_ou,
+            )
+            next_state = (
+                select_active_tree(state, candidate_next_state, active)
+                if ahac
+                else candidate_next_state
+            )
+            foot_bump_ou = jp.where(
+                active, candidate_foot_bump_ou, foot_bump_ou
+            )
 
             transition = {
-                "reward": next_state.reward,
-                "done": next_state.done,
-                "terminal": next_state.info["terminal"],
+                "reward": jp.where(active, candidate_next_state.reward, 0.0),
+                "done": jp.where(active, candidate_next_state.done, False),
+                "terminal": jp.where(
+                    active, candidate_next_state.info["terminal"], False
+                ),
                 "actor_obs": state.obs,
                 "critic_obs": env._get_critic_obs(state.data, state.info),
-                "bootstrap_critic_obs": next_state.info["bootstrap_critic_obs"],
-                "vel_x": next_state.metrics["vel_x"],
-                "vel_y": next_state.metrics["vel_y"],
-                "yaw_rate": next_state.metrics["yaw_rate"],
-                "cmd_x": next_state.metrics["cmd_x"],
-                "cmd_y": next_state.metrics["cmd_y"],
-                "cmd_yaw": next_state.metrics["cmd_yaw"],
-                "height": next_state.metrics["height"],
-                "tilt": next_state.metrics["tilt"],
-                "foot_normal_FL": next_state.metrics["foot_normal_FL"],
-                "foot_normal_FR": next_state.metrics["foot_normal_FR"],
-                "foot_normal_RL": next_state.metrics["foot_normal_RL"],
-                "foot_normal_RR": next_state.metrics["foot_normal_RR"],
+                "bootstrap_critic_obs": candidate_next_state.info[
+                    "bootstrap_critic_obs"
+                ],
+                "vel_x": candidate_next_state.metrics["vel_x"],
+                "vel_y": candidate_next_state.metrics["vel_y"],
+                "yaw_rate": candidate_next_state.metrics["yaw_rate"],
+                "cmd_x": candidate_next_state.metrics["cmd_x"],
+                "cmd_y": candidate_next_state.metrics["cmd_y"],
+                "cmd_yaw": candidate_next_state.metrics["cmd_yaw"],
+                "height": candidate_next_state.metrics["height"],
+                "tilt": candidate_next_state.metrics["tilt"],
+                "foot_normal_FL": candidate_next_state.metrics["foot_normal_FL"],
+                "foot_normal_FR": candidate_next_state.metrics["foot_normal_FR"],
+                "foot_normal_RL": candidate_next_state.metrics["foot_normal_RL"],
+                "foot_normal_RR": candidate_next_state.metrics["foot_normal_RR"],
                 "actor_policy_anchor_squared_error": (
-                    actor_policy_anchor_squared_error
+                    jp.where(active, actor_policy_anchor_squared_error, 0.0)
                 ),
                 "actor_policy_anchor_penalty": (
-                    actor_policy_anchor_step_penalty
+                    jp.where(active, actor_policy_anchor_step_penalty, 0.0)
+                ),
+                "ahac_active": active,
+                "ahac_contact_stiffness": jp.where(
+                    active,
+                    candidate_next_state.info["transition_contact_stiffness"],
+                    0.0,
                 ),
             }
             if adaptive_phase_sampling:
@@ -3126,7 +3265,12 @@ def train(
         (final_state, final_foot_bump_ou), traj = jax.lax.scan(
             rollout_step,
             (env_state, env_state.info["foot_bump_ou"]),
-            (action_noise, velocity_pushes, terrain_bump_innovations),
+            (
+                action_noise,
+                velocity_pushes,
+                terrain_bump_innovations,
+                jp.arange(unroll_length, dtype=jp.int32),
+            ),
             length=unroll_length,
         )
         final_state = final_state.replace(
@@ -3136,16 +3280,17 @@ def train(
         bootstrap_obs = critic_norm.normalize(
             critic_norm_state, traj["bootstrap_critic_obs"]
         ).astype(jp.float32)
-        bootstrap_v = squeeze_value_head(
-            critic.apply(target_critic_params, bootstrap_obs)
+        bootstrap_v = conservative_value(
+            critic.apply(target_critic_params, bootstrap_obs),
+            double=ahac,
         )
 
         # Accumulate discounted returns, handling episode boundaries. Time-limit
         # truncations bootstrap from the pre-reset observation stored by env.step.
         def accum_return(carry, x):
             total, running, discount = carry
-            r, done, terminal, v_next = x
-            next_discount = discount * gamma
+            r, done, terminal, v_next, active = x
+            next_discount = jp.where(active, discount * gamma, discount)
             running = running + discount * r
             trunc_bootstrap = (
                 current_actor_bootstrap_scale
@@ -3161,15 +3306,22 @@ def train(
         (total_ret, running, final_discount), _ = jax.lax.scan(
             accum_return,
             (0.0, 0.0, 1.0),
-            (traj["reward"], traj["done"], traj["terminal"], bootstrap_v),
+            (
+                traj["reward"],
+                traj["done"],
+                traj["terminal"],
+                bootstrap_v,
+                traj["ahac_active"],
+            ),
         )
 
         final_obs = critic_norm.normalize(
             critic_norm_state,
             env._get_critic_obs(final_state.data, final_state.info),
         ).astype(jp.float32)
-        final_v = squeeze_value_head(
-            critic.apply(target_critic_params, final_obs)
+        final_v = conservative_value(
+            critic.apply(target_critic_params, final_obs),
+            double=ahac,
         )
         final_bootstrap = jp.where(
             traj["done"][-1],
@@ -3179,10 +3331,13 @@ def train(
 
         total_ret = total_ret + running + final_bootstrap
 
-        anchor_loss = jp.mean(traj["actor_policy_anchor_penalty"])
-        return -total_ret / unroll_length + anchor_loss, (traj, final_state)
+        active_count = jp.maximum(jp.sum(traj["ahac_active"]), 1)
+        anchor_loss = (
+            jp.sum(traj["actor_policy_anchor_penalty"]) / active_count
+        )
+        return -total_ret / active_count + anchor_loss, (traj, final_state)
 
-    def critic_loss_from_data(
+    def critic_fit_from_data(
         critic_params,
         target_critic_params,
         critic_norm_state,
@@ -3192,6 +3347,7 @@ def train(
         traj_terminals,
         traj_bootstrap_obs,
         final_obs,
+        traj_active,
     ):
         """
         Critic TD(lambda) loss using trajectory data collected by the actor.
@@ -3213,40 +3369,53 @@ def train(
         )
 
         # Predicted values V(s_t)
-        values = squeeze_value_head(
-            critic.apply(critic_params, flat_obs_norm)
-        )  # (H,)
+        value_predictions = critic.apply(critic_params, flat_obs_norm)
 
-        next_v = squeeze_value_head(
-            critic.apply(target_critic_params, flat_bootstrap_obs_norm)
+        next_v = conservative_value(
+            critic.apply(target_critic_params, flat_bootstrap_obs_norm),
+            double=ahac,
         )
-        final_v = squeeze_value_head(
-            critic.apply(target_critic_params, final_obs_norm)
+        final_v = conservative_value(
+            critic.apply(target_critic_params, final_obs_norm),
+            double=ahac,
         )  # scalar
 
         rewards = traj_rewards.reshape(-1).astype(jp.float32)  # (H,)
         dones = traj_dones.reshape(-1).astype(jp.float32)  # (H,)
         terminals = traj_terminals.reshape(-1).astype(jp.float32)  # (H,)
+        active = traj_active.reshape(-1).astype(jp.bool_)
 
         def scan_fn(g_next, inputs):
             r"""TD(lambda) backward scan."""
-            r, done, terminal, v_next = inputs
+            r, done, terminal, v_next, is_active = inputs
             g_normal = r + gamma * (
                 (1.0 - gae_lambda) * v_next + gae_lambda * g_next
             )  # Normal step
             g_trunc = r + gamma * v_next  # Time-limit trunc.
             g_term = r  # true term.
             g = jp.where(terminal, g_term, jp.where(done, g_trunc, g_normal))
+            g = jp.where(is_active, g, g_next)
             return g, g
 
         _, targets_reversed = jax.lax.scan(
             scan_fn,
             final_v,  # float32 scalar (determines the carry dtype)
-            (rewards[::-1], dones[::-1], terminals[::-1], next_v[::-1]),
+            (
+                rewards[::-1],
+                dones[::-1],
+                terminals[::-1],
+                next_v[::-1],
+                active[::-1],
+            ),
         )
         targets = targets_reversed[::-1]
 
-        return jp.mean(jp.square(values - jax.lax.stop_gradient(targets)))
+        return critic_value_loss(
+            value_predictions,
+            jax.lax.stop_gradient(targets),
+            double=ahac,
+            active_mask=active,
+        )
 
     def aggregate_env_gradients(per_env_grads, max_norm):
         """Aggregates one equal-sized environment shard."""
@@ -3359,13 +3528,18 @@ def train(
             actor_bootstrap_scale,
             actor_bootstrap_delay_steps,
         )
+        current_ahac_horizon = (
+            state.ahac_horizon
+            if ahac
+            else jp.asarray(unroll_length, dtype=jp.float32)
+        )
 
         # Actor update
         actor_grad_fn = jax.value_and_grad(actor_loss, has_aux=True)
         if gradient_accumulation_steps == 1:
             (losses, (trajs, final_states)), per_env_grads = jax.vmap(
                 actor_grad_fn,
-                in_axes=(None, None, None, None, 0, 0, None, None),
+                in_axes=(None, None, None, None, 0, 0, None, None, None),
             )(
                 state.actor_params,
                 state.target_critic_params,
@@ -3375,6 +3549,7 @@ def train(
                 all_randomization,
                 current_noise_std,
                 current_actor_bootstrap_scale,
+                current_ahac_horizon,
             )
             if actor_phase_robust_weighting:
                 phase_weighting = phase_robust_weights(
@@ -3429,7 +3604,7 @@ def train(
                     (shard_trajs, shard_final_states),
                 ), shard_per_env_grads = jax.vmap(
                     actor_grad_fn,
-                    in_axes=(None, None, None, None, 0, 0, None, None),
+                    in_axes=(None, None, None, None, 0, 0, None, None, None),
                 )(
                     state.actor_params,
                     state.target_critic_params,
@@ -3439,6 +3614,7 @@ def train(
                     shard_randomization,
                     current_noise_std,
                     current_actor_bootstrap_scale,
+                    current_ahac_horizon,
                 )
                 if actor_cagrad:
                     shard_grad_stats = per_env_gradient_statistics(
@@ -3645,12 +3821,37 @@ def train(
         actor_update_norm = compute_grad_norm(updates)
         new_actor_params = optax.apply_updates(state.actor_params, updates)
 
+        if ahac:
+            ahac_active_mask = active_horizon_mask(
+                state.ahac_horizon, ahac_horizon_max
+            )
+            ahac_contact_by_step = jp.mean(
+                trajs["ahac_contact_stiffness"], axis=0
+            )
+            ahac_update = update_horizon_dual(
+                horizon=state.ahac_horizon,
+                dual=state.ahac_dual,
+                contact_by_step=ahac_contact_by_step,
+                active_mask=ahac_active_mask,
+                threshold=ahac_contact_threshold,
+                learning_rate=ahac_dual_lr,
+                minimum=ahac_horizon_min,
+                maximum=ahac_horizon_max,
+            )
+        else:
+            ahac_active_mask = jp.ones((unroll_length,), dtype=jp.bool_)
+            ahac_contact_by_step = jp.zeros(
+                (unroll_length,), dtype=jp.float64
+            )
+            ahac_update = None
+
         # Critic updates
         all_obs = trajs["critic_obs"]
         all_rewards = trajs["reward"]
         all_dones = trajs["done"]
         all_terminals = trajs["terminal"]
         all_bootstrap_obs = trajs["bootstrap_critic_obs"]
+        all_ahac_active = trajs["ahac_active"]
         all_final_obs = jax.vmap(env._get_critic_obs)(
             final_states.data, final_states.info
         )
@@ -3665,8 +3866,9 @@ def train(
             terminals,
             bootstrap_obs,
             final_obs,
+            active,
         ):
-            return critic_loss_from_data(
+            return critic_fit_from_data(
                 critic_params,
                 target_critic_params,
                 norm_state,
@@ -3676,7 +3878,8 @@ def train(
                 terminals,
                 bootstrap_obs,
                 final_obs,
-            )
+                active,
+            ).total
 
         def critic_update_step(carry, _):
             c_params, c_opt_state = carry
@@ -3687,7 +3890,7 @@ def train(
             if gradient_accumulation_steps == 1:
                 c_losses, c_per_env_grads = jax.vmap(
                     critic_grad_fn,
-                    in_axes=(None, None, None, 0, 0, 0, 0, 0, 0),
+                    in_axes=(None, None, None, 0, 0, 0, 0, 0, 0, 0),
                 )(
                     c_params,
                     state.target_critic_params,
@@ -3698,6 +3901,7 @@ def train(
                     all_terminals,
                     all_bootstrap_obs,
                     all_final_obs,
+                    all_ahac_active,
                 )
                 c_grads, critic_grad_stats = aggregate_env_gradients(
                     c_per_env_grads, critic_per_env_grad_clip
@@ -3711,6 +3915,7 @@ def train(
                         all_terminals,
                         all_bootstrap_obs,
                         all_final_obs,
+                        all_ahac_active,
                     ),
                     accumulation_steps=gradient_accumulation_steps,
                     microbatch_size=num_envs,
@@ -3724,10 +3929,11 @@ def train(
                         shard_terminals,
                         shard_bootstrap_obs,
                         shard_final_obs,
+                        shard_active,
                     ) = shard_inputs
                     shard_losses, shard_per_env_grads = jax.vmap(
                         critic_grad_fn,
-                        in_axes=(None, None, None, 0, 0, 0, 0, 0, 0),
+                        in_axes=(None, None, None, 0, 0, 0, 0, 0, 0, 0),
                     )(
                         c_params,
                         state.target_critic_params,
@@ -3738,6 +3944,7 @@ def train(
                         shard_terminals,
                         shard_bootstrap_obs,
                         shard_final_obs,
+                        shard_active,
                     )
                     shard_grads, shard_grad_stats = (
                         aggregate_env_gradients(
@@ -3784,17 +3991,145 @@ def train(
                 "raw_norm_max": critic_grad_stats["raw_norm_max"],
             }
 
-        (new_critic_params, new_critic_opt), critic_update_metrics = jax.lax.scan(
-            critic_update_step,
-            (state.critic_params, state.critic_opt),
-            None,
-            length=critic_iterations,
-        )
+        if ahac:
+            def ahac_critic_update_step(carry, _):
+                (
+                    current_params,
+                    current_opt,
+                    loss_history,
+                    converged,
+                    executed_iterations,
+                ) = carry
+                (candidate_params, candidate_opt), candidate_metrics = (
+                    critic_update_step((current_params, current_opt), None)
+                )
+                apply_update = ~converged
+                next_params = select_active_tree(
+                    current_params, candidate_params, apply_update
+                )
+                next_opt = select_active_tree(
+                    current_opt, candidate_opt, apply_update
+                )
+                next_history = jp.where(
+                    apply_update,
+                    jp.concatenate(
+                        (loss_history[1:], candidate_metrics["loss"][None])
+                    ),
+                    loss_history,
+                )
+                next_executed = executed_iterations + apply_update.astype(jp.int32)
+                next_converged = converged | (
+                    (next_executed >= 5)
+                    & critic_convergence(
+                        next_history, ahac_critic_tolerance
+                    )
+                )
+                return (
+                    next_params,
+                    next_opt,
+                    next_history,
+                    next_converged,
+                    next_executed,
+                ), {
+                    **candidate_metrics,
+                    "applied": apply_update,
+                }
+
+            initial_loss_history = jp.full(
+                (5,), jp.inf, dtype=jp.float32
+            )
+            (
+                new_critic_params,
+                new_critic_opt,
+                ahac_critic_loss_history,
+                ahac_critic_converged,
+                ahac_critic_iterations_executed,
+            ), critic_update_metrics = jax.lax.scan(
+                ahac_critic_update_step,
+                (
+                    state.critic_params,
+                    state.critic_opt,
+                    initial_loss_history,
+                    jp.asarray(False),
+                    jp.asarray(0, dtype=jp.int32),
+                ),
+                None,
+                length=ahac_critic_max_iterations,
+            )
+        else:
+            (new_critic_params, new_critic_opt), critic_update_metrics = (
+                jax.lax.scan(
+                    critic_update_step,
+                    (state.critic_params, state.critic_opt),
+                    None,
+                    length=critic_iterations,
+                )
+            )
+            ahac_critic_loss_history = jp.full(
+                (5,), jp.nan, dtype=jp.float32
+            )
+            ahac_critic_converged = jp.asarray(False)
+            ahac_critic_iterations_executed = jp.asarray(
+                critic_iterations, dtype=jp.int32
+            )
 
         # Soft target update
-        new_target = optax.incremental_update(
-            new_critic_params, state.target_critic_params, target_update_rate
+        new_target = (
+            new_critic_params
+            if ahac
+            else optax.incremental_update(
+                new_critic_params,
+                state.target_critic_params,
+                target_update_rate,
+            )
         )
+        if ahac:
+            def single_env_critic_fit_diagnostics(
+                obs,
+                rewards,
+                dones,
+                terminals,
+                bootstrap_obs,
+                final_obs,
+                active,
+            ):
+                fit = critic_fit_from_data(
+                    new_critic_params,
+                    state.target_critic_params,
+                    state.critic_normalizer,
+                    obs,
+                    rewards,
+                    dones,
+                    terminals,
+                    bootstrap_obs,
+                    final_obs,
+                    active,
+                )
+                return fit.head_losses, fit.disagreement
+
+            (
+                ahac_per_env_head_losses,
+                ahac_per_env_head_disagreement,
+            ) = jax.vmap(single_env_critic_fit_diagnostics)(
+                all_obs,
+                all_rewards,
+                all_dones,
+                all_terminals,
+                all_bootstrap_obs,
+                all_final_obs,
+                all_ahac_active,
+            )
+            ahac_critic_head_losses = jp.mean(
+                ahac_per_env_head_losses, axis=0
+            )
+            ahac_critic_head_disagreement = jp.mean(
+                ahac_per_env_head_disagreement
+            )
+        else:
+            ahac_critic_head_losses = jp.zeros((2,), dtype=jp.float32)
+            ahac_critic_head_disagreement = jp.asarray(
+                0.0, dtype=jp.float32
+            )
 
         # Update actor and critic normalizers from their own observation streams.
         if frozen_preview_treatment:
@@ -3834,6 +4169,10 @@ def train(
             actor_opt=new_actor_opt,
             critic_opt=new_critic_opt,
             step=state.step + steps_per_actor_update,
+            ahac_horizon=(
+                ahac_update.horizon if ahac else state.ahac_horizon
+            ),
+            ahac_dual=(ahac_update.dual if ahac else state.ahac_dual),
         )
 
         # Collect metrics
@@ -3884,6 +4223,34 @@ def train(
             "foot_normal_RL": jp.mean(trajs["foot_normal_RL"]),
             "foot_normal_RR": jp.mean(trajs["foot_normal_RR"]),
         }
+        if ahac:
+            active_contact = jp.where(
+                ahac_active_mask,
+                ahac_contact_by_step,
+                jp.nan,
+            )
+            metrics.update(
+                {
+                    "ahac_horizon": ahac_update.horizon,
+                    "ahac_horizon_before_update": state.ahac_horizon,
+                    "ahac_active_transitions": jp.sum(ahac_active_mask),
+                    "ahac_dual_mean": jp.mean(ahac_update.dual),
+                    "ahac_dual_max": jp.max(ahac_update.dual),
+                    "ahac_contact_stiffness_mean": jp.nanmean(active_contact),
+                    "ahac_contact_stiffness_max": jp.nanmax(active_contact),
+                    "ahac_contact_threshold": jp.asarray(
+                        ahac_contact_threshold, dtype=jp.float64
+                    ),
+                    "ahac_horizon_valid": ahac_update.valid,
+                    "ahac_critic_iterations": ahac_critic_iterations_executed,
+                    "ahac_critic_converged": ahac_critic_converged,
+                    "ahac_critic_loss_history": ahac_critic_loss_history,
+                    "ahac_critic_head_losses": ahac_critic_head_losses,
+                    "ahac_critic_head_disagreement": (
+                        ahac_critic_head_disagreement
+                    ),
+                }
+            )
         if actor_phase_robust_weighting:
             metrics.update(
                 {
@@ -4155,6 +4522,16 @@ def train(
         actor_opt=actor_opt_state,
         critic_opt=critic_opt_state,
         step=canonicalize_step_dtype(0),
+        ahac_horizon=(
+            jp.asarray(ahac_horizon_min, dtype=jp.float32)
+            if ahac
+            else None
+        ),
+        ahac_dual=(
+            jp.zeros((ahac_horizon_max,), dtype=jp.float32)
+            if ahac
+            else None
+        ),
     )
     if migration_report is not None:
         persist_future_reference_migration_report(
@@ -4165,6 +4542,11 @@ def train(
             save_dir, reference_path_migration_report
         )
     if resumed_state is not None:
+        if ahac and (
+            getattr(resumed_state, "ahac_horizon", None) is None
+            or getattr(resumed_state, "ahac_dual", None) is None
+        ):
+            raise ValueError("AHAC checkpoint state is missing horizon or dual leaves")
         print(
             "Restoring complete training state from step "
             f"{resumed_step} (PRNG, environments, parameters, optimizers, "
@@ -4507,7 +4889,7 @@ def train(
         resumed_hparams.get("best_reward", -np.inf) if resumed_hparams else -np.inf
     )
     hparams = {
-        "algorithm": "shac",
+        "algorithm": algorithm_name,
         "total_steps": total_steps,
         "unroll_length": unroll_length,
         "num_envs": num_envs,
@@ -4520,6 +4902,14 @@ def train(
         "gae_lambda": gae_lambda,
         "target_update_rate": target_update_rate,
         "critic_iterations": critic_iterations,
+        "ahac": ahac,
+        "ahac_horizon_min": ahac_horizon_min,
+        "ahac_horizon_max": ahac_horizon_max,
+        "ahac_contact_threshold": ahac_contact_threshold,
+        "ahac_dual_lr": ahac_dual_lr,
+        "ahac_critic_max_iterations": ahac_critic_max_iterations,
+        "ahac_critic_tolerance": ahac_critic_tolerance,
+        "allow_resume_ahac_change": allow_resume_ahac_change,
         "xml_path": xml_path,
         "action_scale": action_scale,
         "cmd_vel_x_range": list(cmd_vel_x_range),
@@ -4907,6 +5297,8 @@ def train(
                         metrics["critic_grad_finite_fraction"]
                     ),
                 }
+                if ahac:
+                    diag_entry.update(build_checkpoint_ahac_telemetry(metrics))
                 if actor_policy_anchor_weight > 0.0:
                     diag_entry.update(
                         build_policy_anchor_telemetry(
@@ -5215,6 +5607,7 @@ def train(
             checkpoint_path,
             actor_cagrad=actor_cagrad,
             frozen_preview_treatment=frozen_preview_treatment,
+            ahac=ahac,
         ):
             checkpoint_metrics = {
                 "step": int(current_step),
@@ -5225,6 +5618,10 @@ def train(
             if actor_cagrad:
                 checkpoint_metrics.update(
                     build_checkpoint_cagrad_telemetry(metrics)
+                )
+            if ahac:
+                checkpoint_metrics.update(
+                    build_checkpoint_ahac_telemetry(metrics)
                 )
             if recovery_teacher_enabled:
                 checkpoint_metrics.update(
