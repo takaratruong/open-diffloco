@@ -97,13 +97,19 @@ Use two immutable actor boundaries:
 
 For each actor, construct 120 exact reference starts: 24 replicas at phases
 `0/25/50/75/100`, with a fixed float32 H24 RMR noise tape and restored actor
-history/context. For the same states and noise, compute per-environment actor
-gradients for:
+history/context. For the same initial states and noise, compute
+training-equivalent per-environment actor gradients for:
 
 1. ordinary H24 under `g1-4x5`;
 2. topology-truncated H24 under `g1-4x5`;
 3. ordinary H24 under `diagnostic-10x20`; and
 4. topology-truncated H24 under `diagnostic-10x20`.
+
+Compile the ordinary and truncated objectives separately, exactly as they
+would execute in training. Persist their complete finite forward divergence
+rather than requiring bit identity. A common-trajectory manual reverse pass
+was rejected because it produced zero finite fresh-actor gradients in every
+phase bin and therefore did not reproduce the working SHAC boundary.
 
 Clip each environment gradient to norm 1.0 before the unchanged five-bin
 CAGrad aggregation. Persist event masks/counts, raw and clipped norm
@@ -115,8 +121,9 @@ a training input.
 ## Gates And Outcome Map
 
 Execution is valid only if all four captures at both actor boundaries are
-finite and nonzero, all five phase bins are occupied, forward arrays are
-bit-identical between ordinary and truncated modes within each solver, contact
+finite and nonzero after unchanged per-environment rejection, all five phase
+bins retain a finite contributor, both separately compiled forward paths are
+finite and their drift is persisted, contact
 events occur in at least three of the five fixed phase bins with at least 24
 total events per actor/solver boundary, and all artifact hashes validate.
 The coverage gate prevents a sparse or inactive detector from authorizing

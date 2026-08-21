@@ -13,6 +13,13 @@ body-pair contacts instead. Duplicate geom/contact points for one body pair
 collapse to one bit. This correction is required before Task 4 and does not
 change the fixed population, actor, loss, solver, or outcome gates.
 
+**Adjoint correction (2026-08-21):** A common-trajectory manual reverse pass
+did not reproduce SHAC: its fresh actor had zero finite contributors in all
+five phase bins. Use the actual separately compiled `value_and_grad` actor loss
+for ordinary and truncated arms, keep initial states/noise matched, require all
+forward arrays finite, and persist their measured divergence. This is the
+training-equivalent successor to the invalid common-trajectory attempt.
+
 **Tech Stack:** Python 3.11, JAX x64, MuJoCo/MJX, Flax, NumPy, pytest, Ruff, existing SHAC/CAGrad and research registry tools.
 
 ## Global Constraints

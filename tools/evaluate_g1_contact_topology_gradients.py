@@ -229,6 +229,33 @@ def validate_forward_identity(
     return True
 
 
+def summarize_forward_delta(
+    ordinary: Mapping[str, np.ndarray],
+    truncated: Mapping[str, np.ndarray],
+    *,
+    label: str,
+) -> dict[str, float | int]:
+    """Measure finite forward drift between separately compiled treatments."""
+
+    if set(ordinary) != set(truncated):
+        raise ValueError(f"{label} forward schemas differ")
+    summary: dict[str, float | int] = {}
+    for name in sorted(ordinary):
+        left = np.asarray(ordinary[name])
+        right = np.asarray(truncated[name])
+        if left.shape != right.shape or left.dtype != right.dtype:
+            raise ValueError(f"{label} forward {name} shape/dtype differs")
+        if np.issubdtype(left.dtype, np.bool_):
+            summary[f"{name}_disagreement_count"] = int(np.sum(left != right))
+            continue
+        if not np.isfinite(left).all() or not np.isfinite(right).all():
+            raise ValueError(f"{label} forward {name} is nonfinite")
+        summary[f"{name}_max_abs"] = float(
+            np.max(np.abs(left.astype(np.float64) - right.astype(np.float64)))
+        )
+    return summary
+
+
 def _tree_vector(tree: Any) -> np.ndarray:
     leaves = [np.asarray(leaf).reshape(-1) for leaf in __import__("jax").tree_util.tree_leaves(tree)]
     return np.concatenate(leaves).astype(np.float64, copy=False)
@@ -272,6 +299,7 @@ def run_gradient_capture(
     import jax
     import jax.numpy as jnp
 
+    from src.algorithms.shac.contact_truncation import contact_gradient_barrier
     from src.algorithms.shac.gradients import per_env_gradient_statistics
     from src.algorithms.shac.objective_direction_audit import aggregate_audit_direction
     from src.core.data_structures import Normalizer
@@ -386,28 +414,24 @@ def run_gradient_capture(
             norm_state = norms_by_actor[actor_name]
             noise_std = noise_std_by_actor[actor_name]
 
-            def paired_gradients(parameters, initial_state, epsilon):
-                def transition(params, state, epsilon_t):
+            def loss(parameters, initial_state, epsilon, *, truncate):
+                def rollout_step(state, epsilon_t):
                     _obs_key, env_key = jax.random.split(state.info["rng"])
                     state = state.replace(info={**state.info, "rng": env_key})
                     normalized = env.normalize_actor_obs(
                         normalizer, norm_state, state.obs
                     ).astype(jnp.float32)
-                    action = actor.apply(params, normalized).astype(jnp.float64)
+                    action = actor.apply(parameters, normalized).astype(jnp.float64)
                     noisy_action = action + epsilon_t.astype(jnp.float64) * noise_std
                     candidate = env.step(state, noisy_action)
-                    return candidate, noisy_action
-
-                def rollout_step(state, epsilon_t):
-                    candidate, noisy_action = transition(
-                        parameters, state, epsilon_t
-                    )
                     event = jax.lax.stop_gradient(
                         candidate.info["transition_contact_topology_event"]
                     )
-                    return candidate, {
-                        "input_state": state,
-                        "reward": candidate.reward,
+                    next_state = contact_gradient_barrier(
+                        candidate, event, enabled=truncate
+                    )
+                    return next_state, {
+                        "reward": next_state.reward,
                         "done": candidate.done,
                         "terminal": candidate.info["terminal"],
                         "event": event,
@@ -416,141 +440,65 @@ def run_gradient_capture(
                         "action": noisy_action,
                     }
 
-                final_state, trajectory = jax.lax.scan(
+                _, trajectory = jax.lax.scan(
                     rollout_step, initial_state, epsilon, length=HORIZON
                 )
 
-                def discount_step(discount, done):
-                    return jnp.where(done, 1.0, discount * gamma), discount
-
-                _, weights = jax.lax.scan(
-                    discount_step,
-                    jnp.asarray(1.0),
-                    trajectory["done"],
-                )
-                loss_value = -jnp.sum(weights * trajectory["reward"]) / HORIZON
-
-                def zero_cotangent(value):
-                    dtype = getattr(value, "dtype", None)
-                    if dtype is None:
-                        return None
-                    if jnp.issubdtype(dtype, jnp.inexact):
-                        return jnp.zeros_like(value)
-                    return jnp.zeros(value.shape, dtype=jax.dtypes.float0)
-
-                def mask_cotangent(value, event):
-                    if getattr(value, "dtype", None) == jax.dtypes.float0:
-                        return value
-                    return jnp.where(event, jnp.zeros_like(value), value)
-
-                zero_state = jax.tree_util.tree_map(
-                    zero_cotangent, final_state
-                )
-                zero_params = jax.tree_util.tree_map(jnp.zeros_like, parameters)
-
-                def backward_step(carry, inputs):
-                    (
-                        ordinary_state_ct,
-                        ordinary_params,
-                        truncated_state_ct,
-                        truncated_params,
-                    ) = carry
-                    state_t, epsilon_t, weight_t, event_t = inputs
-                    _, pullback = jax.vjp(
-                        lambda params, state: transition(
-                            params, state, epsilon_t
-                        )[0],
-                        parameters,
-                        state_t,
-                    )
-                    reward_ct = -weight_t / HORIZON
-                    ordinary_output_ct = ordinary_state_ct.replace(
-                        reward=ordinary_state_ct.reward + reward_ct
-                    )
-                    truncated_output_ct = truncated_state_ct.replace(
-                        reward=truncated_state_ct.reward + reward_ct
-                    )
-                    truncated_output_ct = jax.tree_util.tree_map(
-                        lambda value: mask_cotangent(value, event_t),
-                        truncated_output_ct,
-                    )
-                    ordinary_param_step, ordinary_state_ct = pullback(
-                        ordinary_output_ct
-                    )
-                    truncated_param_step, truncated_state_ct = pullback(
-                        truncated_output_ct
-                    )
-                    ordinary_params = jax.tree_util.tree_map(
-                        jnp.add, ordinary_params, ordinary_param_step
-                    )
-                    truncated_params = jax.tree_util.tree_map(
-                        jnp.add, truncated_params, truncated_param_step
-                    )
+                def accumulate(carry, values):
+                    total, running, discount = carry
+                    reward, done = values
+                    running = running + discount * reward
+                    total = total + jnp.where(done, running, 0.0)
                     return (
-                        ordinary_state_ct,
-                        ordinary_params,
-                        truncated_state_ct,
-                        truncated_params,
+                        total,
+                        jnp.where(done, 0.0, running),
+                        jnp.where(done, 1.0, discount * gamma),
                     ), None
 
-                (_, ordinary_gradient, _, truncated_gradient), _ = jax.lax.scan(
-                    backward_step,
-                    (zero_state, zero_params, zero_state, zero_params),
-                    (
-                        trajectory["input_state"],
-                        epsilon,
-                        weights,
-                        trajectory["event"],
-                    ),
-                    reverse=True,
+                (total, running, _), _ = jax.lax.scan(
+                    accumulate,
+                    (jnp.asarray(0.0), jnp.asarray(0.0), jnp.asarray(1.0)),
+                    (trajectory["reward"], trajectory["done"]),
                 )
-                auxiliary = {
-                    key: value
-                    for key, value in trajectory.items()
-                    if key != "input_state"
-                }
-                return (
-                    loss_value,
-                    auxiliary,
-                    ordinary_gradient,
-                    truncated_gradient,
-                )
+                return -(total + running) / HORIZON, trajectory
 
-            paired_batch = jax.jit(
-                jax.vmap(paired_gradients, in_axes=(None, 0, 0))
-            )
-            gradient_chunks = {mode: [] for mode in MODES}
-            auxiliary_chunks = []
-            with solver_context(profile):
-                for start in range(0, count, REPLICAS_PER_PHASE):
-                    stop = min(start + REPLICAS_PER_PHASE, count)
-                    state_chunk = jax.tree_util.tree_map(
-                        lambda value: value[start:stop], states
+            for mode in MODES:
+                truncate = mode == "contact_truncated"
+                value_grad = jax.jit(
+                    jax.vmap(
+                        jax.value_and_grad(
+                            lambda parameters, state, epsilon: loss(
+                                parameters, state, epsilon, truncate=truncate
+                            ),
+                            has_aux=True,
+                        ),
+                        in_axes=(None, 0, 0),
                     )
-                    losses, auxiliary, ordinary_gradient, truncated_gradient = (
-                        paired_batch(
+                )
+                gradient_chunks = []
+                auxiliary_chunks = []
+                with solver_context(profile):
+                    for start in range(0, count, REPLICAS_PER_PHASE):
+                        stop = min(start + REPLICAS_PER_PHASE, count)
+                        state_chunk = jax.tree_util.tree_map(
+                            lambda value: value[start:stop], states
+                        )
+                        (losses, auxiliary), gradient = value_grad(
                             params,
                             state_chunk,
                             jnp.asarray(noise[start:stop]),
                         )
-                    )
-                    gradient_chunks["ordinary"].append(
-                        jax.device_get(ordinary_gradient)
-                    )
-                    gradient_chunks["contact_truncated"].append(
-                        jax.device_get(truncated_gradient)
-                    )
-                    auxiliary_chunks.append(
-                        jax.device_get({**auxiliary, "loss": losses})
-                    )
-            auxiliary = jax.tree_util.tree_map(
-                lambda *values: np.concatenate(values, axis=0),
-                *auxiliary_chunks,
-            )
-            for mode in MODES:
+                        gradient_chunks.append(jax.device_get(gradient))
+                        auxiliary_chunks.append(
+                            jax.device_get({**auxiliary, "loss": losses})
+                        )
                 gradients = jax.tree_util.tree_map(
                     lambda *values: np.concatenate(values, axis=0),
-                    *gradient_chunks[mode],
+                    *gradient_chunks,
+                )
+                auxiliary = jax.tree_util.tree_map(
+                    lambda *values: np.concatenate(values, axis=0),
+                    *auxiliary_chunks,
                 )
                 finite_by_env = np.asarray(
                     per_env_gradient_statistics(gradients)["finite_by_env"],
@@ -576,7 +524,7 @@ def run_gradient_capture(
     if smoke:
         ordinary = captures[("e023", SOLVERS[0], "ordinary")]
         truncated = captures[("e023", SOLVERS[0], "contact_truncated")]
-        validate_forward_identity(
+        forward_delta = summarize_forward_delta(
             ordinary["auxiliary"],
             truncated["auxiliary"],
             label="smoke",
@@ -635,6 +583,7 @@ def run_gradient_capture(
             "event_count": event_count,
             "gradient_norms": norms,
             "gradient_diagnostics": gradient_diagnostics,
+            "forward_delta": forward_delta,
             **source,
         }
         _atomic_json(output_directory / "smoke_summary.json", report)
@@ -648,13 +597,14 @@ def run_gradient_capture(
         "initial_actor_obs_history": initial_arrays["history"],
     }
     summaries: dict[str, dict[str, object]] = {}
+    forward_deltas: dict[str, dict[str, float | int]] = {}
     aggregate_vectors: dict[tuple[str, str, str], np.ndarray] = {}
     task_vectors: dict[tuple[str, str, str], np.ndarray] = {}
     for actor_name in ACTORS:
         for solver_name in SOLVERS:
             ordinary_aux = captures[(actor_name, solver_name, "ordinary")]["auxiliary"]
             truncated_aux = captures[(actor_name, solver_name, "contact_truncated")]["auxiliary"]
-            validate_forward_identity(
+            forward_deltas[f"{actor_name}/{solver_name}"] = summarize_forward_delta(
                 ordinary_aux,
                 truncated_aux,
                 label=f"{actor_name}/{solver_name}",
@@ -751,6 +701,7 @@ def run_gradient_capture(
         "protocol": PROTOCOL,
         **source,
         "input_sha256": input_hashes,
+        "forward_deltas": forward_deltas,
         "solvers": list(SOLVERS),
         "seed": seed,
     }

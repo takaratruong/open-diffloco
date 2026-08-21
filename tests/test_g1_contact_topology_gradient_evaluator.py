@@ -13,6 +13,7 @@ from tools.evaluate_g1_contact_topology_gradients import (
     build_fixed_phase_population,
     classify_contact_topology_gradient_audit,
     compare_solver_gradients,
+    summarize_forward_delta,
     validate_forward_identity,
     validate_completion,
 )
@@ -138,3 +139,19 @@ def test_forward_identity_names_first_different_array_and_error() -> None:
 
     with pytest.raises(ValueError, match=r"qpos.*max_abs=0.25"):
         validate_forward_identity(left, right, label="smoke")
+
+
+def test_forward_delta_reports_numeric_and_boolean_divergence() -> None:
+    ordinary = {
+        "action": np.asarray([[1.0, 2.0]]),
+        "event": np.asarray([[False, True]]),
+    }
+    truncated = {
+        "action": np.asarray([[1.0, 2.25]]),
+        "event": np.asarray([[True, True]]),
+    }
+
+    delta = summarize_forward_delta(ordinary, truncated, label="test")
+
+    assert delta["action_max_abs"] == pytest.approx(0.25)
+    assert delta["event_disagreement_count"] == 1
