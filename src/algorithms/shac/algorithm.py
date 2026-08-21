@@ -48,6 +48,11 @@ from src.algorithms.shac.cagrad import (
     combine_cagrad,
     finalize_phase_gradients,
 )
+from src.algorithms.shac.contact_truncation import (
+    contact_gradient_barrier,
+    contact_topology_event_from_info,
+    resolve_contact_topology_truncation_resume_setting,
+)
 from src.algorithms.shac.phase_weighting import (
     aggregate_phase_weighted_gradients,
     phase_bin_indices,
@@ -461,10 +466,14 @@ def should_persist_checkpoint_metrics(
     actor_cagrad: bool,
     frozen_preview_treatment: bool,
     ahac: bool = False,
+    actor_contact_topology_gradient_truncation: bool = False,
 ) -> bool:
     """Persist validity evidence for every checkpointed CAGrad treatment."""
     return checkpoint_path is not None and (
-        actor_cagrad or frozen_preview_treatment or ahac
+        actor_cagrad
+        or frozen_preview_treatment
+        or ahac
+        or actor_contact_topology_gradient_truncation
     )
 
 
@@ -1762,6 +1771,8 @@ def train(
     env_variant: str = "blind_nolinvel_nokinref",
     actor_per_env_grad_clip: float = None,
     allow_resume_actor_per_env_grad_clip_change: bool = False,
+    actor_contact_topology_gradient_truncation: bool = False,
+    allow_resume_actor_contact_topology_gradient_truncation_change: bool = False,
     critic_per_env_grad_clip: float = None,
     actor_phase_robust_weighting: bool = False,
     actor_phase_bin_count: int = 5,
@@ -2559,6 +2570,23 @@ def train(
         is_resume=resume_from is not None,
         allow_change=allow_resume_ahac_change,
     )
+    actor_contact_topology_gradient_truncation = (
+        resolve_contact_topology_truncation_resume_setting(
+            requested=actor_contact_topology_gradient_truncation,
+            resumed_hparams=resumed_hparams,
+            is_resume=resume_from is not None,
+            allow_change=(
+                allow_resume_actor_contact_topology_gradient_truncation_change
+            ),
+        )
+    )
+    if (
+        actor_contact_topology_gradient_truncation
+        and not env_variant.startswith("g1_tracking")
+    ):
+        raise ValueError(
+            "contact topology gradient truncation requires a G1 tracking task"
+        )
 
     if resume_from is None:
         (
@@ -3190,29 +3218,38 @@ def train(
                     reference_length=env.reference_length,
                 )
             candidate_next_state = env.step(state, noisy_action)
+            contact_topology_event = contact_topology_event_from_info(
+                candidate_next_state.info,
+                enabled=actor_contact_topology_gradient_truncation,
+            )
+            gradient_next_state = contact_gradient_barrier(
+                candidate_next_state,
+                contact_topology_event,
+                enabled=actor_contact_topology_gradient_truncation,
+            )
             candidate_foot_bump_ou = jp.where(
                 candidate_next_state.done,
                 jp.zeros((4, 3)),
                 foot_bump_ou,
             )
             next_state = (
-                select_active_tree(state, candidate_next_state, active)
+                select_active_tree(state, gradient_next_state, active)
                 if ahac
-                else candidate_next_state
+                else gradient_next_state
             )
             foot_bump_ou = jp.where(
                 active, candidate_foot_bump_ou, foot_bump_ou
             )
 
             transition = {
-                "reward": jp.where(active, candidate_next_state.reward, 0.0),
+                "reward": jp.where(active, gradient_next_state.reward, 0.0),
                 "done": jp.where(active, candidate_next_state.done, False),
                 "terminal": jp.where(
                     active, candidate_next_state.info["terminal"], False
                 ),
                 "actor_obs": state.obs,
                 "critic_obs": env._get_critic_obs(state.data, state.info),
-                "bootstrap_critic_obs": candidate_next_state.info[
+                "bootstrap_critic_obs": gradient_next_state.info[
                     "bootstrap_critic_obs"
                 ],
                 "vel_x": candidate_next_state.metrics["vel_x"],
@@ -3238,6 +3275,9 @@ def train(
                     active,
                     candidate_next_state.info["transition_contact_stiffness"],
                     0.0,
+                ),
+                "contact_topology_event": jp.where(
+                    active, contact_topology_event, False
                 ),
             }
             if adaptive_phase_sampling:
@@ -4222,6 +4262,12 @@ def train(
             "foot_normal_FR": jp.mean(trajs["foot_normal_FR"]),
             "foot_normal_RL": jp.mean(trajs["foot_normal_RL"]),
             "foot_normal_RR": jp.mean(trajs["foot_normal_RR"]),
+            "contact_topology_event_count": jp.sum(
+                trajs["contact_topology_event"]
+            ),
+            "contact_topology_event_fraction": jp.mean(
+                trajs["contact_topology_event"]
+            ),
         }
         if ahac:
             active_contact = jp.where(
@@ -5124,6 +5170,12 @@ def train(
         "allow_resume_actor_per_env_grad_clip_change": (
             allow_resume_actor_per_env_grad_clip_change
         ),
+        "actor_contact_topology_gradient_truncation": (
+            actor_contact_topology_gradient_truncation
+        ),
+        "allow_resume_actor_contact_topology_gradient_truncation_change": (
+            allow_resume_actor_contact_topology_gradient_truncation_change
+        ),
         "critic_per_env_grad_clip": critic_per_env_grad_clip,
         "actor_phase_robust_weighting": actor_phase_robust_weighting,
         "actor_phase_bin_count": actor_phase_bin_count,
@@ -5295,6 +5347,12 @@ def train(
                     ),
                     "critic_grad_finite_fraction": float(
                         metrics["critic_grad_finite_fraction"]
+                    ),
+                    "contact_topology_event_count": int(
+                        metrics["contact_topology_event_count"]
+                    ),
+                    "contact_topology_event_fraction": float(
+                        metrics["contact_topology_event_fraction"]
                     ),
                 }
                 if ahac:
@@ -5608,6 +5666,9 @@ def train(
             actor_cagrad=actor_cagrad,
             frozen_preview_treatment=frozen_preview_treatment,
             ahac=ahac,
+            actor_contact_topology_gradient_truncation=(
+                actor_contact_topology_gradient_truncation
+            ),
         ):
             checkpoint_metrics = {
                 "step": int(current_step),
@@ -5622,6 +5683,18 @@ def train(
             if ahac:
                 checkpoint_metrics.update(
                     build_checkpoint_ahac_telemetry(metrics)
+                )
+            if actor_contact_topology_gradient_truncation:
+                checkpoint_metrics.update(
+                    {
+                        "actor_contact_topology_gradient_truncation": True,
+                        "contact_topology_event_count": int(
+                            metrics["contact_topology_event_count"]
+                        ),
+                        "contact_topology_event_fraction": float(
+                            metrics["contact_topology_event_fraction"]
+                        ),
+                    }
                 )
             if recovery_teacher_enabled:
                 checkpoint_metrics.update(
