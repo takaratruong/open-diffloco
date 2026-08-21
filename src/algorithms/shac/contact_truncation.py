@@ -13,13 +13,16 @@ def contact_gradient_barrier(
     tree: Any,
     event: jax.Array,
     *,
-    enabled: bool,
+    enabled: bool | jax.Array,
 ) -> Any:
     """Preserve the primal tree and detach it at a contact event."""
 
-    if not enabled:
+    if isinstance(enabled, bool) and not enabled:
         return tree
-    stopped_event = jax.lax.stop_gradient(jp.asarray(event, dtype=jp.bool_))
+    stopped_event = jax.lax.stop_gradient(
+        jp.asarray(event, dtype=jp.bool_)
+        & jp.asarray(enabled, dtype=jp.bool_)
+    )
     return jax.tree_util.tree_map(
         lambda value: jp.where(
             stopped_event, jax.lax.stop_gradient(value), value

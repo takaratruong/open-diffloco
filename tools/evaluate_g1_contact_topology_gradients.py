@@ -428,19 +428,19 @@ def run_gradient_capture(
                 )
                 return -(total + running) / HORIZON, trajectory
 
-            for mode in MODES:
-                truncate = mode == "contact_truncated"
-                value_grad = jax.jit(
-                    jax.vmap(
-                        jax.value_and_grad(
-                            lambda parameters, state, epsilon: loss(
-                                parameters, state, epsilon, truncate=truncate
-                            ),
-                            has_aux=True,
+            value_grad = jax.jit(
+                jax.vmap(
+                    jax.value_and_grad(
+                        lambda parameters, state, epsilon, truncate: loss(
+                            parameters, state, epsilon, truncate=truncate
                         ),
-                        in_axes=(None, 0, 0),
-                    )
+                        has_aux=True,
+                    ),
+                    in_axes=(None, 0, 0, None),
                 )
+            )
+            for mode in MODES:
+                truncate = jnp.asarray(mode == "contact_truncated")
                 gradient_chunks = []
                 auxiliary_chunks = []
                 with solver_context(profile):
@@ -453,6 +453,7 @@ def run_gradient_capture(
                             params,
                             state_chunk,
                             jnp.asarray(noise[start:stop]),
+                            truncate,
                         )
                         gradient_chunks.append(jax.device_get(gradient))
                         auxiliary_chunks.append(

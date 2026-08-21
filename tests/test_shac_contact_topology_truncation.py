@@ -2,6 +2,7 @@ import inspect
 
 import jax
 import jax.numpy as jp
+import numpy as np
 import pytest
 
 from src.algorithms.shac.contact_truncation import (
@@ -32,6 +33,29 @@ def test_disabled_barrier_is_exact_legacy_identity() -> None:
     actual = contact_gradient_barrier(tree, True, enabled=False)
 
     assert actual is tree
+
+
+def test_dynamic_barrier_flag_shares_one_compiled_primal() -> None:
+    def value_and_gradient(value, enabled):
+        def objective(argument):
+            result = contact_gradient_barrier(
+                argument * argument,
+                jp.asarray(True),
+                enabled=enabled,
+            )
+            return result
+
+        return jax.value_and_grad(objective)(value)
+
+    compiled = jax.jit(value_and_gradient)
+    ordinary_value, ordinary_gradient = compiled(2.0, jp.asarray(False))
+    truncated_value, truncated_gradient = compiled(2.0, jp.asarray(True))
+
+    assert np.asarray(ordinary_value).tobytes() == np.asarray(
+        truncated_value
+    ).tobytes()
+    assert ordinary_gradient == 4.0
+    assert truncated_gradient == 0.0
 
 
 def test_disabled_non_g1_rollout_does_not_require_contact_event_info() -> None:
