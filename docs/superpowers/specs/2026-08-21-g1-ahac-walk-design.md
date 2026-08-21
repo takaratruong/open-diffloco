@@ -23,12 +23,19 @@ schedule, five-bin CAGrad, actor network, observations, rewards, reset
 distribution, action contract, seed zero, and 128 actor-update budget.
 
 The treatment changes only the optimizer family from SHAC to AHAC. AHAC
-contains three coupled changes from the ICML 2024 implementation and they are
+contains four coupled changes from the ICML 2024 implementation and they are
 treated as one algorithmic intervention:
 
 1. a global differentiable rollout horizon bounded to 8--24 transitions;
 2. a nonnegative dual variable driven by contact stiffness; and
-3. a double value critic trained until convergence, capped at 64 iterations.
+3. a double value critic trained until convergence, capped at 64 iterations;
+   and
+4. conservative minimum-head value bootstrapping active from update zero.
+
+E023's zero actor bootstrap is therefore not retained: it changes to scale
+`1.0` with zero delay as an intrinsic AHAC requirement. Without it, an
+eight-step adaptive horizon discards the remaining task value and is not the
+published actor-critic objective.
 
 ## Contact-stiffness proxy and calibration
 
