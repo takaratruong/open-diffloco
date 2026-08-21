@@ -272,7 +272,6 @@ def run_gradient_capture(
     import jax
     import jax.numpy as jnp
 
-    from src.algorithms.shac.contact_truncation import contact_gradient_barrier
     from src.algorithms.shac.objective_direction_audit import aggregate_audit_direction
     from src.core.data_structures import Normalizer
     from src.envs.g1_tracking.environment import DEFAULT_CONTROLLER_PATH
@@ -386,24 +385,28 @@ def run_gradient_capture(
             norm_state = norms_by_actor[actor_name]
             noise_std = noise_std_by_actor[actor_name]
 
-            def loss(parameters, initial_state, epsilon, *, truncate):
-                def rollout_step(state, epsilon_t):
+            def paired_gradients(parameters, initial_state, epsilon):
+                def transition(params, state, epsilon_t):
                     _obs_key, env_key = jax.random.split(state.info["rng"])
                     state = state.replace(info={**state.info, "rng": env_key})
                     normalized = env.normalize_actor_obs(
                         normalizer, norm_state, state.obs
                     ).astype(jnp.float32)
-                    action = actor.apply(parameters, normalized).astype(jnp.float64)
+                    action = actor.apply(params, normalized).astype(jnp.float64)
                     noisy_action = action + epsilon_t.astype(jnp.float64) * noise_std
                     candidate = env.step(state, noisy_action)
+                    return candidate, noisy_action
+
+                def rollout_step(state, epsilon_t):
+                    candidate, noisy_action = transition(
+                        parameters, state, epsilon_t
+                    )
                     event = jax.lax.stop_gradient(
                         candidate.info["transition_contact_topology_event"]
                     )
-                    next_state = contact_gradient_barrier(
-                        candidate, event, enabled=truncate
-                    )
-                    return next_state, {
-                        "reward": next_state.reward,
+                    return candidate, {
+                        "input_state": state,
+                        "reward": candidate.reward,
                         "done": candidate.done,
                         "terminal": candidate.info["terminal"],
                         "event": event,
@@ -412,66 +415,141 @@ def run_gradient_capture(
                         "action": noisy_action,
                     }
 
-                _, trajectory = jax.lax.scan(
+                final_state, trajectory = jax.lax.scan(
                     rollout_step, initial_state, epsilon, length=HORIZON
                 )
 
-                def accumulate(carry, values):
-                    total, running, discount = carry
-                    reward, done = values
-                    running = running + discount * reward
-                    total = total + jnp.where(done, running, 0.0)
+                def discount_step(discount, done):
+                    return jnp.where(done, 1.0, discount * gamma), discount
+
+                _, weights = jax.lax.scan(
+                    discount_step,
+                    jnp.asarray(1.0),
+                    trajectory["done"],
+                )
+                loss_value = -jnp.sum(weights * trajectory["reward"]) / HORIZON
+
+                def zero_cotangent(value):
+                    dtype = getattr(value, "dtype", None)
+                    if dtype is None:
+                        return None
+                    if jnp.issubdtype(dtype, jnp.inexact):
+                        return jnp.zeros_like(value)
+                    return jnp.zeros(value.shape, dtype=jax.dtypes.float0)
+
+                def mask_cotangent(value, event):
+                    if getattr(value, "dtype", None) == jax.dtypes.float0:
+                        return value
+                    return jnp.where(event, jnp.zeros_like(value), value)
+
+                zero_state = jax.tree_util.tree_map(
+                    zero_cotangent, final_state
+                )
+                zero_params = jax.tree_util.tree_map(jnp.zeros_like, parameters)
+
+                def backward_step(carry, inputs):
+                    (
+                        ordinary_state_ct,
+                        ordinary_params,
+                        truncated_state_ct,
+                        truncated_params,
+                    ) = carry
+                    state_t, epsilon_t, weight_t, event_t = inputs
+                    _, pullback = jax.vjp(
+                        lambda params, state: transition(
+                            params, state, epsilon_t
+                        )[0],
+                        parameters,
+                        state_t,
+                    )
+                    reward_ct = -weight_t / HORIZON
+                    ordinary_output_ct = ordinary_state_ct.replace(
+                        reward=ordinary_state_ct.reward + reward_ct
+                    )
+                    truncated_output_ct = truncated_state_ct.replace(
+                        reward=truncated_state_ct.reward + reward_ct
+                    )
+                    truncated_output_ct = jax.tree_util.tree_map(
+                        lambda value: mask_cotangent(value, event_t),
+                        truncated_output_ct,
+                    )
+                    ordinary_param_step, ordinary_state_ct = pullback(
+                        ordinary_output_ct
+                    )
+                    truncated_param_step, truncated_state_ct = pullback(
+                        truncated_output_ct
+                    )
+                    ordinary_params = jax.tree_util.tree_map(
+                        jnp.add, ordinary_params, ordinary_param_step
+                    )
+                    truncated_params = jax.tree_util.tree_map(
+                        jnp.add, truncated_params, truncated_param_step
+                    )
                     return (
-                        total,
-                        jnp.where(done, 0.0, running),
-                        jnp.where(done, 1.0, discount * gamma),
+                        ordinary_state_ct,
+                        ordinary_params,
+                        truncated_state_ct,
+                        truncated_params,
                     ), None
 
-                (total, running, _), _ = jax.lax.scan(
-                    accumulate,
-                    (jnp.asarray(0.0), jnp.asarray(0.0), jnp.asarray(1.0)),
-                    (trajectory["reward"], trajectory["done"]),
-                )
-                return -(total + running) / HORIZON, trajectory
-
-            value_grad = jax.jit(
-                jax.vmap(
-                    jax.value_and_grad(
-                        lambda parameters, state, epsilon, truncate: loss(
-                            parameters, state, epsilon, truncate=truncate
-                        ),
-                        has_aux=True,
+                (_, ordinary_gradient, _, truncated_gradient), _ = jax.lax.scan(
+                    backward_step,
+                    (zero_state, zero_params, zero_state, zero_params),
+                    (
+                        trajectory["input_state"],
+                        epsilon,
+                        weights,
+                        trajectory["event"],
                     ),
-                    in_axes=(None, 0, 0, None),
+                    reverse=True,
                 )
+                auxiliary = {
+                    key: value
+                    for key, value in trajectory.items()
+                    if key != "input_state"
+                }
+                return (
+                    loss_value,
+                    auxiliary,
+                    ordinary_gradient,
+                    truncated_gradient,
+                )
+
+            paired_batch = jax.jit(
+                jax.vmap(paired_gradients, in_axes=(None, 0, 0))
             )
-            for mode in MODES:
-                truncate = jnp.asarray(mode == "contact_truncated")
-                gradient_chunks = []
-                auxiliary_chunks = []
-                with solver_context(profile):
-                    for start in range(0, count, REPLICAS_PER_PHASE):
-                        stop = min(start + REPLICAS_PER_PHASE, count)
-                        state_chunk = jax.tree_util.tree_map(
-                            lambda value: value[start:stop], states
-                        )
-                        (losses, auxiliary), gradient = value_grad(
+            gradient_chunks = {mode: [] for mode in MODES}
+            auxiliary_chunks = []
+            with solver_context(profile):
+                for start in range(0, count, REPLICAS_PER_PHASE):
+                    stop = min(start + REPLICAS_PER_PHASE, count)
+                    state_chunk = jax.tree_util.tree_map(
+                        lambda value: value[start:stop], states
+                    )
+                    losses, auxiliary, ordinary_gradient, truncated_gradient = (
+                        paired_batch(
                             params,
                             state_chunk,
                             jnp.asarray(noise[start:stop]),
-                            truncate,
                         )
-                        gradient_chunks.append(jax.device_get(gradient))
-                        auxiliary_chunks.append(
-                            jax.device_get({**auxiliary, "loss": losses})
-                        )
+                    )
+                    gradient_chunks["ordinary"].append(
+                        jax.device_get(ordinary_gradient)
+                    )
+                    gradient_chunks["contact_truncated"].append(
+                        jax.device_get(truncated_gradient)
+                    )
+                    auxiliary_chunks.append(
+                        jax.device_get({**auxiliary, "loss": losses})
+                    )
+            auxiliary = jax.tree_util.tree_map(
+                lambda *values: np.concatenate(values, axis=0),
+                *auxiliary_chunks,
+            )
+            for mode in MODES:
                 gradients = jax.tree_util.tree_map(
                     lambda *values: np.concatenate(values, axis=0),
-                    *gradient_chunks,
-                )
-                auxiliary = jax.tree_util.tree_map(
-                    lambda *values: np.concatenate(values, axis=0),
-                    *auxiliary_chunks,
+                    *gradient_chunks[mode],
                 )
                 captures[(actor_name, solver_name, mode)] = {
                     "gradients": gradients,
