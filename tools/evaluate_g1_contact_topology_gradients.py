@@ -552,9 +552,24 @@ def run_gradient_capture(
                     lambda *values: np.concatenate(values, axis=0),
                     *gradient_chunks[mode],
                 )
+                finite_by_env = np.asarray(
+                    per_env_gradient_statistics(gradients)["finite_by_env"],
+                    dtype=np.bool_,
+                )
+                finite_phase_counts = [
+                    int(np.sum(finite_by_env[phases == phase]))
+                    for phase in PHASES
+                ]
+                if any(count == 0 for count in finite_phase_counts):
+                    raise ValueError(
+                        "contact gradient capture has an empty finite phase "
+                        f"bin: actor={actor_name}, solver={solver_name}, "
+                        f"mode={mode}, counts={finite_phase_counts}"
+                    )
                 captures[(actor_name, solver_name, mode)] = {
                     "gradients": gradients,
                     "auxiliary": auxiliary,
+                    "finite_phase_counts": finite_phase_counts,
                 }
 
     assert initial_arrays is not None
@@ -646,14 +661,22 @@ def run_gradient_capture(
             )
             for mode in MODES:
                 capture = captures[(actor_name, solver_name, mode)]
-                aggregated = aggregate_audit_direction(
-                    capture["gradients"],
-                    phases,
-                    phase_count=125,
-                    clip_norm=1.0,
-                    alpha=0.5,
-                    iterations=32,
-                )
+                try:
+                    aggregated = aggregate_audit_direction(
+                        capture["gradients"],
+                        phases,
+                        phase_count=125,
+                        clip_norm=1.0,
+                        alpha=0.5,
+                        iterations=32,
+                    )
+                except ValueError as error:
+                    raise ValueError(
+                        "contact gradient aggregation failed: "
+                        f"actor={actor_name}, solver={solver_name}, "
+                        f"mode={mode}, finite_phase_counts="
+                        f"{capture['finite_phase_counts']}"
+                    ) from error
                 key = (actor_name, solver_name, mode)
                 combined = _tree_vector(aggregated.combined_gradient)
                 task = _tree_matrix(aggregated.task_gradients)
