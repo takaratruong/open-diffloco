@@ -1216,10 +1216,10 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         state = env.reset_at_phase(
             jax.random.PRNGKey(42), jnp.array(0.0), jnp.array(0)
         )
-        before = env.foot_support_signature(state.data)
+        before = env.contact_pair_signature(state.data)
 
         next_state = env.step(state, jnp.zeros(env.action_dim))
-        after = env.foot_support_signature(next_state.data)
+        after = env.contact_pair_signature(next_state.data)
 
         expected = bool(jnp.any(before != after))
         self.assertEqual(

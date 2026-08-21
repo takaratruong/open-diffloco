@@ -1,4 +1,4 @@
-"""Threshold-free grouped foot-contact topology for G1 tracking."""
+"""Threshold-free grouped contact topology for G1 tracking."""
 
 from __future__ import annotations
 
@@ -38,18 +38,56 @@ def grouped_foot_support(
     )
 
 
+def grouped_body_pair_contacts(
+    contact_geom: jax.Array,
+    efc_address: jax.Array,
+    geom_bodyid: jax.Array,
+    *,
+    body_count: int,
+) -> jax.Array:
+    """Return one active-contact bit per unordered pair of model bodies."""
+
+    pairs = jp.asarray(contact_geom)
+    addresses = jp.asarray(efc_address)
+    body_for_geom = jp.asarray(geom_bodyid)
+    if (
+        pairs.ndim != 2
+        or pairs.shape[-1] != 2
+        or addresses.shape != pairs.shape[:1]
+        or body_for_geom.ndim != 1
+        or body_for_geom.shape[0] < 1
+        or not isinstance(body_count, int)
+        or body_count < 1
+    ):
+        raise ValueError("contact topology inputs have incompatible shapes")
+
+    safe_pairs = jp.clip(pairs, 0, body_for_geom.shape[0] - 1)
+    pair_bodies = body_for_geom[safe_pairs]
+    lower = jp.minimum(pair_bodies[:, 0], pair_bodies[:, 1])
+    upper = jp.maximum(pair_bodies[:, 0], pair_bodies[:, 1])
+    active = (addresses >= 0) & (lower != upper)
+    flat_index = lower * body_count + upper
+    counts = jp.zeros((body_count * body_count,), dtype=jp.int32).at[
+        flat_index
+    ].add(active.astype(jp.int32))
+    return (counts > 0).reshape((body_count, body_count))
+
+
 def contact_topology_event(
     previous: jax.Array,
     current: jax.Array,
     *,
     done: jax.Array,
 ) -> jax.Array:
-    """Return true for a non-reset touchdown, liftoff, or support swap."""
+    """Return true for a non-reset change between matching signatures."""
 
     previous_support = jp.asarray(previous, dtype=jp.bool_)
     current_support = jp.asarray(current, dtype=jp.bool_)
-    if previous_support.shape != (2,) or current_support.shape != (2,):
-        raise ValueError("foot support signatures must have shape (2,)")
+    if (
+        previous_support.shape != current_support.shape
+        or previous_support.size < 1
+    ):
+        raise ValueError("contact signatures must have matching nonempty shapes")
     return jp.any(previous_support != current_support) & ~jp.asarray(
         done, dtype=jp.bool_
     )

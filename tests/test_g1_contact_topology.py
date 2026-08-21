@@ -4,6 +4,7 @@ import pytest
 
 from src.envs.g1_tracking.contact_topology import (
     contact_topology_event,
+    grouped_body_pair_contacts,
     grouped_foot_support,
 )
 
@@ -34,6 +35,20 @@ def test_grouped_support_ignores_active_nonfoot_contacts() -> None:
     np.testing.assert_array_equal(actual, np.asarray([False, False]))
 
 
+def test_grouped_body_pairs_collapse_duplicate_contact_points() -> None:
+    signature = grouped_body_pair_contacts(
+        jp.asarray([[0, 1], [0, 2], [3, 4], [1, 4]]),
+        jp.asarray([0, 3, 6, -1]),
+        jp.asarray([0, 7, 7, 13, 18]),
+        body_count=20,
+    )
+
+    assert signature.shape == (20, 20)
+    assert bool(signature[0, 7])
+    assert bool(signature[13, 18])
+    assert int(jp.sum(signature)) == 2
+
+
 @pytest.mark.parametrize(
     ("previous", "current"),
     (
@@ -60,6 +75,13 @@ def test_topology_event_ignores_unchanged_support_and_reset() -> None:
     assert not bool(contact_topology_event(support, double, done=True))
 
 
+def test_topology_event_accepts_matching_body_pair_matrices() -> None:
+    previous = jp.zeros((4, 4), dtype=jp.bool_)
+    current = previous.at[0, 3].set(True)
+
+    assert bool(contact_topology_event(previous, current, done=False))
+
+
 @pytest.mark.parametrize(
     ("contact_geom", "efc_address", "foot_body_ids"),
     (
@@ -80,8 +102,8 @@ def test_grouped_support_rejects_incompatible_shapes(
         )
 
 
-def test_topology_event_rejects_non_pair_signatures() -> None:
-    with pytest.raises(ValueError, match="shape.*2"):
+def test_topology_event_rejects_mismatched_or_empty_signatures() -> None:
+    with pytest.raises(ValueError, match="matching nonempty"):
         contact_topology_event(
-            jp.asarray([True]), jp.asarray([False]), done=False
+            jp.asarray([True]), jp.asarray([False, True]), done=False
         )

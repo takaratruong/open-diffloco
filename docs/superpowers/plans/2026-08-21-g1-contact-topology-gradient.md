@@ -4,14 +4,21 @@
 
 **Goal:** Determine whether dropping only touchdown/liftoff pathwise derivatives makes fresh and retained G1 H24 actor gradients more solver-robust without erasing the useful signal.
 
-**Architecture:** Add a pure grouped-foot contact topology seam to the G1 environment, then add one default-off tree gradient barrier at the existing SHAC transition boundary. A dedicated frozen evaluator reconstructs exact fresh and E023 actors, captures ordinary/truncated H24 gradients under two registered fixed solvers, validates the preregistered robustness gates, and writes manifest-last evidence. No training is launched in this plan.
+**Architecture:** Add a pure grouped contact topology seam to the G1 environment, then add one default-off tree gradient barrier at the existing SHAC transition boundary. A dedicated frozen evaluator reconstructs exact fresh and E023 actors, captures ordinary/truncated H24 gradients under two registered fixed solvers, validates the preregistered robustness gates, and writes manifest-last evidence. No training is launched in this plan.
+
+**Preflight correction (2026-08-21):** The implemented two-bit foot-support
+detector produced zero events in all 120 fixed noisy H24 rollouts. Preserve its
+pure helper for diagnostics, but drive the barrier from active unordered
+body-pair contacts instead. Duplicate geom/contact points for one body pair
+collapse to one bit. This correction is required before Task 4 and does not
+change the fixed population, actor, loss, solver, or outcome gates.
 
 **Tech Stack:** Python 3.11, JAX x64, MuJoCo/MJX, Flax, NumPy, pytest, Ruff, existing SHAC/CAGrad and research registry tools.
 
 ## Global Constraints
 
 - Preserve the raw 125-frame walking reference and exact E023 action/noise/observation/reward contract.
-- The event is a grouped two-bit left/right active-contact signature; do not add a force or stiffness threshold.
+- The event is a grouped active unordered body-pair contact signature; do not add a force or stiffness threshold.
 - Preserve all forward state, reward, done, terminal, phase, observation, and action values exactly.
 - Apply the barrier to transition reward and carried state only at nonterminal support changes; later direct actor gradients remain live.
 - Keep the feature default off and preserve legacy checkpoint/hparams behavior when disabled.

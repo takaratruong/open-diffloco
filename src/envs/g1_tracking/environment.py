@@ -14,6 +14,7 @@ from src.core.contact import contact_stiffness
 from src.core.data_structures import EnvState
 from src.envs.g1_tracking.contact_topology import (
     contact_topology_event,
+    grouped_body_pair_contacts,
     grouped_foot_support,
 )
 from src.envs.g1_tracking.controller import load_rmr_controller
@@ -740,6 +741,17 @@ class G1TrackingEnv:
             contact.efc_address,
             self.mjx_model.geom_bodyid,
             self._support_foot_body_ids,
+        )
+
+    def contact_pair_signature(self, data: mjx.Data) -> jax.Array:
+        """Return active contacts grouped by unordered model-body pair."""
+
+        contact = data._impl.contact
+        return grouped_body_pair_contacts(
+            contact.geom,
+            contact.efc_address,
+            self.mjx_model.geom_bodyid,
+            body_count=self.mj_model.nbody,
         )
 
     def _aligned_reference_body_targets(
@@ -1491,7 +1503,7 @@ class G1TrackingEnv:
 
     @functools.partial(jax.checkpoint, static_argnums=(0,))
     def step(self, state: EnvState, action: jax.Array) -> EnvState:
-        previous_foot_support = self.foot_support_signature(state.data)
+        previous_contact_pairs = self.contact_pair_signature(state.data)
         action = self._prepare_action(action)
         position_target = self.position_target(state, action, prepared=True)
         model = self._get_randomized_model(state.info)
@@ -1567,10 +1579,10 @@ class G1TrackingEnv:
         done, terminal = self._termination(
             data, pre_reset_info, body_pos, body_quat
         )
-        transition_foot_support = self.foot_support_signature(data)
+        transition_contact_pairs = self.contact_pair_signature(data)
         transition_contact_topology_event = contact_topology_event(
-            previous_foot_support,
-            transition_foot_support,
+            previous_contact_pairs,
+            transition_contact_pairs,
             done=done,
         )
 

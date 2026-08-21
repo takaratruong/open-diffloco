@@ -5,17 +5,18 @@
 Run one frozen-gradient discriminator before another full G1 training run.
 Preserve the raw 125-frame walking reference, E023 action/noise/observation/reward
 contract, H24 forward rollout, effective phase coverage, and fixed MJX solver.
-Change only the actor derivative at a physical left/right foot support change:
+Change only the actor derivative at a physical body-pair contact change:
 the transition reward and returned environment state keep their exact forward
 values but are detached from the preceding trajectory. Later actions and later
 rewards remain differentiable with respect to the shared actor parameters.
 
-The event is a grouped two-bit `(left_support, right_support)` signature from
-active ground contacts involving any collision geometry on the corresponding
-ankle-roll body. A transition is an event when either bit changes. Terminal
+The event is the set of active unordered model-body contact pairs. Multiple
+contact points and collision geometries between the same two bodies collapse
+to one bit. A transition is an event when any pair bit changes. Terminal
 auto-reset changes are not contact events. This rule has no calibrated force
-threshold. CPU MuJoCo reconstruction of the immutable reference finds six
-grouped changes over 125 frames, at frames 38, 39, 98, 100, 111, and 112.
+threshold. A completed 120-rollout preflight found zero left/right foot-support
+changes at every fixed phase group, so the narrower foot-only detector was
+falsified before a scientific or training launch.
 
 Do not launch full training unless the frozen diagnostic shows that this
 surrogate is less sensitive to solver convergence while retaining a substantial
@@ -53,13 +54,14 @@ This is the strongest local reliability oracle, but it doubles training
 dynamics, adds a second model state to every update, and cannot be deployed as
 the final learning rule. Retain the second solver only as a frozen diagnostic.
 
-### Grouped contact-topology truncation — selected
+### Grouped body-pair contact-topology truncation — selected
 
-Touchdown and liftoff are exactly where rigid contact dynamics change branch.
-Grouping all seven collision geometries per foot avoids triggering on internal
-sole-contact jitter. The rule is phase-independent, force-scale-independent,
-and reusable on longer motions. It leaves smooth swing and stance segments
-fully pathwise differentiable.
+Contact-set changes are exactly where rigid contact dynamics change branch.
+Grouping by unordered body pair avoids triggering on duplicate contact points
+while covering ground-foot, ground-knee, ground-body, and self-contact changes.
+The rule is phase-independent, force-scale-independent, and reusable on longer
+motions. It leaves intervals with unchanged active body pairs fully pathwise
+differentiable.
 
 ## Gradient Semantics
 
@@ -67,9 +69,9 @@ At every H24 step:
 
 1. Compute the actor mean, reparameterized RMR action noise, action boundary,
    and `env.step` exactly as the retained E023 recipe.
-2. Compute the pre-step and post-step grouped foot-support signatures from the
+2. Compute the pre-step and post-step grouped body-pair signatures from the
    physical MJX data. Stop gradients through both signatures.
-3. Set `contact_event` when a support bit changes and the transition is not an
+3. Set `contact_event` when a body-pair bit changes and the transition is not an
    environment reset.
 4. When enabled and `contact_event` is true, apply a tree-wide gradient barrier
    to the candidate transition state before its reward is read and before it is
@@ -117,9 +119,8 @@ finite and nonzero, all five phase bins are occupied, forward arrays are
 bit-identical between ordinary and truncated modes within each solver, contact
 events occur in at least three of the five fixed phase bins with at least 24
 total events per actor/solver boundary, and all artifact hashes validate.
-Three bins are the exact minimum supported by the reference's known event
-windows at starts 25, 75, and 100; noisy policy execution may add events but is
-not required to make execution valid.
+The coverage gate prevents a sparse or inactive detector from authorizing
+training based on an unrepresentative subset of the motion.
 
 Define solver angular error as `1 - cosine(g_4x5, g_10x20)` for aggregate and
 per-phase clipped/CAGrad directions.
