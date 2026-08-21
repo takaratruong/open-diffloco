@@ -113,10 +113,13 @@ a training input.
 ## Gates And Outcome Map
 
 Execution is valid only if all four captures at both actor boundaries are
-finite and nonzero, all five phase bins are occupied, contact events occur in
-at least four of the five bins across the combined population, forward arrays
-are bit-identical between ordinary and truncated modes within each solver, and
-all artifact hashes validate.
+finite and nonzero, all five phase bins are occupied, forward arrays are
+bit-identical between ordinary and truncated modes within each solver, contact
+events occur in at least three of the five fixed phase bins with at least 24
+total events per actor/solver boundary, and all artifact hashes validate.
+Three bins are the exact minimum supported by the reference's known event
+windows at starts 25, 75, and 100; noisy policy execution may add events but is
+not required to make execution valid.
 
 Define solver angular error as `1 - cosine(g_4x5, g_10x20)` for aggregate and
 per-phase clipped/CAGrad directions.
