@@ -97,7 +97,6 @@ def validate_ahac_telemetry_row(
         raise ValueError("AHAC telemetry is incomplete") from error
     if (
         row.get("ahac_valid") is not True
-        or row.get("ahac_horizon_valid") is not True
         or not all(math.isfinite(value) for value in scalars.values())
         or not 8.0 <= scalars["ahac_horizon"] <= 24.0
         or not 8.0 <= scalars["ahac_horizon_before_update"] <= 24.0

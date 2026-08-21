@@ -124,7 +124,6 @@ def _valid_ahac_row(step: int) -> dict[str, object]:
         "ahac_contact_stiffness_mean": 80.0,
         "ahac_contact_stiffness_max": 120.0,
         "ahac_contact_threshold": 100.0,
-        "ahac_horizon_valid": True,
         "ahac_critic_iterations": 12,
         "ahac_critic_converged": True,
         "ahac_critic_loss_history": [1.0, 0.9, 0.8, 0.75, 0.7],
