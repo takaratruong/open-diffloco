@@ -29,6 +29,10 @@ from src.core.rmr_action_noise import (
 )
 from src.envs.go2.environment import Go2Env
 from src.envs.go2.terrain import differentiated_ou_foot_forces
+from src.envs.g1_tracking.demonstration_replay import (
+    apply_demonstration_replay,
+    resolve_demonstration_replay_resume_setting,
+)
 from src.core.utils import compute_grad_norm
 from src.algorithms.shac.gradients import (
     aggregate_per_env_gradients,
@@ -358,6 +362,22 @@ def build_checkpoint_cagrad_telemetry(metrics) -> dict[str, object]:
     }
 
 
+def build_checkpoint_demonstration_replay_telemetry(
+    metrics, *, threshold: float
+) -> dict[str, object]:
+    """Serialize checkpoint-aligned demonstration-replay evidence."""
+    count = int(metrics["demonstration_replay_count"])
+    fraction = float(metrics["demonstration_replay_fraction"])
+    if count < 0 or not math.isfinite(fraction) or not 0.0 <= fraction <= 1.0:
+        raise ValueError("demonstration replay telemetry is invalid")
+    return {
+        "demonstration_replay_threshold": float(threshold),
+        "demonstration_replay_count": count,
+        "demonstration_replay_fraction": fraction,
+        "demonstration_replay_valid": True,
+    }
+
+
 def build_checkpoint_ahac_telemetry(metrics) -> dict[str, object]:
     """Serialize and fail closed on checkpoint-aligned AHAC evidence."""
 
@@ -467,6 +487,7 @@ def should_persist_checkpoint_metrics(
     frozen_preview_treatment: bool,
     ahac: bool = False,
     actor_contact_topology_gradient_truncation: bool = False,
+    demonstration_replay: bool = False,
 ) -> bool:
     """Persist validity evidence for every checkpointed CAGrad treatment."""
     return checkpoint_path is not None and (
@@ -474,6 +495,7 @@ def should_persist_checkpoint_metrics(
         or frozen_preview_treatment
         or ahac
         or actor_contact_topology_gradient_truncation
+        or demonstration_replay
     )
 
 
@@ -1812,6 +1834,8 @@ def train(
     reference_root_reset_noise_multiplier: float = 1.0,
     reference_root_reset_noise_probability: float = 0.0,
     allow_resume_reference_root_reset_noise_change: bool = False,
+    demonstration_replay_threshold: float | None = None,
+    allow_resume_demonstration_replay_change: bool = False,
     reference_residual_control: bool = False,
     reference_residual_scale: float = 0.5,
     carried_reset_bank_path: str | None = None,
@@ -2519,6 +2543,21 @@ def train(
                 critic_per_env_grad_clip = resumed_hparams[
                     "critic_per_env_grad_clip"
                 ]
+    demonstration_replay_threshold = (
+        resolve_demonstration_replay_resume_setting(
+            resumed_hparams,
+            is_resume=resume_from is not None,
+            requested=demonstration_replay_threshold,
+            allow_change=allow_resume_demonstration_replay_change,
+        )
+    )
+    if demonstration_replay_threshold is not None and not (
+        env_variant.startswith("g1_tracking")
+    ):
+        raise ValueError(
+            "demonstration replay requires a G1 tracking environment"
+        )
+    if resume_from:
         validate_actor_cagrad_configuration(
             actor_cagrad=actor_cagrad,
             alpha=actor_cagrad_alpha,
@@ -3217,9 +3256,20 @@ def train(
                     reference_stride=env.reference_stride,
                     reference_length=env.reference_length,
                 )
-            candidate_next_state = env.step(state, noisy_action)
+            candidate_unreplayed_state = env.step(state, noisy_action)
+            if demonstration_replay_threshold is not None:
+                candidate_next_state, demonstration_replay = (
+                    apply_demonstration_replay(
+                        env,
+                        candidate_unreplayed_state,
+                        threshold=demonstration_replay_threshold,
+                    )
+                )
+            else:
+                candidate_next_state = candidate_unreplayed_state
+                demonstration_replay = jp.array(False)
             contact_topology_event = contact_topology_event_from_info(
-                candidate_next_state.info,
+                candidate_unreplayed_state.info,
                 enabled=actor_contact_topology_gradient_truncation,
             )
             gradient_next_state = contact_gradient_barrier(
@@ -3228,7 +3278,7 @@ def train(
                 enabled=actor_contact_topology_gradient_truncation,
             )
             candidate_foot_bump_ou = jp.where(
-                candidate_next_state.done,
+                candidate_unreplayed_state.done,
                 jp.zeros((4, 3)),
                 foot_bump_ou,
             )
@@ -3243,27 +3293,42 @@ def train(
 
             transition = {
                 "reward": jp.where(active, gradient_next_state.reward, 0.0),
-                "done": jp.where(active, candidate_next_state.done, False),
+                "done": jp.where(
+                    active, candidate_unreplayed_state.done, False
+                ),
                 "terminal": jp.where(
-                    active, candidate_next_state.info["terminal"], False
+                    active,
+                    candidate_unreplayed_state.info["terminal"],
+                    False,
                 ),
                 "actor_obs": state.obs,
                 "critic_obs": env._get_critic_obs(state.data, state.info),
                 "bootstrap_critic_obs": gradient_next_state.info[
                     "bootstrap_critic_obs"
                 ],
-                "vel_x": candidate_next_state.metrics["vel_x"],
-                "vel_y": candidate_next_state.metrics["vel_y"],
-                "yaw_rate": candidate_next_state.metrics["yaw_rate"],
-                "cmd_x": candidate_next_state.metrics["cmd_x"],
-                "cmd_y": candidate_next_state.metrics["cmd_y"],
-                "cmd_yaw": candidate_next_state.metrics["cmd_yaw"],
-                "height": candidate_next_state.metrics["height"],
-                "tilt": candidate_next_state.metrics["tilt"],
-                "foot_normal_FL": candidate_next_state.metrics["foot_normal_FL"],
-                "foot_normal_FR": candidate_next_state.metrics["foot_normal_FR"],
-                "foot_normal_RL": candidate_next_state.metrics["foot_normal_RL"],
-                "foot_normal_RR": candidate_next_state.metrics["foot_normal_RR"],
+                "vel_x": candidate_unreplayed_state.metrics["vel_x"],
+                "vel_y": candidate_unreplayed_state.metrics["vel_y"],
+                "yaw_rate": candidate_unreplayed_state.metrics["yaw_rate"],
+                "cmd_x": candidate_unreplayed_state.metrics["cmd_x"],
+                "cmd_y": candidate_unreplayed_state.metrics["cmd_y"],
+                "cmd_yaw": candidate_unreplayed_state.metrics["cmd_yaw"],
+                "height": candidate_unreplayed_state.metrics["height"],
+                "tilt": candidate_unreplayed_state.metrics["tilt"],
+                "foot_normal_FL": candidate_unreplayed_state.metrics[
+                    "foot_normal_FL"
+                ],
+                "foot_normal_FR": candidate_unreplayed_state.metrics[
+                    "foot_normal_FR"
+                ],
+                "foot_normal_RL": candidate_unreplayed_state.metrics[
+                    "foot_normal_RL"
+                ],
+                "foot_normal_RR": candidate_unreplayed_state.metrics[
+                    "foot_normal_RR"
+                ],
+                "demonstration_replay": jp.where(
+                    active, demonstration_replay, False
+                ),
                 "actor_policy_anchor_squared_error": (
                     jp.where(active, actor_policy_anchor_squared_error, 0.0)
                 ),
@@ -3273,7 +3338,9 @@ def train(
                 "ahac_active": active,
                 "ahac_contact_stiffness": jp.where(
                     active,
-                    candidate_next_state.info["transition_contact_stiffness"],
+                    candidate_unreplayed_state.info[
+                        "transition_contact_stiffness"
+                    ],
                     0.0,
                 ),
                 "contact_topology_event": jp.where(
@@ -4268,6 +4335,12 @@ def train(
             "contact_topology_event_fraction": jp.mean(
                 trajs["contact_topology_event"]
             ),
+            "demonstration_replay_count": jp.sum(
+                trajs["demonstration_replay"]
+            ),
+            "demonstration_replay_fraction": jp.mean(
+                trajs["demonstration_replay"]
+            ),
         }
         if ahac:
             active_contact = jp.where(
@@ -4988,6 +5061,10 @@ def train(
         "allow_resume_reference_root_reset_noise_change": (
             allow_resume_reference_root_reset_noise_change
         ),
+        "demonstration_replay_threshold": demonstration_replay_threshold,
+        "allow_resume_demonstration_replay_change": (
+            allow_resume_demonstration_replay_change
+        ),
         "reference_residual_control": reference_residual_control,
         "reference_residual_scale": reference_residual_scale,
         "carried_reset_bank_path": carried_reset_bank_path,
@@ -5426,6 +5503,13 @@ def train(
                             ),
                         }
                     )
+                if demonstration_replay_threshold is not None:
+                    diag_entry.update(
+                        build_checkpoint_demonstration_replay_telemetry(
+                            metrics,
+                            threshold=demonstration_replay_threshold,
+                        )
+                    )
                 if recovery_teacher_enabled:
                     diag_entry.update(
                         build_checkpoint_recovery_teacher_telemetry(
@@ -5632,6 +5716,7 @@ def train(
                 reward > best_reward
                 and state.step > 5000
                 and not torso_wrench_assistance
+                and demonstration_replay_threshold is None
             ):
                 best_reward = reward
                 with open(f"{save_dir}/policy_best.pkl", "wb") as f:
@@ -5669,6 +5754,9 @@ def train(
             actor_contact_topology_gradient_truncation=(
                 actor_contact_topology_gradient_truncation
             ),
+            demonstration_replay=(
+                demonstration_replay_threshold is not None
+            ),
         ):
             checkpoint_metrics = {
                 "step": int(current_step),
@@ -5695,6 +5783,13 @@ def train(
                             metrics["contact_topology_event_fraction"]
                         ),
                     }
+                )
+            if demonstration_replay_threshold is not None:
+                checkpoint_metrics.update(
+                    build_checkpoint_demonstration_replay_telemetry(
+                        metrics,
+                        threshold=demonstration_replay_threshold,
+                    )
                 )
             if recovery_teacher_enabled:
                 checkpoint_metrics.update(
