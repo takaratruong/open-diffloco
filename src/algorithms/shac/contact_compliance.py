@@ -29,26 +29,72 @@ _hard_primal_compliant_vjp.defvjp(
 )
 
 
-def backward_from_compliant(hard: Any, compliant: Any) -> Any:
-    """Return the exact hard pytree while routing floating VJPs through compliant."""
+@jax.custom_vjp
+def _hard_primal_mixed_vjp(
+    hard: jax.Array, compliant: jax.Array, compliant_weight: jax.Array
+) -> jax.Array:
+    del compliant, compliant_weight
+    return hard
 
+
+def _hard_primal_mixed_vjp_fwd(hard, compliant, compliant_weight):
+    del compliant
+    return hard, compliant_weight
+
+
+def _hard_primal_mixed_vjp_bwd(compliant_weight, cotangent):
+    weight = compliant_weight.astype(cotangent.dtype)
+    return (1.0 - weight) * cotangent, weight * cotangent, jnp.zeros_like(weight)
+
+
+_hard_primal_mixed_vjp.defvjp(
+    _hard_primal_mixed_vjp_fwd,
+    _hard_primal_mixed_vjp_bwd,
+)
+
+
+def _validate_matching_trees(hard: Any, compliant: Any) -> None:
     hard_structure = jax.tree_util.tree_structure(hard)
     compliant_structure = jax.tree_util.tree_structure(compliant)
     if hard_structure != compliant_structure:
         raise ValueError("hard and compliant states must share tree structure")
-
-    hard_leaves = jax.tree_util.tree_leaves(hard)
-    compliant_leaves = jax.tree_util.tree_leaves(compliant)
-    for hard_leaf, compliant_leaf in zip(hard_leaves, compliant_leaves):
+    for hard_leaf, compliant_leaf in zip(
+        jax.tree_util.tree_leaves(hard),
+        jax.tree_util.tree_leaves(compliant),
+    ):
         if (
             hard_leaf.shape != compliant_leaf.shape
             or hard_leaf.dtype != compliant_leaf.dtype
         ):
             raise ValueError("hard and compliant leaves must share shape and dtype")
 
+
+def backward_from_compliant(hard: Any, compliant: Any) -> Any:
+    """Return the exact hard pytree while routing floating VJPs through compliant."""
+
+    _validate_matching_trees(hard, compliant)
+
     def combine(hard_leaf, compliant_leaf):
         if jnp.issubdtype(hard_leaf.dtype, jnp.inexact):
             return _hard_primal_compliant_vjp(hard_leaf, compliant_leaf)
+        return jax.lax.stop_gradient(hard_leaf)
+
+    return jax.tree_util.tree_map(combine, hard, compliant)
+
+
+def backward_from_contact_mix(
+    hard: Any, compliant: Any, compliant_weight: jax.Array
+) -> Any:
+    """Return the hard pytree with a dynamic hard/compliant VJP mixture."""
+
+    _validate_matching_trees(hard, compliant)
+    weight = jnp.asarray(compliant_weight)
+    if weight.ndim != 0 or not jnp.issubdtype(weight.dtype, jnp.floating):
+        raise ValueError("compliant weight must be a floating scalar")
+
+    def combine(hard_leaf, compliant_leaf):
+        if jnp.issubdtype(hard_leaf.dtype, jnp.inexact):
+            return _hard_primal_mixed_vjp(hard_leaf, compliant_leaf, weight)
         return jax.lax.stop_gradient(hard_leaf)
 
     return jax.tree_util.tree_map(combine, hard, compliant)

@@ -14,9 +14,11 @@ from typing import Mapping
 import numpy as np
 
 from tools.evaluate_g1_ivw_h_gradients import (
+    ACTION_DIM,
     EXPECTED_CONTROLLER_SHA256,
     EXPECTED_INPUT_SHA256,
     EXPECTED_MODEL_SHA256,
+    HORIZON,
     PHASES,
     REPLICAS_PER_PHASE,
     SOLVERS,
@@ -24,12 +26,14 @@ from tools.evaluate_g1_ivw_h_gradients import (
     _action_standard_deviation,
     _atomic_json,
     _atomic_npz,
-    _capture_one_population,
+    _concat_trees,
+    _parity_statistics,
     _tree_matrix,
     _tree_vector,
     _validate_clean_source,
     _vector_cosine,
     build_fixed_phase_population,
+    push_action_gradients_to_policy,
 )
 
 
@@ -208,20 +212,173 @@ def validate_completion(path: Path) -> dict[str, object]:
     return payload
 
 
-def _capture_auxiliary(
-    capture: Mapping[str, object], *, hard_branch: bool = False
-) -> dict[str, np.ndarray]:
+def _capture_auxiliary(capture: Mapping[str, object]) -> dict[str, np.ndarray]:
     auxiliary = capture["auxiliary"]
     assert isinstance(auxiliary, Mapping)
-    step_fields = {"reward", "done", "terminal", "qpos", "qvel"}
-    return {
-        field: np.asarray(
-            auxiliary[f"hard_{field}"]
-            if hard_branch and field in step_fields
-            else auxiliary[field]
+    return {field: np.asarray(auxiliary[field]) for field in FORWARD_FIELDS}
+
+
+def _capture_paired_population(
+    *,
+    hard_env,
+    compliant_env,
+    actor,
+    parameters,
+    normalizer,
+    normalizer_state,
+    states,
+    epsilon: np.ndarray,
+    phases: np.ndarray,
+    sigma: np.ndarray,
+    gamma: float,
+    chunk_size: int,
+) -> dict[str, dict[str, object]]:
+    """Capture hard and compliant VJPs in one shared compiled forward program."""
+
+    import jax
+    import jax.numpy as jnp
+
+    from src.algorithms.shac.contact_compliance import backward_from_contact_mix
+    from src.algorithms.shac.gradients import per_env_gradient_statistics
+
+    count = int(len(phases))
+    sigma_jax = jnp.asarray(sigma, dtype=jnp.float64)
+    mode_weights = jnp.asarray((0.0, 1.0), dtype=jnp.float64)
+
+    def loss(candidate_parameters, initial_state, epsilon_i, delta, weight):
+        def rollout_step(state, values):
+            epsilon_t, delta_t = values
+            _obs_key, env_key = jax.random.split(state.info["rng"])
+            state = state.replace(info={**state.info, "rng": env_key})
+            normalized_obs = hard_env.normalize_actor_obs(
+                normalizer, normalizer_state, state.obs
+            ).astype(jnp.float32)
+            mean = actor.apply(candidate_parameters, normalized_obs).astype(
+                jnp.float64
+            )
+            sampled_action = mean + epsilon_t.astype(jnp.float64) * sigma_jax
+            effective_action = sampled_action + delta_t
+            hard_next_state = hard_env.step(state, effective_action)
+            compliant_next_state = compliant_env.step(state, effective_action)
+            next_state = backward_from_contact_mix(
+                hard_next_state, compliant_next_state, weight
+            )
+            return next_state, {
+                "reward": next_state.reward,
+                "done": next_state.done,
+                "terminal": next_state.info["terminal"],
+                "normalized_obs": normalized_obs,
+                "mean": mean,
+                "sampled_action": sampled_action,
+                "qpos": next_state.data.qpos,
+                "qvel": next_state.data.qvel,
+            }
+
+        _, trajectory = jax.lax.scan(
+            rollout_step,
+            initial_state,
+            (epsilon_i, delta),
+            length=HORIZON,
         )
-        for field in FORWARD_FIELDS
-    }
+
+        def accumulate(carry, values):
+            total, running, discount = carry
+            reward, done = values
+            running = running + discount * reward
+            total = total + jnp.where(done, running, 0.0)
+            return (
+                total,
+                jnp.where(done, 0.0, running),
+                jnp.where(done, 1.0, discount * gamma),
+            ), None
+
+        (total, running, _), _ = jax.lax.scan(
+            accumulate,
+            (jnp.asarray(0.0), jnp.asarray(0.0), jnp.asarray(1.0)),
+            (trajectory["reward"], trajectory["done"]),
+        )
+        return -(total + running) / HORIZON, trajectory
+
+    per_mode = jax.vmap(
+        jax.value_and_grad(loss, argnums=(0, 3), has_aux=True),
+        in_axes=(None, None, None, None, 0),
+    )
+    capture_fn = jax.jit(
+        jax.vmap(per_mode, in_axes=(None, 0, 0, 0, None))
+    )
+
+    direct_chunks: list[object] = []
+    action_chunks: list[np.ndarray] = []
+    auxiliary_chunks: list[object] = []
+    for start in range(0, count, chunk_size):
+        stop = min(start + chunk_size, count)
+        state_chunk = jax.tree_util.tree_map(lambda value: value[start:stop], states)
+        delta = jnp.zeros((stop - start, HORIZON, ACTION_DIM), dtype=jnp.float64)
+        (losses_aux, gradients) = capture_fn(
+            parameters,
+            state_chunk,
+            jnp.asarray(epsilon[start:stop]),
+            delta,
+            mode_weights,
+        )
+        losses, auxiliary = losses_aux
+        direct_gradient, action_gradient = gradients
+        direct_chunks.append(jax.device_get(direct_gradient))
+        action_chunks.append(np.asarray(jax.device_get(action_gradient)))
+        auxiliary_chunks.append(jax.device_get({**auxiliary, "loss": losses}))
+
+    direct_pair = _concat_trees(direct_chunks)
+    action_pair = np.concatenate(action_chunks, axis=0)
+    auxiliary_pair = _concat_trees(auxiliary_chunks)
+    result: dict[str, dict[str, object]] = {}
+    for mode_index, mode in enumerate(MODES):
+        direct = jax.tree_util.tree_map(
+            lambda value: value[:, mode_index], direct_pair
+        )
+        action_gradient = action_pair[:, mode_index]
+        auxiliary = jax.tree_util.tree_map(
+            lambda value: value[:, mode_index], auxiliary_pair
+        )
+        observations = np.asarray(auxiliary["normalized_obs"])
+
+        push_fn = jax.jit(
+            jax.vmap(
+                lambda obs_i, gradient_i: push_action_gradients_to_policy(
+                    actor.apply, parameters, obs_i, gradient_i
+                ),
+                in_axes=(0, 0),
+            )
+        )
+        pushed_chunks = []
+        for start in range(0, count, chunk_size):
+            stop = min(start + chunk_size, count)
+            pushed_chunks.append(
+                jax.device_get(
+                    push_fn(
+                        jnp.asarray(observations[start:stop]),
+                        jnp.asarray(action_gradient[start:stop]),
+                    )
+                )
+            )
+        pushed = _concat_trees(pushed_chunks)
+        parity = _parity_statistics(direct, pushed)
+        finite = np.asarray(
+            per_env_gradient_statistics(direct)["finite_by_env"], dtype=np.bool_
+        )
+        result[mode] = {
+            "gradients": {"ordinary": direct},
+            "finite_phase_counts": {
+                "ordinary": [
+                    int(np.sum(finite[np.asarray(phases) == phase]))
+                    for phase in PHASES
+                    if np.any(np.asarray(phases) == phase)
+                ]
+            },
+            "parity": parity,
+            "auxiliary": auxiliary,
+            "pathwise_action_gradient": action_gradient,
+        }
+    return result
 
 
 def run_audit(
@@ -356,38 +513,27 @@ def run_audit(
         normalizer = Normalizer(hard_env.actor_frame_obs_dim)
         sigma = _action_standard_deviation(hparams["action_noise_std_start"])
         for tape_index in tape_indices:
-            for mode in MODES:
-                with solver_context(profile):
-                    capture = _capture_one_population(
-                        env=hard_env,
-                        gradient_env=(compliant_env if mode == "compliant" else None),
-                        actor=actor,
-                        parameters=parameters,
-                        normalizer=normalizer,
-                        normalizer_state=normalizer_state,
-                        states=states,
-                        epsilon=noise[tape_index],
-                        phases=phases,
-                        sigma=sigma,
-                        gamma=float(hparams["gamma"]),
-                        chunk_size=(count if smoke else REPLICAS_PER_PHASE),
-                    )
-                captures[(mode, solver_name, tape_index)] = capture
-            compliant_capture = captures[("compliant", solver_name, tape_index)]
-            validate_forward_identity(
-                _capture_auxiliary(compliant_capture, hard_branch=True),
-                _capture_auxiliary(compliant_capture),
-            )
-            try:
-                validate_forward_identity(
-                    _capture_auxiliary(captures[("hard", solver_name, tape_index)]),
-                    _capture_auxiliary(compliant_capture, hard_branch=True),
+            with solver_context(profile):
+                paired = _capture_paired_population(
+                    hard_env=hard_env,
+                    compliant_env=compliant_env,
+                    actor=actor,
+                    parameters=parameters,
+                    normalizer=normalizer,
+                    normalizer_state=normalizer_state,
+                    states=states,
+                    epsilon=noise[tape_index],
+                    phases=phases,
+                    sigma=sigma,
+                    gamma=float(hparams["gamma"]),
+                    chunk_size=(count if smoke else REPLICAS_PER_PHASE),
                 )
-            except ValueError as exc:
-                raise ValueError(
-                    "separately compiled hard capture drifted from the compliant "
-                    "capture's internal hard branch"
-                ) from exc
+            for mode in MODES:
+                captures[(mode, solver_name, tape_index)] = paired[mode]
+            validate_forward_identity(
+                _capture_auxiliary(captures[("hard", solver_name, tape_index)]),
+                _capture_auxiliary(captures[("compliant", solver_name, tape_index)]),
+            )
 
     assert initial_arrays is not None and model_delta is not None
     if smoke:

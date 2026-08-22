@@ -8,6 +8,7 @@ import jax.numpy as jnp
 
 from src.algorithms.shac.contact_compliance import (
     backward_from_compliant,
+    backward_from_contact_mix,
     with_contact_time_constant,
 )
 
@@ -46,6 +47,32 @@ def test_backward_from_compliant_preserves_hard_discrete_leaves():
     np.testing.assert_array_equal(value["continuous"], hard["continuous"])
     np.testing.assert_array_equal(value["phase"], hard["phase"])
     np.testing.assert_array_equal(value["done"], hard["done"])
+
+
+@pytest.mark.parametrize(
+    ("weight", "expected_hard", "expected_compliant"),
+    [(0.0, [2.0, 4.0], [0.0, 0.0]), (1.0, [0.0, 0.0], [2.0, 4.0])],
+)
+def test_contact_mix_shares_hard_primal_and_selects_registered_vjp(
+    weight, expected_hard, expected_compliant
+):
+    hard = jnp.asarray([1.0, 2.0], dtype=jnp.float32)
+    compliant = jnp.asarray([9.0, 8.0], dtype=jnp.float32)
+
+    value = backward_from_contact_mix(hard, compliant, jnp.asarray(weight))
+    hard_gradient, compliant_gradient = jax.grad(
+        lambda hard_value, compliant_value: jnp.sum(
+            backward_from_contact_mix(
+                hard_value, compliant_value, jnp.asarray(weight)
+            )
+            ** 2
+        ),
+        argnums=(0, 1),
+    )(hard, compliant)
+
+    np.testing.assert_array_equal(value, hard)
+    np.testing.assert_allclose(hard_gradient, expected_hard)
+    np.testing.assert_allclose(compliant_gradient, expected_compliant)
 
 
 def test_backward_from_compliant_rejects_tree_shape_and_dtype_mismatch():
