@@ -325,11 +325,13 @@ def _capture_one_population(
     sigma: np.ndarray,
     gamma: float,
     chunk_size: int,
+    gradient_env: Any | None = None,
 ) -> dict[str, Any]:
     import jax
     import jax.numpy as jnp
 
     from src.algorithms.shac.gradients import per_env_gradient_statistics
+    from src.algorithms.shac.contact_compliance import backward_from_compliant
     from src.algorithms.shac.ivw_h import (
         discounted_reward_to_go,
         fuse_action_gradients,
@@ -354,7 +356,13 @@ def _capture_one_population(
             )
             sampled_action = mean + epsilon_t.astype(jnp.float64) * sigma_jax
             effective_action = sampled_action + delta_t
-            next_state = env.step(state, effective_action)
+            hard_next_state = env.step(state, effective_action)
+            next_state = hard_next_state
+            if gradient_env is not None:
+                compliant_next_state = gradient_env.step(state, effective_action)
+                next_state = backward_from_compliant(
+                    hard_next_state, compliant_next_state
+                )
             return next_state, {
                 "reward": next_state.reward,
                 "done": next_state.done,
