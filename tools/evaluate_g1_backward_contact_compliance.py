@@ -208,10 +208,20 @@ def validate_completion(path: Path) -> dict[str, object]:
     return payload
 
 
-def _capture_auxiliary(capture: Mapping[str, object]) -> dict[str, np.ndarray]:
+def _capture_auxiliary(
+    capture: Mapping[str, object], *, hard_branch: bool = False
+) -> dict[str, np.ndarray]:
     auxiliary = capture["auxiliary"]
     assert isinstance(auxiliary, Mapping)
-    return {field: np.asarray(auxiliary[field]) for field in FORWARD_FIELDS}
+    step_fields = {"reward", "done", "terminal", "qpos", "qvel"}
+    return {
+        field: np.asarray(
+            auxiliary[f"hard_{field}"]
+            if hard_branch and field in step_fields
+            else auxiliary[field]
+        )
+        for field in FORWARD_FIELDS
+    }
 
 
 def run_audit(
@@ -363,12 +373,21 @@ def run_audit(
                         chunk_size=(count if smoke else REPLICAS_PER_PHASE),
                     )
                 captures[(mode, solver_name, tape_index)] = capture
+            compliant_capture = captures[("compliant", solver_name, tape_index)]
             validate_forward_identity(
-                _capture_auxiliary(captures[("hard", solver_name, tape_index)]),
-                _capture_auxiliary(
-                    captures[("compliant", solver_name, tape_index)]
-                ),
+                _capture_auxiliary(compliant_capture, hard_branch=True),
+                _capture_auxiliary(compliant_capture),
             )
+            try:
+                validate_forward_identity(
+                    _capture_auxiliary(captures[("hard", solver_name, tape_index)]),
+                    _capture_auxiliary(compliant_capture, hard_branch=True),
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "separately compiled hard capture drifted from the compliant "
+                    "capture's internal hard branch"
+                ) from exc
 
     assert initial_arrays is not None and model_delta is not None
     if smoke:

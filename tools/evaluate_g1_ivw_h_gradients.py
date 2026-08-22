@@ -367,11 +367,16 @@ def _capture_one_population(
                 "reward": next_state.reward,
                 "done": next_state.done,
                 "terminal": next_state.info["terminal"],
+                "hard_reward": hard_next_state.reward,
+                "hard_done": hard_next_state.done,
+                "hard_terminal": hard_next_state.info["terminal"],
                 "normalized_obs": normalized_obs,
                 "mean": mean,
                 "sampled_action": sampled_action,
                 "qpos": next_state.data.qpos,
                 "qvel": next_state.data.qvel,
+                "hard_qpos": hard_next_state.data.qpos,
+                "hard_qvel": hard_next_state.data.qvel,
             }
 
         _, trajectory = jax.lax.scan(
