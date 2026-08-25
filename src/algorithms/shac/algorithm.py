@@ -81,7 +81,10 @@ from src.algorithms.shac.learned_torso_wrench import (
     FrozenControllerWrenchParams,
     LearnedTorsoWrenchHead,
     apply_learned_torso_wrench,
+    build_learned_wrench_anneal_mask,
     build_learned_wrench_mask,
+    learned_wrench_scale_at_step,
+    migrate_learned_wrench_scale_conditioning,
     normalized_yaw_wrench_to_world,
 )
 from src.algorithms.shac.initialization import (
@@ -2014,8 +2017,14 @@ def train(
     actor_learned_torso_wrench: bool = False,
     actor_learned_torso_wrench_hidden: int = 256,
     actor_learned_torso_wrench_scale: float = 1.0,
+    actor_learned_torso_wrench_scale_end: float | None = None,
+    actor_learned_torso_wrench_scale_start_step: int = 0,
+    actor_learned_torso_wrench_scale_end_step: int = 1,
+    actor_learned_torso_wrench_condition_on_scale: bool = False,
+    actor_learned_torso_wrench_train_controller: bool = False,
     actor_learned_torso_wrench_penalty: float = 0.0,
     allow_resume_actor_learned_torso_wrench_start: bool = False,
+    allow_resume_actor_learned_torso_wrench_change: bool = False,
     reference_path: str | None = None,
     allow_resume_reference_path_change: bool = False,
     reference_stride: int | None = None,
@@ -3016,6 +3025,44 @@ def train(
         or not 0.0 <= actor_learned_torso_wrench_scale <= 1.0
     ):
         raise ValueError("actor_learned_torso_wrench_scale must be in [0, 1]")
+    if actor_learned_torso_wrench_scale_end is None:
+        actor_learned_torso_wrench_scale_end = actor_learned_torso_wrench_scale
+    if (
+        isinstance(actor_learned_torso_wrench_scale_end, bool)
+        or not isinstance(actor_learned_torso_wrench_scale_end, (int, float))
+        or not math.isfinite(actor_learned_torso_wrench_scale_end)
+        or not 0.0 <= actor_learned_torso_wrench_scale_end <= 1.0
+    ):
+        raise ValueError("actor_learned_torso_wrench_scale_end must be in [0, 1]")
+    if (
+        isinstance(actor_learned_torso_wrench_scale_start_step, bool)
+        or not isinstance(actor_learned_torso_wrench_scale_start_step, int)
+        or actor_learned_torso_wrench_scale_start_step < 0
+    ):
+        raise ValueError("learned wrench scale start step must be non-negative")
+    if (
+        isinstance(actor_learned_torso_wrench_scale_end_step, bool)
+        or not isinstance(actor_learned_torso_wrench_scale_end_step, int)
+        or actor_learned_torso_wrench_scale_end_step
+        <= actor_learned_torso_wrench_scale_start_step
+    ):
+        raise ValueError("learned wrench scale end step must exceed start step")
+    for name, value in (
+        (
+            "actor_learned_torso_wrench_condition_on_scale",
+            actor_learned_torso_wrench_condition_on_scale,
+        ),
+        (
+            "actor_learned_torso_wrench_train_controller",
+            actor_learned_torso_wrench_train_controller,
+        ),
+        (
+            "allow_resume_actor_learned_torso_wrench_change",
+            allow_resume_actor_learned_torso_wrench_change,
+        ),
+    ):
+        if not isinstance(value, bool):
+            raise ValueError(f"{name} must be boolean")
     if (
         not math.isfinite(actor_learned_torso_wrench_penalty)
         or actor_learned_torso_wrench_penalty < 0.0
@@ -3028,6 +3075,52 @@ def train(
     resumed_learned_wrench = bool(
         (resumed_hparams or {}).get("actor_learned_torso_wrench", False)
     )
+    learned_wrench_resume_settings = (
+        float(actor_learned_torso_wrench_scale),
+        float(actor_learned_torso_wrench_scale_end),
+        actor_learned_torso_wrench_scale_start_step,
+        actor_learned_torso_wrench_scale_end_step,
+        actor_learned_torso_wrench_condition_on_scale,
+        actor_learned_torso_wrench_train_controller,
+    )
+    if resumed_learned_wrench:
+        saved_scale = float(resumed_hparams["actor_learned_torso_wrench_scale"])
+        saved_settings = (
+            saved_scale,
+            float(
+                resumed_hparams.get(
+                    "actor_learned_torso_wrench_scale_end", saved_scale
+                )
+            ),
+            int(
+                resumed_hparams.get(
+                    "actor_learned_torso_wrench_scale_start_step", 0
+                )
+            ),
+            int(
+                resumed_hparams.get(
+                    "actor_learned_torso_wrench_scale_end_step", 1
+                )
+            ),
+            bool(
+                resumed_hparams.get(
+                    "actor_learned_torso_wrench_condition_on_scale", False
+                )
+            ),
+            bool(
+                resumed_hparams.get(
+                    "actor_learned_torso_wrench_train_controller", False
+                )
+            ),
+        )
+        if (
+            learned_wrench_resume_settings != saved_settings
+            and not allow_resume_actor_learned_torso_wrench_change
+        ):
+            raise ValueError(
+                "learned wrench continuation settings differ from the checkpoint "
+                "without explicit resume authority"
+            )
     if actor_learned_torso_wrench and not actor_residual_preview_adapter:
         raise ValueError(
             "learned torso wrench requires the frozen residual preview controller"
@@ -3103,6 +3196,7 @@ def train(
     )
     learned_torso_wrench_actor = LearnedTorsoWrenchHead(
         hidden_dim=actor_learned_torso_wrench_hidden,
+        condition_on_scale=actor_learned_torso_wrench_condition_on_scale,
     )
     critic = DoubleCritic() if ahac else Critic()
 
@@ -3327,6 +3421,7 @@ def train(
         current_noise_std,
         current_actor_bootstrap_scale,
         current_ahac_horizon,
+        current_learned_wrench_scale,
     ):
         """Short-horizon actor objective with sampled perturbations."""
         (
@@ -3552,13 +3647,18 @@ def train(
                     learned_torso_wrench_actor,
                     actor_params,
                     wrench_frame,
+                    assistance_scale=(
+                        current_learned_wrench_scale
+                        if actor_learned_torso_wrench_condition_on_scale
+                        else None
+                    ),
                 )
                 learned_torso_wrench = normalized_yaw_wrench_to_world(
                     learned_torso_wrench_normalized.astype(state.data.qpos.dtype),
                     root_quaternion=state.data.qpos[3:7],
                     force_cap=torso_wrench_parameters.force_cap,
                     torque_cap=torso_wrench_parameters.torque_cap,
-                    scale=actor_learned_torso_wrench_scale,
+                    scale=current_learned_wrench_scale,
                 )
                 xfrc = write_torso_wrench(
                     state.data.xfrc_applied,
@@ -3976,13 +4076,24 @@ def train(
             if ahac
             else jp.asarray(unroll_length, dtype=jp.float32)
         )
+        current_learned_wrench_scale = (
+            learned_wrench_scale_at_step(
+                state.step,
+                start_step=actor_learned_torso_wrench_scale_start_step,
+                end_step=actor_learned_torso_wrench_scale_end_step,
+                start_scale=actor_learned_torso_wrench_scale,
+                end_scale=actor_learned_torso_wrench_scale_end,
+            )
+            if actor_learned_torso_wrench
+            else jp.asarray(0.0, dtype=jp.float32)
+        )
 
         # Actor update
         actor_grad_fn = jax.value_and_grad(actor_loss, has_aux=True)
         if gradient_accumulation_steps == 1:
             (losses, (trajs, final_states)), per_env_grads = jax.vmap(
                 actor_grad_fn,
-                in_axes=(None, None, None, None, 0, 0, None, None, None),
+                in_axes=(None, None, None, None, 0, 0, None, None, None, None),
             )(
                 state.actor_params,
                 state.target_critic_params,
@@ -3993,6 +4104,7 @@ def train(
                 current_noise_std,
                 current_actor_bootstrap_scale,
                 current_ahac_horizon,
+                current_learned_wrench_scale,
             )
             if actor_learned_torso_wrench:
                 per_env_grads = jax.tree_util.tree_map(
@@ -4055,7 +4167,18 @@ def train(
                     (shard_trajs, shard_final_states),
                 ), shard_per_env_grads = jax.vmap(
                     actor_grad_fn,
-                    in_axes=(None, None, None, None, 0, 0, None, None, None),
+                    in_axes=(
+                        None,
+                        None,
+                        None,
+                        None,
+                        0,
+                        0,
+                        None,
+                        None,
+                        None,
+                        None,
+                    ),
                 )(
                     state.actor_params,
                     state.target_critic_params,
@@ -4066,6 +4189,7 @@ def train(
                     current_noise_std,
                     current_actor_bootstrap_scale,
                     current_ahac_horizon,
+                    current_learned_wrench_scale,
                 )
                 if actor_learned_torso_wrench:
                     shard_per_env_grads = jax.tree_util.tree_map(
@@ -4771,7 +4895,7 @@ def train(
             metrics.update(
                 {
                     "learned_torso_wrench_scale": jp.asarray(
-                        actor_learned_torso_wrench_scale,
+                        current_learned_wrench_scale,
                         dtype=jp.float32,
                     ),
                     "learned_torso_wrench_rms_force": jp.sqrt(
@@ -5107,7 +5231,12 @@ def train(
             persist_future_reference_migration_report(
                 save_dir, migration_report
             )
-        if actor_residual_preview_adapter:
+        if actor_residual_preview_adapter and not (
+            actor_learned_torso_wrench
+            and isinstance(
+                resumed_state.actor_params, FrozenControllerWrenchParams
+            )
+        ):
             if residual_adapter_upgrade or future_reference_upgrade:
                 parent_params = resumed_state.actor_params
                 parent_optimizer_state = resumed_state.actor_opt
@@ -5344,41 +5473,91 @@ def train(
             if isinstance(
                 resumed_state.actor_params, FrozenControllerWrenchParams
             ):
-                raise ValueError(
-                    "resuming an existing learned wrench head is not yet supported"
+                composite_wrench_params = resumed_state.actor_params
+                if not isinstance(
+                    composite_wrench_params.controller,
+                    FrozenPreviewResidualParams,
+                ):
+                    raise ValueError(
+                        "learned wrench continuation has an invalid controller"
+                    )
+                saved_conditioning = bool(
+                    resumed_hparams.get(
+                        "actor_learned_torso_wrench_condition_on_scale", False
+                    )
                 )
-            controller_params = resumed_state.actor_params
-            wrench_params = learned_torso_wrench_actor.init(
-                jax.random.fold_in(k1, 0x5752),
-                jp.zeros(
+                if (
+                    actor_learned_torso_wrench_condition_on_scale
+                    and not saved_conditioning
+                ):
+                    composite_wrench_params = (
+                        migrate_learned_wrench_scale_conditioning(
+                            composite_wrench_params
+                        )
+                    )
+                    resumed_state = resumed_state.replace(
+                        actor_params=composite_wrench_params,
+                        actor_opt=actor_opt.init(composite_wrench_params),
+                    )
+                elif (
+                    saved_conditioning
+                    != actor_learned_torso_wrench_condition_on_scale
+                ):
+                    raise ValueError(
+                        "conditioned learned wrench heads cannot be downgraded"
+                    )
+            else:
+                controller_params = resumed_state.actor_params
+                wrench_init_frame = jp.zeros(
                     (1, env.actor_frame_obs_dim), dtype=jp.float32
-                ),
-            )
-            composite_wrench_params = FrozenControllerWrenchParams(
-                controller=controller_params,
-                wrench=wrench_params,
-            )
-            preview_adapter_mask = build_learned_wrench_mask(
-                composite_wrench_params
+                )
+                wrench_params = learned_torso_wrench_actor.init(
+                    jax.random.fold_in(k1, 0x5752),
+                    wrench_init_frame,
+                    (
+                        jp.ones((1,), dtype=jp.float32)
+                        if actor_learned_torso_wrench_condition_on_scale
+                        else None
+                    ),
+                )
+                composite_wrench_params = FrozenControllerWrenchParams(
+                    controller=controller_params,
+                    wrench=wrench_params,
+                )
+                resumed_state = resumed_state.replace(
+                    actor_params=composite_wrench_params,
+                    actor_opt=actor_opt.init(composite_wrench_params),
+                )
+            preview_adapter_mask = (
+                build_learned_wrench_anneal_mask(composite_wrench_params)
+                if actor_learned_torso_wrench_train_controller
+                else build_learned_wrench_mask(composite_wrench_params)
             )
             preview_trainable_parameter_count = sum(
                 int(np.count_nonzero(np.asarray(leaf)))
                 for leaf in jax.tree_util.tree_leaves(preview_adapter_mask)
             )
             expected_wrench_parameters = (
-                env.actor_frame_obs_dim * actor_learned_torso_wrench_hidden
+                (
+                    env.actor_frame_obs_dim
+                    + int(actor_learned_torso_wrench_condition_on_scale)
+                )
+                * actor_learned_torso_wrench_hidden
                 + actor_learned_torso_wrench_hidden
                 + actor_learned_torso_wrench_hidden * 6
                 + 6
             )
+            if actor_learned_torso_wrench_train_controller:
+                expected_wrench_parameters += (
+                    env.actor_frame_obs_dim * actor_residual_preview_hidden
+                    + actor_residual_preview_hidden
+                    + actor_residual_preview_hidden * env.action_dim
+                    + env.action_dim
+                )
             if preview_trainable_parameter_count != expected_wrench_parameters:
                 raise ValueError(
                     "learned torso wrench trainable parameter count is invalid"
                 )
-            resumed_state = resumed_state.replace(
-                actor_params=composite_wrench_params,
-                actor_opt=actor_opt.init(composite_wrench_params),
-            )
         if adaptive_phase_sampling:
             resumed_state = resumed_state.replace(
                 env_state=migrate_adaptive_phase_env_state(
@@ -5557,11 +5736,29 @@ def train(
         "actor_learned_torso_wrench_scale": (
             actor_learned_torso_wrench_scale
         ),
+        "actor_learned_torso_wrench_scale_end": (
+            actor_learned_torso_wrench_scale_end
+        ),
+        "actor_learned_torso_wrench_scale_start_step": (
+            actor_learned_torso_wrench_scale_start_step
+        ),
+        "actor_learned_torso_wrench_scale_end_step": (
+            actor_learned_torso_wrench_scale_end_step
+        ),
+        "actor_learned_torso_wrench_condition_on_scale": (
+            actor_learned_torso_wrench_condition_on_scale
+        ),
+        "actor_learned_torso_wrench_train_controller": (
+            actor_learned_torso_wrench_train_controller
+        ),
         "actor_learned_torso_wrench_penalty": (
             actor_learned_torso_wrench_penalty
         ),
         "allow_resume_actor_learned_torso_wrench_start": (
             allow_resume_actor_learned_torso_wrench_start
+        ),
+        "allow_resume_actor_learned_torso_wrench_change": (
+            allow_resume_actor_learned_torso_wrench_change
         ),
         "allow_resume_assistance_conditioning_change": (
             allow_resume_assistance_conditioning_change

@@ -118,3 +118,72 @@ def test_wrench_head_has_finite_nonzero_gradient_after_zero_initialization():
     leaves = jax.tree_util.tree_leaves(gradient)
     assert all(bool(jp.all(jp.isfinite(leaf))) for leaf in leaves)
     assert any(bool(jp.any(leaf != 0.0)) for leaf in leaves)
+
+
+def test_continuous_wrench_scale_schedule_has_exact_endpoints():
+    from src.algorithms.shac.learned_torso_wrench import (
+        learned_wrench_scale_at_step,
+    )
+
+    assert float(
+        learned_wrench_scale_at_step(
+            100, start_step=100, end_step=200, start_scale=1.0, end_scale=0.0
+        )
+    ) == 1.0
+    assert float(
+        learned_wrench_scale_at_step(
+            150, start_step=100, end_step=200, start_scale=1.0, end_scale=0.0
+        )
+    ) == 0.5
+    assert float(
+        learned_wrench_scale_at_step(
+            200, start_step=100, end_step=200, start_scale=1.0, end_scale=0.0
+        )
+    ) == 0.0
+
+
+def test_scale_conditioning_migration_preserves_legacy_output_exactly():
+    from src.algorithms.shac.learned_torso_wrench import (
+        FrozenControllerWrenchParams,
+        LearnedTorsoWrenchHead,
+        apply_learned_torso_wrench,
+        migrate_learned_wrench_scale_conditioning,
+    )
+
+    frame = jp.asarray([[0.3, -0.2, 0.7]], dtype=jp.float32)
+    legacy = LearnedTorsoWrenchHead(hidden_dim=8)
+    legacy_params = legacy.init(jax.random.PRNGKey(7), frame)
+    # Make the output nonzero so exact preservation is meaningful.
+    legacy_params = jax.tree_util.tree_map(lambda value: value + 0.01, legacy_params)
+    composite = FrozenControllerWrenchParams(
+        controller={"parent": jp.ones(1)}, wrench=legacy_params
+    )
+
+    migrated = migrate_learned_wrench_scale_conditioning(composite)
+    conditioned = LearnedTorsoWrenchHead(hidden_dim=8, condition_on_scale=True)
+    before = apply_learned_torso_wrench(legacy, composite, frame)
+    after = apply_learned_torso_wrench(
+        conditioned, migrated, frame, assistance_scale=jp.asarray([1.0])
+    )
+    np.testing.assert_array_equal(after, before)
+
+
+def test_anneal_mask_trains_residual_adapter_and_wrench_but_not_parent():
+    from src.algorithms.shac.learned_torso_wrench import (
+        FrozenControllerWrenchParams,
+        build_learned_wrench_anneal_mask,
+    )
+    from src.algorithms.shac.residual_preview_adapter import (
+        FrozenPreviewResidualParams,
+    )
+
+    params = FrozenControllerWrenchParams(
+        controller=FrozenPreviewResidualParams(
+            parent={"p": jp.ones(2)}, adapter={"a": jp.ones(3)}
+        ),
+        wrench={"w": jp.ones(4)},
+    )
+    mask = build_learned_wrench_anneal_mask(params)
+    assert not bool(jp.any(mask.controller.parent["p"]))
+    assert bool(jp.all(mask.controller.adapter["a"]))
+    assert bool(jp.all(mask.wrench["w"]))

@@ -18,6 +18,7 @@ from src.algorithms.shac.learned_torso_wrench import (
     FrozenControllerWrenchParams,
     LearnedTorsoWrenchHead,
     apply_learned_torso_wrench,
+    learned_wrench_scale_at_step,
     normalized_yaw_wrench_to_world,
 )
 from src.algorithms.shac.progressive_recovery_expert import (
@@ -535,7 +536,14 @@ def _load_policy(
             wrench_hidden = int(
                 wrench_modules["Dense_0"]["kernel"].shape[-1]
             )
-            wrench_actor = LearnedTorsoWrenchHead(hidden_dim=wrench_hidden)
+            wrench_conditioned = (
+                int(wrench_modules["Dense_0"]["kernel"].shape[0])
+                == env.actor_frame_obs_dim + 1
+            )
+            wrench_actor = LearnedTorsoWrenchHead(
+                hidden_dim=wrench_hidden,
+                condition_on_scale=wrench_conditioned,
+            )
 
             class LearnedWrenchCheckpointActor:
                 def apply(self, params, observations):
@@ -543,7 +551,9 @@ def _load_policy(
                         params.controller, observations
                     )
 
-                def normalized_wrench(self, params, observations):
+                def normalized_wrench(
+                    self, params, observations, assistance_scale=None
+                ):
                     frames = observations.reshape(
                         observations.shape[:-1]
                         + (env.actor_history_len, env.actor_frame_obs_dim)
@@ -552,6 +562,9 @@ def _load_policy(
                         wrench_actor,
                         params,
                         frames[..., -1, :],
+                        assistance_scale=(
+                            assistance_scale if wrench_conditioned else None
+                        ),
                     )
 
             actor = LearnedWrenchCheckpointActor()
@@ -717,6 +730,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def load_checkpoint_step(path: Path) -> int:
+    """Load and cross-check the optimizer step recorded by a checkpoint."""
+    with path.open("rb") as stream:
+        state = pickle.load(stream)
+    value = np.asarray(getattr(state, "step", None))
+    if value.shape != () or not np.issubdtype(value.dtype, np.integer):
+        raise ValueError("checkpoint step must be a scalar integer")
+    step = int(value)
+    prefix = "checkpoint_step_"
+    if path.stem.startswith(prefix):
+        try:
+            filename_step = int(path.stem[len(prefix) :])
+        except ValueError as error:
+            raise ValueError("checkpoint filename step is invalid") from error
+        if filename_step != step:
+            raise ValueError("checkpoint filename does not match its state step")
+    return step
+
+
 def main() -> None:
     configure_jax()
     parser = build_parser()
@@ -730,7 +762,11 @@ def main() -> None:
     if args.max_steps is not None and args.max_steps < 1:
         parser.error("--max-steps must be positive")
     training_hparams = None
-    checkpoint_step = None
+    checkpoint_step = (
+        load_checkpoint_step(args.checkpoint)
+        if args.checkpoint is not None
+        else None
+    )
     current_training_noise = None
     training_difficulty = None
     if args.training_distribution_rollout:
@@ -744,8 +780,6 @@ def main() -> None:
         if not hparams_path.is_file():
             parser.error("training-distribution rollout requires sibling hparams.json")
         training_hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
-        with args.checkpoint.open("rb") as stream:
-            checkpoint_step = int(pickle.load(stream).step)
         if training_hparams.get("push_velocity_range") != [0.0, 0.0]:
             parser.error(
                 "training-distribution visualization supports only zero-push runs"
@@ -946,17 +980,39 @@ def main() -> None:
         if not hparams_path.is_file():
             parser.error("learned wrench checkpoint requires sibling hparams.json")
         learned_hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
-        learned_wrench_scale = learned_hparams.get(
+        learned_wrench_start_scale = learned_hparams.get(
             "actor_learned_torso_wrench_scale"
         )
         if (
             learned_hparams.get("actor_learned_torso_wrench") is not True
-            or isinstance(learned_wrench_scale, bool)
-            or not isinstance(learned_wrench_scale, (int, float))
-            or not math.isfinite(learned_wrench_scale)
-            or not 0.0 <= learned_wrench_scale <= 1.0
+            or isinstance(learned_wrench_start_scale, bool)
+            or not isinstance(learned_wrench_start_scale, (int, float))
+            or not math.isfinite(learned_wrench_start_scale)
+            or not 0.0 <= learned_wrench_start_scale <= 1.0
         ):
             parser.error("learned wrench checkpoint hparams are invalid")
+        learned_wrench_scale = float(
+            learned_wrench_scale_at_step(
+                checkpoint_step,
+                start_step=int(
+                    learned_hparams.get(
+                        "actor_learned_torso_wrench_scale_start_step", 0
+                    )
+                ),
+                end_step=int(
+                    learned_hparams.get(
+                        "actor_learned_torso_wrench_scale_end_step", 1
+                    )
+                ),
+                start_scale=float(learned_wrench_start_scale),
+                end_scale=float(
+                    learned_hparams.get(
+                        "actor_learned_torso_wrench_scale_end",
+                        learned_wrench_start_scale,
+                    )
+                ),
+            )
+        )
         learned_wrench_body_id, learned_wrench_parameters = (
             torso_wrench_parameters_from_environment(env)
         )
@@ -1134,7 +1190,7 @@ def main() -> None:
                 )
         if isinstance(actor_params, FrozenControllerWrenchParams):
             normalized_wrench = actor.normalized_wrench(
-                actor_params, normalized
+                actor_params, normalized, learned_wrench_scale
             ).astype(state.data.qpos.dtype)
             world_wrench = normalized_yaw_wrench_to_world(
                 normalized_wrench,

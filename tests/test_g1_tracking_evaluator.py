@@ -16,6 +16,7 @@ from tools.evaluate_g1_tracking import (
     build_parser,
     configure_jax,
     extract_joint_action_diagnostics,
+    load_checkpoint_step,
     load_rmr_policy,
     make_evaluation_env,
     remaining_reference_transitions,
@@ -37,6 +38,19 @@ RMR_ACTIONS = Path(
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    def test_checkpoint_step_is_loaded_for_clean_and_training_rollouts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "checkpoint_step_123.pkl"
+            with path.open("wb") as stream:
+                pickle.dump(SimpleNamespace(step=np.asarray(123)), stream)
+            self.assertEqual(load_checkpoint_step(path), 123)
+
+            mismatched = Path(directory) / "checkpoint_step_122.pkl"
+            with mismatched.open("wb") as stream:
+                pickle.dump(SimpleNamespace(step=np.asarray(123)), stream)
+            with self.assertRaisesRegex(ValueError, "filename"):
+                load_checkpoint_step(mismatched)
+
     def test_training_hparams_restore_torso_orientation_weight_strictly(self):
         from tools.evaluate_g1_tracking import (
             resolve_training_torso_orientation_weight,
