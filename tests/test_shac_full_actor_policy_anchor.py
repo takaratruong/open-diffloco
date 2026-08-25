@@ -1,8 +1,13 @@
 import inspect
+import hashlib
+import pickle
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
 import pytest
+
+from src.algorithms.shac.residual_preview_adapter import FrozenPreviewResidualParams
 
 
 def test_policy_anchor_penalty_is_zero_for_identical_actions():
@@ -116,3 +121,130 @@ def test_policy_anchor_checkpoint_telemetry_is_finite_and_explicit():
             {"actor_policy_anchor_squared_error": jnp.asarray(float("nan"))},
             weight=1.0,
         )
+
+
+def test_source_policy_anchor_loads_an_exact_frozen_residual(tmp_path):
+    from src.algorithms.shac.algorithm import load_policy_anchor_source
+
+    source = FrozenPreviewResidualParams(
+        parent={"p": jnp.asarray([1.0])},
+        adapter={"a": jnp.asarray([2.0])},
+    )
+    path = tmp_path / "source.pkl"
+    path.write_bytes(pickle.dumps(SimpleNamespace(actor_params=source)))
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    loaded = load_policy_anchor_source(path, expected_sha256=digest)
+
+    assert isinstance(loaded, FrozenPreviewResidualParams)
+    assert float(loaded.adapter["a"][0]) == 2.0
+    with pytest.raises(ValueError, match="SHA-256"):
+        load_policy_anchor_source(path, expected_sha256="0" * 64)
+
+
+def test_source_policy_anchor_configuration_is_explicit_and_fail_closed():
+    from src.algorithms.shac.algorithm import (
+        validate_policy_anchor_source_configuration,
+    )
+
+    validate_policy_anchor_source_configuration(
+        path="source.pkl",
+        sha256="a" * 64,
+        weight=1.0,
+        actor_residual_preview_adapter=True,
+    )
+    validate_policy_anchor_source_configuration(
+        path=None,
+        sha256=None,
+        weight=1.0,
+        actor_residual_preview_adapter=True,
+    )
+    with pytest.raises(ValueError, match="path and SHA-256"):
+        validate_policy_anchor_source_configuration(
+            path="source.pkl",
+            sha256=None,
+            weight=1.0,
+            actor_residual_preview_adapter=True,
+        )
+    with pytest.raises(ValueError, match="residual preview"):
+        validate_policy_anchor_source_configuration(
+            path="source.pkl",
+            sha256="a" * 64,
+            weight=1.0,
+            actor_residual_preview_adapter=False,
+        )
+    with pytest.raises(ValueError, match="positive anchor weight"):
+        validate_policy_anchor_source_configuration(
+            path="source.pkl",
+            sha256="a" * 64,
+            weight=0.0,
+            actor_residual_preview_adapter=True,
+        )
+
+
+def test_source_policy_anchor_requires_the_same_frozen_parent():
+    from src.algorithms.shac.algorithm import validate_policy_anchor_source_parent
+
+    source = FrozenPreviewResidualParams(
+        parent={"p": jnp.asarray([1.0])}, adapter={"a": jnp.asarray([2.0])}
+    )
+    candidate = FrozenPreviewResidualParams(
+        parent={"p": jnp.asarray([1.0])}, adapter={"a": jnp.asarray([3.0])}
+    )
+    validate_policy_anchor_source_parent(source, candidate)
+
+    changed_parent = FrozenPreviewResidualParams(
+        parent={"p": jnp.asarray([1.01])}, adapter=candidate.adapter
+    )
+    with pytest.raises(ValueError, match="frozen parent"):
+        validate_policy_anchor_source_parent(source, changed_parent)
+
+
+def test_train_wires_hash_bound_source_policy_as_optional_anchor_target():
+    from src.algorithms.shac.algorithm import train
+
+    signature = inspect.signature(train).parameters
+    assert signature["actor_policy_anchor_source_path"].default is None
+    assert signature["actor_policy_anchor_source_sha256"].default is None
+    source = inspect.getsource(train)
+    assert "load_policy_anchor_source(" in source
+    assert "policy_anchor_source_params" in source
+    assert '"actor_policy_anchor_source_sha256"' in source
+    assert "actor_policy_anchor_source_sha256" in source
+
+
+def test_source_policy_anchor_resume_change_requires_explicit_authority():
+    from src.algorithms.shac.algorithm import (
+        resolve_policy_anchor_source_resume_setting,
+    )
+
+    saved = {
+        "actor_policy_anchor_source_path": None,
+        "actor_policy_anchor_source_sha256": None,
+    }
+    with pytest.raises(ValueError, match="explicit authority"):
+        resolve_policy_anchor_source_resume_setting(
+            saved,
+            requested_path="source.pkl",
+            requested_sha256="a" * 64,
+            allow_change=False,
+        )
+    assert resolve_policy_anchor_source_resume_setting(
+        saved,
+        requested_path="source.pkl",
+        requested_sha256="a" * 64,
+        allow_change=True,
+    ) == ("source.pkl", "a" * 64)
+    with pytest.raises(ValueError, match="metadata"):
+        resolve_policy_anchor_source_resume_setting(
+            {},
+            requested_path=None,
+            requested_sha256=None,
+            allow_change=False,
+        )
+    assert resolve_policy_anchor_source_resume_setting(
+        {},
+        requested_path="source.pkl",
+        requested_sha256="a" * 64,
+        allow_change=True,
+    ) == ("source.pkl", "a" * 64)

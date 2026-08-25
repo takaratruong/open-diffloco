@@ -1733,6 +1733,101 @@ def policy_anchor_penalty(
     )
 
 
+def validate_policy_anchor_source_configuration(
+    *,
+    path: str | os.PathLike[str] | None,
+    sha256: str | None,
+    weight: float,
+    actor_residual_preview_adapter: bool,
+) -> None:
+    """Validate an optional immutable residual-policy anchor source."""
+    if (path is None) != (sha256 is None):
+        raise ValueError(
+            "policy anchor source path and SHA-256 must be provided together"
+        )
+    if path is None:
+        return
+    if not actor_residual_preview_adapter:
+        raise ValueError(
+            "policy anchor source requires the residual preview adapter"
+        )
+    if weight <= 0.0:
+        raise ValueError("policy anchor source requires a positive anchor weight")
+    if (
+        not isinstance(sha256, str)
+        or len(sha256) != 64
+        or any(character not in "0123456789abcdef" for character in sha256)
+    ):
+        raise ValueError("policy anchor source SHA-256 is invalid")
+
+
+def resolve_policy_anchor_source_resume_setting(
+    resumed_hparams: dict,
+    *,
+    requested_path: str | None,
+    requested_sha256: str | None,
+    allow_change: bool,
+) -> tuple[str | None, str | None]:
+    """Preserve or explicitly authorize a hash-bound source-anchor change."""
+    keys = (
+        "actor_policy_anchor_source_path",
+        "actor_policy_anchor_source_sha256",
+    )
+    if not isinstance(resumed_hparams, dict) or not all(
+        key in resumed_hparams for key in keys
+    ):
+        if allow_change:
+            return requested_path, requested_sha256
+        raise ValueError("policy anchor source resume metadata is incomplete")
+    saved = tuple(resumed_hparams[key] for key in keys)
+    requested = (requested_path, requested_sha256)
+    if saved != requested and not allow_change:
+        raise ValueError(
+            "policy anchor source change requires explicit authority"
+        )
+    return requested if saved != requested else saved
+
+
+def load_policy_anchor_source(
+    path: str | os.PathLike[str], *, expected_sha256: str
+) -> FrozenPreviewResidualParams:
+    """Load one hash-bound frozen residual policy used as a proximal target."""
+    source_path = Path(path).resolve()
+    if not source_path.is_file():
+        raise ValueError("policy anchor source checkpoint does not exist")
+    actual_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise ValueError("policy anchor source checkpoint SHA-256 mismatch")
+    with source_path.open("rb") as stream:
+        checkpoint = pickle.load(stream)
+    actor_params = getattr(checkpoint, "actor_params", None)
+    if not isinstance(actor_params, FrozenPreviewResidualParams):
+        raise ValueError(
+            "policy anchor source is not a frozen residual preview checkpoint"
+        )
+    return jax.tree_util.tree_map(jax.lax.stop_gradient, actor_params)
+
+
+def validate_policy_anchor_source_parent(
+    source: FrozenPreviewResidualParams,
+    candidate: FrozenPreviewResidualParams,
+) -> None:
+    """Require source and candidate residuals to share one frozen parent."""
+    source_leaves, source_tree = jax.tree_util.tree_flatten(source.parent)
+    candidate_leaves, candidate_tree = jax.tree_util.tree_flatten(
+        candidate.parent
+    )
+    if source_tree != candidate_tree or len(source_leaves) != len(
+        candidate_leaves
+    ):
+        raise ValueError("policy anchor source frozen parent does not match")
+    if any(
+        not np.array_equal(np.asarray(left), np.asarray(right))
+        for left, right in zip(source_leaves, candidate_leaves)
+    ):
+        raise ValueError("policy anchor source frozen parent does not match")
+
+
 def validate_actor_policy_anchor_configuration(
     *,
     weight: float,
@@ -1876,6 +1971,9 @@ def train(
     source_actor_policy=None,
     initial_full_actor_policy=None,
     actor_policy_anchor_weight: float = 0.0,
+    actor_policy_anchor_source_path: str | None = None,
+    actor_policy_anchor_source_sha256: str | None = None,
+    allow_resume_actor_policy_anchor_source_change: bool = False,
     residual_action_scale: float = 0.0,
     differentiate_source_feedback: bool = True,
     effort_limit_scale: float = 1.0,
@@ -2048,6 +2146,18 @@ def train(
             allow_resume_actor_residual_preview_adapter_start
         ),
     )
+    validate_policy_anchor_source_configuration(
+        path=actor_policy_anchor_source_path,
+        sha256=actor_policy_anchor_source_sha256,
+        weight=actor_policy_anchor_weight,
+        actor_residual_preview_adapter=actor_residual_preview_adapter,
+    )
+    if not isinstance(
+        allow_resume_actor_policy_anchor_source_change, bool
+    ):
+        raise ValueError(
+            "allow_resume_actor_policy_anchor_source_change must be boolean"
+        )
     if initial_full_actor_policy is not None and residual_action_scale != 0.0:
         raise ValueError(
             "initial_full_actor_policy is standalone and cannot use "
@@ -2425,6 +2535,15 @@ def train(
             allow_start=(
                 allow_resume_actor_residual_preview_adapter_start
             ),
+        )
+        (
+            actor_policy_anchor_source_path,
+            actor_policy_anchor_source_sha256,
+        ) = resolve_policy_anchor_source_resume_setting(
+            resumed_hparams,
+            requested_path=actor_policy_anchor_source_path,
+            requested_sha256=actor_policy_anchor_source_sha256,
+            allow_change=allow_resume_actor_policy_anchor_source_change,
         )
         residual_adapter_upgrade = bool(
             actor_residual_preview_adapter
@@ -3131,6 +3250,14 @@ def train(
     _foot_body_ids = env._foot_body_ids
     _nominal_weight = env.nominal_total_mass * env.base_gravity_mag
     _terrain_bump_std = terrain_bump_std if terrain else 0.0
+    policy_anchor_source_params = (
+        load_policy_anchor_source(
+            actor_policy_anchor_source_path,
+            expected_sha256=actor_policy_anchor_source_sha256,
+        )
+        if actor_policy_anchor_source_path is not None
+        else None
+    )
 
     def actor_loss(
         actor_params,
@@ -3292,7 +3419,24 @@ def train(
 
             if actor_policy_anchor_weight > 0.0:
                 anchor_obs = jax.lax.stop_gradient(actor_obs)
-                if actor_residual_preview_adapter or actor_preview_adapter:
+                if policy_anchor_source_params is not None:
+                    anchor_parent_action, _, _ = apply_frozen_preview_residual(
+                        actor,
+                        residual_preview_actor,
+                        policy_anchor_source_params,
+                        obs_norm,
+                        history_len=actor_history_len,
+                        treatment_frame_dim=env.actor_frame_obs_dim,
+                        assistance_scale=(
+                            assistance_scale
+                            if actor_observe_torso_wrench_assistance
+                            else jp.zeros_like(assistance_scale)
+                        )
+                        if actor_torso_wrench_assistance_conditioning
+                        else None,
+                    )
+                    anchor_candidate_action = action
+                elif actor_residual_preview_adapter or actor_preview_adapter:
                     (
                         anchor_candidate_action,
                         anchor_parent_action,
@@ -5008,6 +5152,11 @@ def train(
                 raise ValueError(
                     "residual preview trainable parameter count is invalid"
                 )
+            if policy_anchor_source_params is not None:
+                validate_policy_anchor_source_parent(
+                    policy_anchor_source_params,
+                    resumed_state.actor_params,
+                )
         if adaptive_phase_sampling:
             resumed_state = resumed_state.replace(
                 env_state=migrate_adaptive_phase_env_state(
@@ -5358,6 +5507,17 @@ def train(
         "actor_zero_output": actor_zero_output,
         "source_actor_policy": source_actor_policy is not None,
         "actor_policy_anchor_weight": actor_policy_anchor_weight,
+        "actor_policy_anchor_source_path": (
+            str(Path(actor_policy_anchor_source_path).resolve())
+            if actor_policy_anchor_source_path is not None
+            else None
+        ),
+        "actor_policy_anchor_source_sha256": (
+            actor_policy_anchor_source_sha256
+        ),
+        "allow_resume_actor_policy_anchor_source_change": (
+            allow_resume_actor_policy_anchor_source_change
+        ),
         "actor_kind": (
             "flax_residual_preview"
             if actor_residual_preview_adapter
