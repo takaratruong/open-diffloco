@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from src.algorithms.shac.algorithm import train
+from src.envs.g1_tracking.environment import DEFAULT_CONTROLLER_PATH
 from src.envs.g1_tracking.solver_profiles import get_solver_profile, solver_context
 from tools.prepare_g1_rmr_reference import sha256_file
 from tools.run_g1_e023_anchored_carried_recovery import (
@@ -18,9 +19,6 @@ from tools.run_g1_e023_anchored_carried_recovery import (
 )
 from tools.run_g1_fresh_ppo_action_contract_walk import (
     validate_training_artifacts as validate_base_training_artifacts,
-)
-from tools.run_g1_root_recovery_continuation import (
-    validate_consumed_resume_assets,
 )
 from tools.run_g1_tracking_shac import configure_jax
 from tools.run_g1_zero_assistance_consolidation import (
@@ -49,6 +47,15 @@ EXPECTED_CARRIED_BANK_SHA256 = (
 )
 EXPECTED_CARRIED_SUMMARY_SHA256 = (
     "cf5546c3c166df52a9a6c90e651a51003c66a61419b458fdc523c13801f6ba7e"
+)
+EXPECTED_REFERENCE_SHA256 = (
+    "b1197c389887055244f05000a2ebb9cb2748dea26de05bdc6850ed4089dcfdca"
+)
+EXPECTED_MODEL_SHA256 = (
+    "5d76cf92f00dd49d6eb9fae38d7d38e46886848b602ac691051e886c3bcccfb1"
+)
+EXPECTED_CONTROLLER_SHA256 = (
+    "f832285356d8fc10b226b6bbf557520d5323c7c9022ae6dbd00c683b06e5b7ee"
 )
 
 
@@ -188,7 +195,27 @@ def validate_preflight(
     ):
         if not path.is_file() or sha256_file(path) != expected:
             raise ValueError(f"{label} SHA-256 does not match")
-    assets = validate_consumed_resume_assets(hparams, reference_path)
+    resume_hparams = json.loads(hparams.read_text(encoding="utf-8"))
+    consumed_reference = Path(str(resume_hparams.get("reference_path", ""))).resolve()
+    model = Path(str(resume_hparams.get("xml_path", ""))).resolve()
+    controller = Path(DEFAULT_CONTROLLER_PATH).resolve()
+    if consumed_reference != reference_path.resolve():
+        raise ValueError("resume-consumed reference path does not match registration")
+    for path, expected, label in (
+        (consumed_reference, EXPECTED_REFERENCE_SHA256, "reference"),
+        (model, EXPECTED_MODEL_SHA256, "model"),
+        (controller, EXPECTED_CONTROLLER_SHA256, "controller"),
+    ):
+        if not path.is_file() or sha256_file(path) != expected:
+            raise ValueError(f"runtime {label} SHA-256 does not match")
+    assets = {
+        "reference_path": str(consumed_reference),
+        "reference_sha256": EXPECTED_REFERENCE_SHA256,
+        "model_path": str(model),
+        "model_sha256": EXPECTED_MODEL_SHA256,
+        "controller_path": str(controller),
+        "controller_sha256": EXPECTED_CONTROLLER_SHA256,
+    }
     return {
         "valid": True,
         "protocol": "g1-e026-torso-orientation-preflight-v1",
