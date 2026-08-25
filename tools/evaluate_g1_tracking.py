@@ -40,7 +40,13 @@ from src.envs.g1_tracking.solver_profiles import (
     solver_context,
 )
 from src.envs.go2.environment import get_go2_env_class
+from src.evaluation.g1_foot_propulsion import (
+    constraint_propulsion_sample,
+    reference_required_force,
+    summarize_propulsion,
+)
 from src.evaluation.g1_torso_wrench_oracle import (
+    resolve_torso_body_id,
     torso_wrench_parameters_from_environment,
     write_torso_wrench,
 )
@@ -353,6 +359,83 @@ def summarize_action_diagnostics(
             np.mean(np.abs(sampled - effective) > 1e-12)
         ),
     }
+
+
+_PROPULSION_EVIDENCE_SHAPES = {
+    "constraint_force_world": (3,),
+    "constraint_force_yaw": (3,),
+    "foot_support": (2,),
+    "reference_required_force_yaw": (3,),
+    "torso_pitch": (),
+    "applied_torso_force": (3,),
+}
+
+
+def validate_propulsion_evidence(
+    evidence: dict[str, np.ndarray], *, expected_rows: int
+) -> dict[str, np.ndarray]:
+    """Require complete, finite, row-aligned propulsion evidence."""
+    if expected_rows < 1 or set(evidence) != set(_PROPULSION_EVIDENCE_SHAPES):
+        raise ValueError("propulsion evidence must be complete and row-aligned")
+    validated = {}
+    for key, trailing_shape in _PROPULSION_EVIDENCE_SHAPES.items():
+        values = np.asarray(evidence[key])
+        if values.shape != (expected_rows, *trailing_shape):
+            raise ValueError("propulsion evidence must be row-aligned")
+        if not np.isfinite(values).all():
+            raise ValueError("propulsion evidence must be finite")
+        validated[key] = values
+    return validated
+
+
+def write_propulsion_diagnostics(
+    output_path: Path,
+    evidence: dict[str, np.ndarray],
+    *,
+    dt: float,
+) -> None:
+    """Write one shared-time propulsion, support, attitude, and assist plot."""
+    if not math.isfinite(dt) or dt <= 0.0:
+        raise ValueError("propulsion plot dt must be finite and positive")
+    rows = np.asarray(evidence.get("torso_pitch", [])).shape[0]
+    values = validate_propulsion_evidence(evidence, expected_rows=rows)
+    import matplotlib.pyplot as plt
+
+    time = np.arange(rows, dtype=np.float64) * dt
+    figure, axes = plt.subplots(4, 1, figsize=(11, 9), sharex=True)
+    axes[0].plot(
+        time,
+        values["constraint_force_yaw"][:, 0],
+        label="actual net contact force",
+    )
+    axes[0].plot(
+        time,
+        values["reference_required_force_yaw"][:, 0],
+        label="reference required force",
+    )
+    axes[0].set_ylabel("forward force [N]")
+    axes[0].legend(loc="upper right")
+    axes[0].grid(alpha=0.25)
+    axes[1].step(time, values["foot_support"][:, 0], where="post", label="left")
+    axes[1].step(time, values["foot_support"][:, 1], where="post", label="right")
+    axes[1].set_ylabel("foot support")
+    axes[1].set_ylim(-0.05, 1.05)
+    axes[1].legend(loc="upper right")
+    axes[1].grid(alpha=0.25)
+    axes[2].plot(time, np.rad2deg(values["torso_pitch"]))
+    axes[2].set_ylabel("torso pitch [deg]")
+    axes[2].grid(alpha=0.25)
+    axes[3].plot(
+        time,
+        np.linalg.norm(values["applied_torso_force"], axis=1),
+    )
+    axes[3].set_ylabel("assist force [N]")
+    axes[3].set_xlabel("time [s]")
+    axes[3].grid(alpha=0.25)
+    figure.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output_path, dpi=160)
+    plt.close(figure)
 
 
 def extract_joint_action_diagnostics(
@@ -1070,6 +1153,7 @@ def main() -> None:
     )
     start_phase = int(state.info["phase"])
     compiled_step = build_compiled_step(env)
+    diagnostic_torso_body_id = resolve_torso_body_id(env.mj_model)
 
     actual_renderer = mujoco.Renderer(env.mj_model, height=480, width=640)
     reference_renderer = mujoco.Renderer(env.mj_model, height=480, width=640)
@@ -1092,6 +1176,12 @@ def main() -> None:
     gated_residual_actions = []
     learned_wrenches = []
     learned_normalized_wrenches = []
+    constraint_forces_world = []
+    constraint_forces_yaw = []
+    foot_supports = []
+    reference_required_forces_yaw = []
+    torso_pitches = []
+    applied_torso_forces = []
 
     try:
         remaining = remaining_reference_transitions(
@@ -1245,6 +1335,51 @@ def main() -> None:
         )
         with step_scope:
             state = compiled_step(state, action)
+        constraint_force_yaw, _constraint_force_times_dt = (
+            constraint_propulsion_sample(
+                qfrc_constraint=state.data.qfrc_constraint,
+                root_quaternion=state.data.qpos[3:7],
+                dt=env.dt,
+            )
+        )
+        constraint_forces_world.append(
+            np.asarray(state.data.qfrc_constraint[:3])
+        )
+        constraint_forces_yaw.append(np.asarray(constraint_force_yaw))
+        foot_supports.append(np.asarray(env.foot_support_signature(state.data)))
+        reference_required_forces_yaw.append(
+            np.asarray(
+                reference_required_force(
+                    reference_root_velocity=env.body_lin_vel_reference[:, 0],
+                    phase=phase,
+                    stride=env.reference_stride,
+                    dt=env.dt,
+                    total_mass=env.nominal_total_mass,
+                    root_quaternion=state.data.qpos[3:7],
+                )
+            )
+        )
+        torso_quaternion = state.data.xquat[diagnostic_torso_body_id]
+        torso_pitches.append(
+            np.asarray(
+                jnp.arcsin(
+                    jnp.clip(
+                        2.0
+                        * (
+                            torso_quaternion[0] * torso_quaternion[2]
+                            - torso_quaternion[3] * torso_quaternion[1]
+                        ),
+                        -1.0,
+                        1.0,
+                    )
+                )
+            )
+        )
+        applied_torso_forces.append(
+            np.asarray(
+                state.data.xfrc_applied[diagnostic_torso_body_id, :3]
+            )
+        )
         next_phase = min(
             phase + env.reference_stride,
             env.reference_length - 1,
@@ -1294,6 +1429,23 @@ def main() -> None:
         "termination_distal_z_error",
     )
     values = np.asarray(records, dtype=np.float64)
+    propulsion_evidence = validate_propulsion_evidence(
+        {
+            "constraint_force_world": np.asarray(constraint_forces_world),
+            "constraint_force_yaw": np.asarray(constraint_forces_yaw),
+            "foot_support": np.asarray(foot_supports),
+            "reference_required_force_yaw": np.asarray(
+                reference_required_forces_yaw
+            ),
+            "torso_pitch": np.asarray(torso_pitches),
+            "applied_torso_force": np.asarray(applied_torso_forces),
+        },
+        expected_rows=len(records),
+    )
+    propulsion_summary = summarize_propulsion(
+        propulsion_evidence["constraint_force_yaw"][:, 0],
+        propulsion_evidence["reference_required_force_yaw"][:, 0],
+    )
     if args.training_distribution_rollout and getattr(
         env,
         "squash_actor_mean",
@@ -1320,6 +1472,12 @@ def main() -> None:
         learned_torso_wrench_normalized=np.asarray(
             learned_normalized_wrenches
         ),
+        constraint_force_world=propulsion_evidence['constraint_force_world'],
+        constraint_force_yaw=propulsion_evidence['constraint_force_yaw'],
+        foot_support=propulsion_evidence['foot_support'],
+        reference_required_force_yaw=propulsion_evidence['reference_required_force_yaw'],
+        torso_pitch=propulsion_evidence['torso_pitch'],
+        applied_torso_force=propulsion_evidence['applied_torso_force'],
     )
     rollout_name = (
         "training_rollout.mp4"
@@ -1350,6 +1508,11 @@ def main() -> None:
     from tools.evaluate_g1_phase_grid import make_contact_sheet
 
     make_contact_sheet(frames, args.output_dir / "contact_sheet.png")
+    write_propulsion_diagnostics(
+        args.output_dir / "foot_propulsion_diagnostics.png",
+        propulsion_evidence,
+        dt=env.dt,
+    )
     stability_summary = summarize_stability_errors(
         {
             "anchor_z_error": values[:, 12],
@@ -1530,6 +1693,7 @@ def main() -> None:
         ),
         **action_summary,
         **stability_summary,
+        **propulsion_summary,
     }
     (args.output_dir / "summary.json").write_text(
         __import__("json").dumps(summary, indent=2, sort_keys=True) + "\n"

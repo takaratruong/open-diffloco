@@ -25,7 +25,9 @@ from tools.evaluate_g1_tracking import (
     select_full_rmr_actor_observation,
     summarize_action_diagnostics,
     summarize_stability_errors,
+    validate_propulsion_evidence,
     validate_training_action_mean,
+    write_propulsion_diagnostics,
 )
 
 RMR_CHECKPOINT = Path(
@@ -38,6 +40,54 @@ RMR_ACTIONS = Path(
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    @staticmethod
+    def _propulsion_evidence(rows=4):
+        return {
+            "constraint_force_world": np.ones((rows, 3)),
+            "constraint_force_yaw": np.ones((rows, 3)),
+            "foot_support": np.ones((rows, 2), dtype=bool),
+            "reference_required_force_yaw": np.zeros((rows, 3)),
+            "torso_pitch": np.linspace(0.0, 0.1, rows),
+            "applied_torso_force": np.zeros((rows, 3)),
+        }
+
+    def test_propulsion_evidence_requires_finite_row_aligned_arrays(self):
+        evidence = self._propulsion_evidence()
+        validated = validate_propulsion_evidence(evidence, expected_rows=4)
+
+        self.assertEqual(set(validated), set(evidence))
+        for values in validated.values():
+            self.assertEqual(values.shape[0], 4)
+
+        evidence["foot_support"] = np.ones((3, 2), dtype=bool)
+        with self.assertRaisesRegex(ValueError, "row-aligned"):
+            validate_propulsion_evidence(evidence, expected_rows=4)
+
+        evidence = self._propulsion_evidence()
+        evidence["torso_pitch"][1] = np.nan
+        with self.assertRaisesRegex(ValueError, "finite"):
+            validate_propulsion_evidence(evidence, expected_rows=4)
+
+    def test_propulsion_diagnostic_plot_is_nonempty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "foot_propulsion_diagnostics.png"
+            write_propulsion_diagnostics(
+                output,
+                self._propulsion_evidence(),
+                dt=0.04,
+            )
+
+            self.assertTrue(output.is_file())
+            self.assertGreater(output.stat().st_size, 1000)
+
+    def test_evaluator_publishes_propulsion_arrays_plot_and_summary(self):
+        source = Path("tools/evaluate_g1_tracking.py").read_text()
+
+        for key in self._propulsion_evidence():
+            self.assertIn(f"{key}=propulsion_evidence[{key!r}]", source)
+        self.assertIn('"foot_propulsion_diagnostics.png"', source)
+        self.assertIn("**propulsion_summary", source)
+
     def test_checkpoint_step_is_loaded_for_clean_and_training_rollouts(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "checkpoint_step_123.pkl"

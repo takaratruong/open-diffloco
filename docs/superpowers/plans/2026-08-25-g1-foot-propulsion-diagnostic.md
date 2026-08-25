@@ -96,7 +96,7 @@ git commit -m "feat: compute G1 foot propulsion diagnostics"
 
 **Interfaces:**
 - Consumes: all Task 1 functions.
-- Produces: aligned `constraint_force_world`, `constraint_force_yaw`, `constraint_impulse_yaw`, `foot_support`, `reference_required_force_yaw`, `torso_pitch`, and `applied_torso_force` arrays in `evaluation.npz`.
+- Produces: aligned `constraint_force_world`, `constraint_force_yaw`, `foot_support`, `reference_required_force_yaw`, `torso_pitch`, and `applied_torso_force` arrays in `evaluation.npz`.
 - Produces: `foot_propulsion_diagnostics.png` and JSON scalar keys `propulsion_forward_error_rms` and `propulsion_forward_force_peak_abs`.
 
 - [ ] **Step 1: Write failing evaluator artifact tests**

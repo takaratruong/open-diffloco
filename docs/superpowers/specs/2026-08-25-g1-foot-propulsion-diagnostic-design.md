@@ -21,7 +21,6 @@ For every completed control interval, record:
   `data.qfrc_constraint[:3]`;
 - that force rotated into the current pelvis-yaw frame, where component zero
   is forward;
-- the corresponding horizontal constraint impulse (`force * env.dt`);
 - the left/right foot support bits from the existing grouped contact topology;
 - the reference-required forward force, defined as total model mass times the
   finite-difference acceleration of the reference pelvis velocity over the
@@ -36,8 +35,8 @@ support still establishes which stance generated the measured net propulsion.
 ## Outputs
 
 `evaluation.npz` gains finite, row-aligned arrays for net constraint force,
-yaw-frame constraint force, constraint impulse, support bits, required
-reference force, torso pitch, and applied torso force. The evaluator also
+yaw-frame constraint force, support bits, required reference force, torso
+pitch, and applied torso force. The evaluator also
 writes `foot_propulsion_diagnostics.png`, containing shared-time plots for
 forward actual versus required force, left/right support, torso pitch, and
 assistance force.
@@ -54,7 +53,7 @@ force. Publication is descriptive: it does not make a learning claim.
   finite values.
 - The reference endpoint uses a one-sided finite difference rather than
   indexing past the final frame.
-- A zero constraint force must produce exactly zero impulse and propulsion.
+- A zero constraint force must produce exactly zero propulsion.
 
 ## Validation
 
