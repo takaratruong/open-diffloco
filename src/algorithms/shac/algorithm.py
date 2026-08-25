@@ -77,6 +77,13 @@ from src.algorithms.shac.torso_wrench_curriculum import (
     validate_assistance_conditioning_configuration,
     validate_torso_wrench_assistance_configuration,
 )
+from src.algorithms.shac.learned_torso_wrench import (
+    FrozenControllerWrenchParams,
+    LearnedTorsoWrenchHead,
+    apply_learned_torso_wrench,
+    build_learned_wrench_mask,
+    normalized_yaw_wrench_to_world,
+)
 from src.algorithms.shac.initialization import (
     canonicalize_normalizer_dtype,
     canonicalize_step_dtype,
@@ -2004,6 +2011,11 @@ def train(
     actor_torso_wrench_assistance_conditioning: bool = False,
     actor_observe_torso_wrench_assistance: bool = False,
     allow_resume_assistance_conditioning_change: bool = False,
+    actor_learned_torso_wrench: bool = False,
+    actor_learned_torso_wrench_hidden: int = 256,
+    actor_learned_torso_wrench_scale: float = 1.0,
+    actor_learned_torso_wrench_penalty: float = 0.0,
+    allow_resume_actor_learned_torso_wrench_start: bool = False,
     reference_path: str | None = None,
     allow_resume_reference_path_change: bool = False,
     reference_stride: int | None = None,
@@ -2987,7 +2999,50 @@ def train(
     torso_body_id = -1
     torso_slot = -1
     torso_wrench_parameters = None
-    if torso_wrench_assistance:
+    if torso_wrench_assistance and actor_learned_torso_wrench:
+        raise ValueError(
+            "analytic and learned torso wrench treatments are mutually exclusive"
+        )
+    if not isinstance(actor_learned_torso_wrench, bool):
+        raise ValueError("actor_learned_torso_wrench must be boolean")
+    if (
+        isinstance(actor_learned_torso_wrench_hidden, bool)
+        or not isinstance(actor_learned_torso_wrench_hidden, int)
+        or actor_learned_torso_wrench_hidden < 1
+    ):
+        raise ValueError("actor_learned_torso_wrench_hidden must be positive")
+    if (
+        not math.isfinite(actor_learned_torso_wrench_scale)
+        or not 0.0 <= actor_learned_torso_wrench_scale <= 1.0
+    ):
+        raise ValueError("actor_learned_torso_wrench_scale must be in [0, 1]")
+    if (
+        not math.isfinite(actor_learned_torso_wrench_penalty)
+        or actor_learned_torso_wrench_penalty < 0.0
+    ):
+        raise ValueError("actor_learned_torso_wrench_penalty must be non-negative")
+    if not isinstance(allow_resume_actor_learned_torso_wrench_start, bool):
+        raise ValueError(
+            "allow_resume_actor_learned_torso_wrench_start must be boolean"
+        )
+    resumed_learned_wrench = bool(
+        (resumed_hparams or {}).get("actor_learned_torso_wrench", False)
+    )
+    if actor_learned_torso_wrench and not actor_residual_preview_adapter:
+        raise ValueError(
+            "learned torso wrench requires the frozen residual preview controller"
+        )
+    if actor_learned_torso_wrench and resume_from is None:
+        raise ValueError("learned torso wrench currently requires a resumed controller")
+    if (
+        actor_learned_torso_wrench != resumed_learned_wrench
+        and not allow_resume_actor_learned_torso_wrench_start
+    ):
+        raise ValueError(
+            "learned torso wrench setting differs from the checkpoint without "
+            "explicit resume authority"
+        )
+    if torso_wrench_assistance or actor_learned_torso_wrench:
         torso_body_id, torso_wrench_parameters = (
             torso_wrench_parameters_from_environment(env)
         )
@@ -3045,6 +3100,9 @@ def train(
     residual_preview_actor = PreviewResidualAdapter(
         action_dim=env.action_dim,
         hidden_dim=actor_residual_preview_hidden,
+    )
+    learned_torso_wrench_actor = LearnedTorsoWrenchHead(
+        hidden_dim=actor_learned_torso_wrench_hidden,
     )
     critic = DoubleCritic() if ahac else Critic()
 
@@ -3338,6 +3396,11 @@ def train(
             obs_norm = env.normalize_actor_obs(
                 actor_norm, actor_norm_state, actor_obs
             ).astype(jp.float32)
+            controller_actor_params = (
+                actor_params.controller
+                if actor_learned_torso_wrench
+                else actor_params
+            )
             residual_logits = None
             if actor_residual_preview_adapter:
                 if recovery_support is not None:
@@ -3349,7 +3412,7 @@ def train(
                     ) = apply_state_gated_recovery(
                         actor,
                         residual_preview_actor,
-                        actor_params,
+                        controller_actor_params,
                         obs_norm,
                         state.info["phase"],
                         recovery_support,
@@ -3361,7 +3424,7 @@ def train(
                         apply_frozen_preview_residual(
                             actor,
                             residual_preview_actor,
-                            actor_params,
+                            controller_actor_params,
                             obs_norm,
                             history_len=actor_history_len,
                             treatment_frame_dim=env.actor_frame_obs_dim,
@@ -3472,6 +3535,44 @@ def train(
             if clip_sampled_actor_actions:
                 noisy_action = jp.clip(noisy_action, -1.0, 1.0)
 
+            learned_torso_wrench = jp.zeros((6,), dtype=state.data.qpos.dtype)
+            learned_torso_wrench_normalized = jp.zeros(
+                (6,), dtype=jp.float32
+            )
+            learned_torso_wrench_step_penalty = jp.asarray(
+                0.0, dtype=state.reward.dtype
+            )
+            if actor_learned_torso_wrench:
+                wrench_frame = current_treatment_frame(
+                    obs_norm,
+                    history_len=actor_history_len,
+                    treatment_frame_dim=env.actor_frame_obs_dim,
+                )
+                learned_torso_wrench_normalized = apply_learned_torso_wrench(
+                    learned_torso_wrench_actor,
+                    actor_params,
+                    wrench_frame,
+                )
+                learned_torso_wrench = normalized_yaw_wrench_to_world(
+                    learned_torso_wrench_normalized.astype(state.data.qpos.dtype),
+                    root_quaternion=state.data.qpos[3:7],
+                    force_cap=torso_wrench_parameters.force_cap,
+                    torque_cap=torso_wrench_parameters.torque_cap,
+                    scale=actor_learned_torso_wrench_scale,
+                )
+                xfrc = write_torso_wrench(
+                    state.data.xfrc_applied,
+                    torso_body_id=torso_body_id,
+                    world_wrench=learned_torso_wrench,
+                )
+                state = state.replace(
+                    data=state.data.replace(xfrc_applied=xfrc)
+                )
+                learned_torso_wrench_step_penalty = (
+                    actor_learned_torso_wrench_penalty
+                    * jp.mean(jp.square(learned_torso_wrench_normalized))
+                ).astype(state.reward.dtype)
+
             if adaptive_phase_sampling or frozen_preview_treatment:
                 transition_phase = transition_phase_before_reset(
                     state.info["phase"],
@@ -3514,7 +3615,12 @@ def train(
             )
 
             transition = {
-                "reward": jp.where(active, gradient_next_state.reward, 0.0),
+                "reward": jp.where(
+                    active,
+                    gradient_next_state.reward
+                    - learned_torso_wrench_step_penalty,
+                    0.0,
+                ),
                 "done": jp.where(
                     active, candidate_unreplayed_state.done, False
                 ),
@@ -3587,6 +3693,14 @@ def train(
                 ]
             if torso_wrench_assistance:
                 transition["torso_wrench"] = torso_wrench
+            if actor_learned_torso_wrench:
+                transition["learned_torso_wrench"] = learned_torso_wrench
+                transition["learned_torso_wrench_normalized"] = (
+                    learned_torso_wrench_normalized
+                )
+                transition["learned_torso_wrench_penalty"] = (
+                    learned_torso_wrench_step_penalty
+                )
             return (next_state, foot_bump_ou), transition
 
         env_state = jax.lax.stop_gradient(env_state)
@@ -3880,6 +3994,14 @@ def train(
                 current_actor_bootstrap_scale,
                 current_ahac_horizon,
             )
+            if actor_learned_torso_wrench:
+                per_env_grads = jax.tree_util.tree_map(
+                    lambda gradient, selected: jp.where(
+                        selected, gradient, 0.0
+                    ),
+                    per_env_grads,
+                    preview_adapter_mask,
+                )
             if actor_phase_robust_weighting:
                 phase_weighting = phase_robust_weights(
                     losses,
@@ -3945,6 +4067,14 @@ def train(
                     current_actor_bootstrap_scale,
                     current_ahac_horizon,
                 )
+                if actor_learned_torso_wrench:
+                    shard_per_env_grads = jax.tree_util.tree_map(
+                        lambda gradient, selected: jp.where(
+                            selected, gradient, 0.0
+                        ),
+                        shard_per_env_grads,
+                        preview_adapter_mask,
+                    )
                 if actor_cagrad:
                     shard_grad_stats = per_env_gradient_statistics(
                         shard_per_env_grads
@@ -4628,6 +4758,59 @@ def train(
                     ),
                 }
             )
+        if actor_learned_torso_wrench:
+            learned_force_norm = jp.linalg.norm(
+                trajs["learned_torso_wrench"][..., :3], axis=-1
+            )
+            learned_torque_norm = jp.linalg.norm(
+                trajs["learned_torso_wrench"][..., 3:], axis=-1
+            )
+            learned_normalized = trajs[
+                "learned_torso_wrench_normalized"
+            ]
+            metrics.update(
+                {
+                    "learned_torso_wrench_scale": jp.asarray(
+                        actor_learned_torso_wrench_scale,
+                        dtype=jp.float32,
+                    ),
+                    "learned_torso_wrench_rms_force": jp.sqrt(
+                        jp.mean(jp.square(learned_force_norm))
+                    ),
+                    "learned_torso_wrench_rms_torque": jp.sqrt(
+                        jp.mean(jp.square(learned_torque_norm))
+                    ),
+                    "learned_torso_wrench_max_force": jp.max(
+                        learned_force_norm
+                    ),
+                    "learned_torso_wrench_max_torque": jp.max(
+                        learned_torque_norm
+                    ),
+                    "learned_torso_wrench_normalized_rms": jp.sqrt(
+                        jp.mean(jp.square(learned_normalized))
+                    ),
+                    "learned_torso_wrench_saturation_fraction": jp.mean(
+                        jp.abs(learned_normalized) >= 0.95
+                    ),
+                    "learned_torso_wrench_penalty": jp.mean(
+                        trajs["learned_torso_wrench_penalty"]
+                    ),
+                    "learned_torso_wrench_valid": (
+                        jp.all(jp.isfinite(learned_normalized))
+                        & jp.all(
+                            jp.isfinite(trajs["learned_torso_wrench"])
+                        )
+                        & (
+                            jp.max(learned_force_norm)
+                            <= torso_wrench_parameters.force_cap + 1e-5
+                        )
+                        & (
+                            jp.max(learned_torque_norm)
+                            <= torso_wrench_parameters.torque_cap + 1e-5
+                        )
+                    ),
+                }
+            )
         if actor_cagrad:
             cagrad_result = cagrad_reduction["result"]
             cagrad_counts_match = jp.all(
@@ -5157,6 +5340,45 @@ def train(
                     policy_anchor_source_params,
                     resumed_state.actor_params,
                 )
+        if actor_learned_torso_wrench:
+            if isinstance(
+                resumed_state.actor_params, FrozenControllerWrenchParams
+            ):
+                raise ValueError(
+                    "resuming an existing learned wrench head is not yet supported"
+                )
+            controller_params = resumed_state.actor_params
+            wrench_params = learned_torso_wrench_actor.init(
+                jax.random.fold_in(k1, 0x5752),
+                jp.zeros(
+                    (1, env.actor_frame_obs_dim), dtype=jp.float32
+                ),
+            )
+            composite_wrench_params = FrozenControllerWrenchParams(
+                controller=controller_params,
+                wrench=wrench_params,
+            )
+            preview_adapter_mask = build_learned_wrench_mask(
+                composite_wrench_params
+            )
+            preview_trainable_parameter_count = sum(
+                int(np.count_nonzero(np.asarray(leaf)))
+                for leaf in jax.tree_util.tree_leaves(preview_adapter_mask)
+            )
+            expected_wrench_parameters = (
+                env.actor_frame_obs_dim * actor_learned_torso_wrench_hidden
+                + actor_learned_torso_wrench_hidden
+                + actor_learned_torso_wrench_hidden * 6
+                + 6
+            )
+            if preview_trainable_parameter_count != expected_wrench_parameters:
+                raise ValueError(
+                    "learned torso wrench trainable parameter count is invalid"
+                )
+            resumed_state = resumed_state.replace(
+                actor_params=composite_wrench_params,
+                actor_opt=actor_opt.init(composite_wrench_params),
+            )
         if adaptive_phase_sampling:
             resumed_state = resumed_state.replace(
                 env_state=migrate_adaptive_phase_env_state(
@@ -5327,6 +5549,19 @@ def train(
         ),
         "actor_observe_torso_wrench_assistance": (
             actor_observe_torso_wrench_assistance
+        ),
+        "actor_learned_torso_wrench": actor_learned_torso_wrench,
+        "actor_learned_torso_wrench_hidden": (
+            actor_learned_torso_wrench_hidden
+        ),
+        "actor_learned_torso_wrench_scale": (
+            actor_learned_torso_wrench_scale
+        ),
+        "actor_learned_torso_wrench_penalty": (
+            actor_learned_torso_wrench_penalty
+        ),
+        "allow_resume_actor_learned_torso_wrench_start": (
+            allow_resume_actor_learned_torso_wrench_start
         ),
         "allow_resume_assistance_conditioning_change": (
             allow_resume_assistance_conditioning_change
@@ -5563,6 +5798,10 @@ def train(
             metrics["torso_wrench_assistance_valid"]
         ):
             raise RuntimeError("torso wrench assistance telemetry is invalid")
+        if actor_learned_torso_wrench and not bool(
+            metrics["learned_torso_wrench_valid"]
+        ):
+            raise RuntimeError("learned torso wrench telemetry is invalid")
         if actor_policy_anchor_weight > 0.0 and not np.isfinite(
             float(metrics["actor_policy_anchor_squared_error"])
         ):
@@ -5890,6 +6129,42 @@ def train(
                             ),
                         }
                     )
+                if actor_learned_torso_wrench:
+                    diag_entry.update(
+                        {
+                            "learned_torso_wrench_scale": float(
+                                metrics["learned_torso_wrench_scale"]
+                            ),
+                            "learned_torso_wrench_rms_force": float(
+                                metrics["learned_torso_wrench_rms_force"]
+                            ),
+                            "learned_torso_wrench_rms_torque": float(
+                                metrics["learned_torso_wrench_rms_torque"]
+                            ),
+                            "learned_torso_wrench_max_force": float(
+                                metrics["learned_torso_wrench_max_force"]
+                            ),
+                            "learned_torso_wrench_max_torque": float(
+                                metrics["learned_torso_wrench_max_torque"]
+                            ),
+                            "learned_torso_wrench_normalized_rms": float(
+                                metrics[
+                                    "learned_torso_wrench_normalized_rms"
+                                ]
+                            ),
+                            "learned_torso_wrench_saturation_fraction": float(
+                                metrics[
+                                    "learned_torso_wrench_saturation_fraction"
+                                ]
+                            ),
+                            "learned_torso_wrench_penalty": float(
+                                metrics["learned_torso_wrench_penalty"]
+                            ),
+                            "learned_torso_wrench_valid": bool(
+                                metrics["learned_torso_wrench_valid"]
+                            ),
+                        }
+                    )
                 if adaptive_phase_sampling:
                     if not bool(metrics["adaptive_phase_sampling_valid"]):
                         raise RuntimeError(
@@ -5960,6 +6235,7 @@ def train(
                 reward > best_reward
                 and state.step > 5000
                 and not torso_wrench_assistance
+                and not actor_learned_torso_wrench
                 and demonstration_replay_threshold is None
             ):
                 best_reward = reward
@@ -6127,6 +6403,55 @@ def train(
                                 ),
                             }
                             if torso_wrench_assistance
+                            else {}
+                        ),
+                        **(
+                            {
+                                "learned_torso_wrench_scale": float(
+                                    metrics["learned_torso_wrench_scale"]
+                                ),
+                                "learned_torso_wrench_rms_force": float(
+                                    metrics[
+                                        "learned_torso_wrench_rms_force"
+                                    ]
+                                ),
+                                "learned_torso_wrench_rms_torque": float(
+                                    metrics[
+                                        "learned_torso_wrench_rms_torque"
+                                    ]
+                                ),
+                                "learned_torso_wrench_max_force": float(
+                                    metrics[
+                                        "learned_torso_wrench_max_force"
+                                    ]
+                                ),
+                                "learned_torso_wrench_max_torque": float(
+                                    metrics[
+                                        "learned_torso_wrench_max_torque"
+                                    ]
+                                ),
+                                "learned_torso_wrench_normalized_rms": float(
+                                    metrics[
+                                        "learned_torso_wrench_normalized_rms"
+                                    ]
+                                ),
+                                "learned_torso_wrench_saturation_fraction": float(
+                                    metrics[
+                                        "learned_torso_wrench_saturation_fraction"
+                                    ]
+                                ),
+                                "learned_torso_wrench_penalty": float(
+                                    metrics[
+                                        "learned_torso_wrench_penalty"
+                                    ]
+                                ),
+                                "learned_torso_wrench_valid": bool(
+                                    metrics[
+                                        "learned_torso_wrench_valid"
+                                    ]
+                                ),
+                            }
+                            if actor_learned_torso_wrench
                             else {}
                         ),
                         **(
