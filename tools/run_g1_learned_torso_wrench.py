@@ -80,6 +80,8 @@ def build_learned_wrench_kwargs(
         actor_policy_anchor_source_path=None,
         actor_policy_anchor_source_sha256=None,
         allow_resume_actor_policy_anchor_source_change=True,
+        actor_cagrad=False,
+        allow_resume_actor_cagrad_change=True,
         actor_learned_torso_wrench=True,
         actor_learned_torso_wrench_hidden=256,
         actor_learned_torso_wrench_scale=1.0,
