@@ -571,6 +571,56 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         np.testing.assert_array_equal(
             actor.apply(loaded_params, observations), expected
         )
+
+    def test_checkpoint_loader_preserves_controller_and_exposes_zero_wrench_head(self):
+        from src.algorithms.shac.learned_torso_wrench import (
+            FrozenControllerWrenchParams,
+            LearnedTorsoWrenchHead,
+        )
+        from src.algorithms.shac.residual_preview_adapter import (
+            FrozenPreviewResidualParams,
+            PreviewResidualAdapter,
+            apply_frozen_preview_residual,
+        )
+
+        env = SimpleNamespace(
+            action_dim=2,
+            squash_actor_actions=True,
+            actor_obs_dim=15,
+            actor_frame_obs_dim=5,
+            actor_history_len=3,
+        )
+        parent = Actor(2, hidden=(4,), squash=True, zero_output=False)
+        residual = PreviewResidualAdapter(action_dim=2, hidden_dim=4)
+        wrench = LearnedTorsoWrenchHead(hidden_dim=4)
+        parent_params = parent.init(jax.random.PRNGKey(31), jnp.zeros((1, 15)))
+        residual_params = residual.init(jax.random.PRNGKey(32), jnp.zeros((1, 5)))
+        wrench_params = wrench.init(jax.random.PRNGKey(33), jnp.zeros((1, 5)))
+        controller = FrozenPreviewResidualParams(parent_params, residual_params)
+        params = FrozenControllerWrenchParams(controller, wrench_params)
+        state = SimpleNamespace(actor_params=params, normalizer="normalizer")
+        observations = jnp.arange(15, dtype=jnp.float32).reshape(1, 15)
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "checkpoint.pkl"
+            with checkpoint.open("wb") as handle:
+                pickle.dump(state, handle)
+            actor, loaded_params, normalizer = _load_policy(env, checkpoint, seed=0)
+
+        expected, _, _ = apply_frozen_preview_residual(
+            parent,
+            residual,
+            controller,
+            observations,
+            history_len=3,
+            treatment_frame_dim=5,
+        )
+        np.testing.assert_array_equal(actor.apply(loaded_params, observations), expected)
+        np.testing.assert_array_equal(
+            actor.normalized_wrench(loaded_params, observations),
+            np.zeros((1, 6), dtype=np.float32),
+        )
+        self.assertEqual(normalizer, "normalizer")
         self.assertEqual(normalizer, "normalizer")
 
     def test_loader_recreates_exact_compact_training_initialization(self):

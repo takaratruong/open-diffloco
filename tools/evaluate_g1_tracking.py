@@ -14,6 +14,12 @@ import mujoco
 import numpy as np
 
 from src.algorithms.shac.algorithm import load_recovery_support_artifact
+from src.algorithms.shac.learned_torso_wrench import (
+    FrozenControllerWrenchParams,
+    LearnedTorsoWrenchHead,
+    apply_learned_torso_wrench,
+    normalized_yaw_wrench_to_world,
+)
 from src.algorithms.shac.progressive_recovery_expert import (
     apply_state_gated_recovery,
 )
@@ -33,6 +39,10 @@ from src.envs.g1_tracking.solver_profiles import (
     solver_context,
 )
 from src.envs.go2.environment import get_go2_env_class
+from src.evaluation.g1_torso_wrench_oracle import (
+    torso_wrench_parameters_from_environment,
+    write_torso_wrench,
+)
 from tools.prepare_g1_rmr_reference import sha256_file
 
 EVALUATION_ENV_VARIANTS = (
@@ -439,13 +449,21 @@ def _load_policy(
     if checkpoint is not None:
         with checkpoint.open("rb") as handle:
             state = pickle.load(handle)
+        learned_wrench = isinstance(
+            state.actor_params, FrozenControllerWrenchParams
+        )
+        controller_params = (
+            state.actor_params.controller
+            if learned_wrench
+            else state.actor_params
+        )
         composite = isinstance(
-            state.actor_params, FrozenPreviewResidualParams
+            controller_params, FrozenPreviewResidualParams
         )
         modules = (
-            state.actor_params.parent["params"]
+            controller_params.parent["params"]
             if composite
-            else state.actor_params["params"]
+            else controller_params["params"]
         )
         dense_names = sorted(
             (name for name in modules if name.startswith("Dense_")),
@@ -480,7 +498,7 @@ def _load_policy(
         if composite:
             parent_actor = actor
             adapter_kernel, _ = split_residual_adapter_params(
-                state.actor_params.adapter
+                controller_params.adapter
             )
             residual_actor = PreviewResidualAdapter(
                 action_dim=env.action_dim,
@@ -511,6 +529,32 @@ def _load_policy(
                     return action
 
             actor = FrozenResidualCheckpointActor()
+        if learned_wrench:
+            controller_actor = actor
+            wrench_modules = state.actor_params.wrench["params"]
+            wrench_hidden = int(
+                wrench_modules["Dense_0"]["kernel"].shape[-1]
+            )
+            wrench_actor = LearnedTorsoWrenchHead(hidden_dim=wrench_hidden)
+
+            class LearnedWrenchCheckpointActor:
+                def apply(self, params, observations):
+                    return controller_actor.apply(
+                        params.controller, observations
+                    )
+
+                def normalized_wrench(self, params, observations):
+                    frames = observations.reshape(
+                        observations.shape[:-1]
+                        + (env.actor_history_len, env.actor_frame_obs_dim)
+                    )
+                    return apply_learned_torso_wrench(
+                        wrench_actor,
+                        params,
+                        frames[..., -1, :],
+                    )
+
+            actor = LearnedWrenchCheckpointActor()
         return actor, state.actor_params, state.normalizer
 
     actor = Actor(
@@ -894,6 +938,28 @@ def main() -> None:
             actor_zero_output=not args.random_actor_output_head,
             training_initialization=args.training_initialization,
         )
+    learned_wrench_scale = None
+    learned_wrench_body_id = None
+    learned_wrench_parameters = None
+    if isinstance(actor_params, FrozenControllerWrenchParams):
+        hparams_path = args.checkpoint.resolve().with_name("hparams.json")
+        if not hparams_path.is_file():
+            parser.error("learned wrench checkpoint requires sibling hparams.json")
+        learned_hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
+        learned_wrench_scale = learned_hparams.get(
+            "actor_learned_torso_wrench_scale"
+        )
+        if (
+            learned_hparams.get("actor_learned_torso_wrench") is not True
+            or isinstance(learned_wrench_scale, bool)
+            or not isinstance(learned_wrench_scale, (int, float))
+            or not math.isfinite(learned_wrench_scale)
+            or not 0.0 <= learned_wrench_scale <= 1.0
+        ):
+            parser.error("learned wrench checkpoint hparams are invalid")
+        learned_wrench_body_id, learned_wrench_parameters = (
+            torso_wrench_parameters_from_environment(env)
+        )
     recovery_support = None
     recovery_support_report = None
     if args.actor_state_gated_recovery_support is not None:
@@ -968,6 +1034,8 @@ def main() -> None:
     position_targets = []
     recovery_gates = []
     gated_residual_actions = []
+    learned_wrenches = []
+    learned_normalized_wrenches = []
 
     try:
         remaining = remaining_reference_transitions(
@@ -1064,6 +1132,28 @@ def main() -> None:
                     actor.apply(actor_params, normalized).astype(jnp.float64),
                     args.action_gain,
                 )
+        if isinstance(actor_params, FrozenControllerWrenchParams):
+            normalized_wrench = actor.normalized_wrench(
+                actor_params, normalized
+            ).astype(state.data.qpos.dtype)
+            world_wrench = normalized_yaw_wrench_to_world(
+                normalized_wrench,
+                root_quaternion=state.data.qpos[3:7],
+                force_cap=learned_wrench_parameters.force_cap,
+                torque_cap=learned_wrench_parameters.torque_cap,
+                scale=learned_wrench_scale,
+            )
+            state = state.replace(
+                data=state.data.replace(
+                    xfrc_applied=write_torso_wrench(
+                        state.data.xfrc_applied,
+                        torso_body_id=learned_wrench_body_id,
+                        world_wrench=world_wrench,
+                    )
+                )
+            )
+            learned_normalized_wrenches.append(np.asarray(normalized_wrench))
+            learned_wrenches.append(np.asarray(world_wrench))
         action_mean = action
         action_means.append(np.asarray(action_mean))
         if args.training_distribution_rollout:
@@ -1170,6 +1260,10 @@ def main() -> None:
         position_target=np.asarray(position_targets),
         recovery_gate=np.asarray(recovery_gates),
         gated_residual_action=np.asarray(gated_residual_actions),
+        learned_torso_wrench=np.asarray(learned_wrenches),
+        learned_torso_wrench_normalized=np.asarray(
+            learned_normalized_wrenches
+        ),
     )
     rollout_name = (
         "training_rollout.mp4"
@@ -1283,7 +1377,43 @@ def main() -> None:
             if rmr_policy is not None and actor is not None
             else "rmr_policy"
             if rmr_policy is not None
+            else "learned_torso_wrench_policy"
+            if isinstance(actor_params, FrozenControllerWrenchParams)
             else "flax_policy"
+        ),
+        "actor_learned_torso_wrench": isinstance(
+            actor_params, FrozenControllerWrenchParams
+        ),
+        "actor_learned_torso_wrench_scale": learned_wrench_scale,
+        "learned_torso_wrench_rms_force": (
+            float(
+                np.sqrt(
+                    np.mean(
+                        np.square(
+                            np.linalg.norm(
+                                np.asarray(learned_wrenches)[:, :3], axis=-1
+                            )
+                        )
+                    )
+                )
+            )
+            if learned_wrenches
+            else 0.0
+        ),
+        "learned_torso_wrench_rms_torque": (
+            float(
+                np.sqrt(
+                    np.mean(
+                        np.square(
+                            np.linalg.norm(
+                                np.asarray(learned_wrenches)[:, 3:], axis=-1
+                            )
+                        )
+                    )
+                )
+            )
+            if learned_wrenches
+            else 0.0
         ),
         "checkpoint_path": (
             str(args.checkpoint.resolve())
