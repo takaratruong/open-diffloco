@@ -21,6 +21,8 @@ def test_runner_changes_only_reference_reset_and_learned_wrench_treatment():
     assert kwargs["carried_reset_bank_path"] is None
     assert kwargs["carried_reset_probability"] == 0.0
     assert kwargs["allow_resume_carried_reset_change"] is True
+    assert kwargs["actor_policy_anchor_weight"] == 0.0
+    assert kwargs["allow_resume_actor_policy_anchor_source_change"] is True
     assert kwargs["actor_learned_torso_wrench"] is True
     assert kwargs["actor_learned_torso_wrench_hidden"] == 256
     assert kwargs["actor_learned_torso_wrench_scale"] == 1.0
