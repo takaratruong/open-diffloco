@@ -79,6 +79,30 @@ def test_zero_scale_is_bit_exact_and_invalid_values_fail_closed():
     assert bool(jp.all(jp.isnan(invalid)))
 
 
+def test_zero_wrench_boundary_has_finite_nonzero_jacobian():
+    from src.algorithms.shac.learned_torso_wrench import (
+        normalized_yaw_wrench_to_world,
+    )
+
+    def convert(values):
+        return normalized_yaw_wrench_to_world(
+            values,
+            root_quaternion=jp.asarray([1.0, 0.0, 0.0, 0.0]),
+            force_cap=10.0,
+            torque_cap=4.0,
+            scale=1.0,
+        )
+
+    jacobian = jax.jacrev(convert)(jp.zeros(6, dtype=jp.float32))
+    assert bool(jp.all(jp.isfinite(jacobian)))
+    np.testing.assert_allclose(
+        jacobian,
+        np.diag([10.0, 10.0, 10.0, 4.0, 4.0, 4.0]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
 def test_wrench_head_has_finite_nonzero_gradient_after_zero_initialization():
     from src.algorithms.shac.learned_torso_wrench import LearnedTorsoWrenchHead
 

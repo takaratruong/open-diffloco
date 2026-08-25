@@ -109,7 +109,10 @@ def normalized_yaw_wrench_to_world(
 
 def _norm_bounded(vector: jax.Array, maximum: jax.Array) -> jax.Array:
     vector = vector * maximum
-    norm = jp.linalg.norm(vector)
+    # sqrt(sum(x**2)) has an undefined derivative at the zero-output
+    # initialization.  The tiny squared floor preserves the identity Jacobian
+    # there while remaining negligible relative to physical wrench caps.
+    norm = jp.sqrt(jp.sum(jp.square(vector)) + jp.asarray(1e-12, vector.dtype))
     factor = jp.minimum(jp.asarray(1.0, vector.dtype), maximum / jp.maximum(norm, 1e-12))
     return vector * factor
 
