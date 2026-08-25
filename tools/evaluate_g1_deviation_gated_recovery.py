@@ -101,6 +101,11 @@ def _summary_survival(summary: Mapping[str, object], label: str) -> np.ndarray:
 
 
 def _tracking_gate(summary: Mapping[str, object]) -> bool:
+    mask = np.asarray(
+        summary.get("tracking_metric_mask", [True] * 5), dtype=bool
+    )
+    if mask.shape != (5,):
+        raise ValueError("gated tracking metric mask must contain five values")
     for key in (
         "body_position_error_ratio",
         "body_orientation_error_ratio",
@@ -108,7 +113,7 @@ def _tracking_gate(summary: Mapping[str, object]) -> bool:
         values = np.asarray(summary.get(key), dtype=np.float64)
         if values.shape != (5,) or not np.isfinite(values).all():
             raise ValueError(f"gated {key} must contain five finite values")
-        if np.any(values > 1.05):
+        if np.any(values[mask] > 1.05):
             return False
     return True
 
@@ -256,7 +261,28 @@ def validate_completion_manifest(path: Path) -> dict[str, object]:
     records = payload.get("records")
     if not isinstance(records, list) or len(records) != 15:
         raise ValueError("completion manifest must contain fifteen rollouts")
+    provenance = payload.get("provenance")
+    if not isinstance(provenance, dict):
+        raise ValueError("completion provenance is missing")
+    for label in (
+        "checkpoint",
+        "hparams",
+        "reference",
+        "model",
+        "controller",
+        "video",
+        "contact_sheet",
+        "preflight",
+    ):
+        path_key = f"{label}_path"
+        hash_key = f"{label}_sha256"
+        if path_key in provenance:
+            asset_path = Path(str(provenance[path_key]))
+            if _sha256(asset_path) != provenance.get(hash_key):
+                raise ValueError(f"{label} provenance hash does not match")
     observed = set()
+    raw_by_key: dict[tuple[str, int], dict[str, np.ndarray]] = {}
+    summaries_by_key: dict[tuple[str, int], dict[str, object]] = {}
     for record in records:
         arm = str(record["arm"])
         phase = int(record["phase"])
@@ -267,7 +293,7 @@ def validate_completion_manifest(path: Path) -> dict[str, object]:
         record_path = Path(str(record["path"]))
         if _sha256(record_path) != record.get("sha256"):
             raise ValueError("raw rollout hash does not match")
-        validate_raw_rollout(record_path, arm=arm, phase=phase)
+        raw_report = validate_raw_rollout(record_path, arm=arm, phase=phase)
         summary_path = Path(str(record["summary_path"]))
         if _sha256(summary_path) != record.get("summary_sha256"):
             raise ValueError("rollout summary hash does not match")
@@ -275,15 +301,104 @@ def validate_completion_manifest(path: Path) -> dict[str, object]:
         if (
             summary.get("arm") != arm
             or int(summary.get("phase", -1)) != phase
-            or int(summary.get("steps", -1)) < 1
+            or int(summary.get("steps", -1)) != int(raw_report["rows"])
         ):
             raise ValueError("rollout summary does not match raw record")
+        with np.load(record_path, allow_pickle=False) as archive:
+            values = np.asarray(archive["values"], dtype=np.float64)
+        expected_summary = {
+            "terminal": bool(values[-1, 4] > 0.5),
+            "mean_body_position_error": float(np.mean(values[:, 7])),
+            "mean_body_orientation_error": float(np.mean(values[:, 8])),
+        }
+        for name, expected_value in expected_summary.items():
+            actual_value = summary.get(name)
+            if isinstance(expected_value, bool):
+                agrees = actual_value is expected_value
+            else:
+                agrees = bool(
+                    np.isfinite(actual_value)
+                    and np.isclose(
+                        float(actual_value), expected_value, atol=1e-12, rtol=0.0
+                    )
+                )
+            if not agrees:
+                raise ValueError(f"rollout summary {name} disagrees with raw evidence")
+        raw_by_key[key] = {"values": values}
+        summaries_by_key[key] = summary
     if observed != {(arm, phase) for arm in ARMS for phase in PHASES}:
         raise ValueError("completion manifest rollout grid is incomplete")
     selection = payload.get("selection")
     selection_path = Path(str(selection["path"]))
     if _sha256(selection_path) != selection.get("sha256"):
         raise ValueError("selection hash does not match")
+    selection_payload = json.loads(selection_path.read_text(encoding="utf-8"))
+    survival = {
+        arm: [int(summaries_by_key[(arm, phase)]["steps"]) for phase in PHASES]
+        for arm in ARMS
+    }
+    parent_body = np.asarray(
+        [
+            summaries_by_key[("parent", phase)]["mean_body_position_error"]
+            for phase in PHASES
+        ],
+        dtype=np.float64,
+    )
+    parent_orientation = np.asarray(
+        [
+            summaries_by_key[("parent", phase)]["mean_body_orientation_error"]
+            for phase in PHASES
+        ],
+        dtype=np.float64,
+    )
+    gated_body = np.asarray(
+        [
+            summaries_by_key[("gated", phase)]["mean_body_position_error"]
+            for phase in PHASES
+        ],
+        dtype=np.float64,
+    )
+    gated_orientation = np.asarray(
+        [
+            summaries_by_key[("gated", phase)]["mean_body_orientation_error"]
+            for phase in PHASES
+        ],
+        dtype=np.float64,
+    )
+    metric_mask = (
+        np.asarray(survival["parent"], dtype=np.int64) == EXPECTED_SUFFIXES
+    )
+    classifier_summaries = {
+        "parent": {"survival": survival["parent"]},
+        "global": {"survival": survival["global"]},
+        "gated": {
+            "survival": survival["gated"],
+            "body_position_error_ratio": (
+                gated_body / np.maximum(parent_body, 1e-12)
+            ).tolist(),
+            "body_orientation_error_ratio": (
+                gated_orientation / np.maximum(parent_orientation, 1e-12)
+            ).tolist(),
+            "tracking_metric_mask": metric_mask.tolist(),
+        },
+    }
+    gated_phase_zero_values = raw_by_key[("gated", 0)]["values"]
+    if gated_phase_zero_values.shape[0] < 10:
+        raise ValueError("gated phase-zero evidence is too short for selection")
+    expected_outcome = classify_deviation_gate(
+        parent=classifier_summaries["parent"],
+        global_arm=classifier_summaries["global"],
+        gated=classifier_summaries["gated"],
+        final_body_position_error=gated_phase_zero_values[-10:, 7],
+    )
+    if selection_payload.get("outcome") != expected_outcome:
+        raise ValueError("selection outcome disagrees with raw evidence")
+    recorded_summaries = selection_payload.get("summaries")
+    if not isinstance(recorded_summaries, dict):
+        raise ValueError("selection summaries are missing")
+    for arm in ARMS:
+        if list(recorded_summaries.get(arm, {}).get("survival", ())) != survival[arm]:
+            raise ValueError("selection survival disagrees with raw evidence")
     return payload
 
 
@@ -702,6 +817,10 @@ def run_evaluation(args: argparse.Namespace) -> Path:
             "body_orientation_error_ratio": (
                 gated_orientation / np.maximum(parent_orientation, 1e-12)
             ).tolist(),
+            "tracking_metric_mask": (
+                np.asarray(survival["parent"], dtype=np.int64)
+                == EXPECTED_SUFFIXES
+            ).tolist(),
         },
     }
     gated_phase_zero_raw = Path(
@@ -750,6 +869,7 @@ def run_evaluation(args: argparse.Namespace) -> Path:
             "video_sha256": _sha256(video_path),
             "contact_sheet_path": str(sheet_path),
             "contact_sheet_sha256": _sha256(sheet_path),
+            "preflight_path": str(output / "preflight.json"),
             "preflight_sha256": _sha256(output / "preflight.json"),
         },
     )

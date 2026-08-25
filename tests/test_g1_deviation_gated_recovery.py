@@ -1,9 +1,11 @@
 import json
+import hashlib
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from src.algorithms.shac.deviation_gated_recovery import deviation_recovery_gate
 from tools.evaluate_g1_deviation_gated_recovery import (
     ARMS,
     PHASES,
@@ -17,11 +19,25 @@ from tools.evaluate_g1_deviation_gated_recovery import (
 )
 
 
-def _summary(survival, body_ratio=1.0, orientation_ratio=1.0):
+def _summary(
+    survival,
+    body_ratio=1.0,
+    orientation_ratio=1.0,
+    metric_mask=(True, True, True, True, True),
+):
+    body_ratios = (
+        [body_ratio] * 5 if np.isscalar(body_ratio) else list(body_ratio)
+    )
+    orientation_ratios = (
+        [orientation_ratio] * 5
+        if np.isscalar(orientation_ratio)
+        else list(orientation_ratio)
+    )
     return {
         "survival": list(survival),
-        "body_position_error_ratio": [body_ratio] * 5,
-        "body_orientation_error_ratio": [orientation_ratio] * 5,
+        "body_position_error_ratio": body_ratios,
+        "body_orientation_error_ratio": orientation_ratios,
+        "tracking_metric_mask": list(metric_mask),
     }
 
 
@@ -69,9 +85,24 @@ def test_short_clip_solution_passes_all_registered_gates():
     assert outcome == "deviation-gating-solves-short-clip"
 
 
-def _raw_arrays(arm: str, rows: int = 3):
-    error = np.asarray([0.0, 0.15, 0.2])[:rows]
-    gate = np.asarray([0.0, 0.5, 1.0])[:rows]
+def test_tracking_metric_gate_ignores_parent_incomplete_suffixes():
+    outcome = classify_deviation_gate(
+        parent=_summary([116, 99, 67, 49, 24]),
+        global_arm=_summary([124, 99, 74, 49, 24]),
+        gated=_summary(
+            [124, 99, 74, 49, 24],
+            body_ratio=(2.0, 1.0, 2.0, 1.0, 1.0),
+            metric_mask=(False, True, False, True, True),
+        ),
+        final_body_position_error=np.linspace(0.05, 0.04, 10),
+    )
+
+    assert outcome == "deviation-gating-solves-short-clip"
+
+
+def _raw_arrays(arm: str, rows: int = 3, phase: int = 0):
+    error = np.linspace(0.0, 0.2, rows)
+    gate = np.asarray(deviation_recovery_gate(error))
     parent = np.arange(rows * 2, dtype=np.float64).reshape(rows, 2)
     residual = np.full((rows, 2), 0.2, dtype=np.float64)
     if arm == "parent":
@@ -85,8 +116,9 @@ def _raw_arrays(arm: str, rows: int = 3):
         candidate = parent + gated
     values = np.zeros((rows, 16), dtype=np.float64)
     values[:, 0] = np.arange(rows)
-    values[:, 1] = np.arange(rows)
-    values[:, 7] = np.linspace(0.01, 0.03, rows)
+    values[:, 1] = phase + np.arange(rows)
+    values[:, 7] = np.linspace(0.03, 0.01, rows)
+    values[:, 8] = np.linspace(0.02, 0.01, rows)
     return {
         "columns": np.asarray(
             [
@@ -146,12 +178,33 @@ def test_raw_rollout_rejects_tampered_candidate_action(tmp_path):
 
 def _publish_fixture(root: Path) -> Path:
     records = []
+    survival = {
+        "parent": [116, 99, 67, 49, 24],
+        "global": [124, 99, 74, 49, 24],
+        "gated": [124, 99, 74, 49, 24],
+    }
     for arm in ARMS:
-        for phase in PHASES:
+        for phase_index, phase in enumerate(PHASES):
+            rows = survival[arm][phase_index]
             path = root / "arms" / arm / f"phase_{phase:03d}.npz"
-            atomic_npz(path, **_raw_arrays(arm))
+            arrays = _raw_arrays(arm, rows=rows, phase=phase)
+            atomic_npz(path, **arrays)
             summary = path.with_suffix(".json")
-            atomic_json(summary, {"arm": arm, "phase": phase, "steps": 3})
+            atomic_json(
+                summary,
+                {
+                    "arm": arm,
+                    "phase": phase,
+                    "steps": rows,
+                    "terminal": False,
+                    "mean_body_position_error": float(
+                        np.mean(arrays["values"][:, 7])
+                    ),
+                    "mean_body_orientation_error": float(
+                        np.mean(arrays["values"][:, 8])
+                    ),
+                },
+            )
             records.append(
                 {
                     "arm": arm,
@@ -161,7 +214,24 @@ def _publish_fixture(root: Path) -> Path:
                 }
             )
     selection = root / "selection.json"
-    atomic_json(selection, {"outcome": "deviation-gating-advances"})
+    atomic_json(
+        selection,
+        {
+            "valid": True,
+            "outcome": "deviation-gating-solves-short-clip",
+            "summaries": {
+                "parent": {"survival": survival["parent"]},
+                "global": {"survival": survival["global"]},
+                "gated": {
+                    "survival": survival["gated"],
+                    "body_position_error_ratio": [1.0] * 5,
+                    "body_orientation_error_ratio": [1.0] * 5,
+                    "tracking_metric_mask": [False, True, False, True, True],
+                },
+            },
+            "final_body_position_error": np.linspace(0.03, 0.01, 10).tolist(),
+        },
+    )
     manifest = root / "completion.json"
     build_completion_manifest(
         manifest,
@@ -189,6 +259,39 @@ def test_manifest_accepts_complete_fifteen_rollout_fixture(tmp_path):
 
     assert payload["valid"] is True
     assert len(payload["records"]) == 15
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_manifest_rejects_summary_that_disagrees_with_raw_evidence(tmp_path):
+    manifest = _publish_fixture(tmp_path)
+    payload = json.loads(manifest.read_text())
+    record = payload["records"][0]
+    summary_path = Path(record["summary_path"])
+    summary = json.loads(summary_path.read_text())
+    summary["mean_body_position_error"] = 99.0
+    atomic_json(summary_path, summary)
+    record["summary_sha256"] = _sha256(summary_path)
+    atomic_json(manifest, payload)
+
+    with pytest.raises(ValueError, match="summary"):
+        validate_completion_manifest(manifest)
+
+
+def test_manifest_rejects_selection_that_disagrees_with_raw_evidence(tmp_path):
+    manifest = _publish_fixture(tmp_path)
+    payload = json.loads(manifest.read_text())
+    selection_path = Path(payload["selection"]["path"])
+    selection = json.loads(selection_path.read_text())
+    selection["outcome"] = "correction-intrinsically-insufficient"
+    atomic_json(selection_path, selection)
+    payload["selection"]["sha256"] = _sha256(selection_path)
+    atomic_json(manifest, payload)
+
+    with pytest.raises(ValueError, match="selection"):
+        validate_completion_manifest(manifest)
 
 
 def test_parser_requires_exact_scientific_inputs(tmp_path):
