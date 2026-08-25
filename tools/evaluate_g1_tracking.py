@@ -144,6 +144,7 @@ def reset_evaluation_state(
     phase: int,
     sample_training_reset: bool,
     profile,
+    compile_reset: bool = False,
 ):
     """Reset under the same scoped MJX solver boundary as rollout steps."""
     reset_scope = (
@@ -151,8 +152,14 @@ def reset_evaluation_state(
     )
     with reset_scope:
         if sample_training_reset:
-            return env.reset(reset_key, difficulty)
-        return env.reset_at_phase(
+            reset = jax.jit(env.reset) if compile_reset else env.reset
+            return reset(reset_key, difficulty)
+        reset_at_phase = (
+            jax.jit(env.reset_at_phase)
+            if compile_reset
+            else env.reset_at_phase
+        )
+        return reset_at_phase(
             reset_key,
             difficulty,
             jnp.asarray(phase),
@@ -937,6 +944,7 @@ def main() -> None:
         phase=reset_phase,
         sample_training_reset=sample_training_reset,
         profile=profile,
+        compile_reset=True,
     )
     start_phase = int(state.info["phase"])
     compiled_step = build_compiled_step(env)

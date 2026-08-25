@@ -181,6 +181,12 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         self.assertEqual(result, ("key", "difficulty", 7))
         self.assertFalse(active)
 
+    def test_main_compiles_the_expensive_mjx_reset_as_one_program(self):
+        source = Path("tools/evaluate_g1_tracking.py").read_text()
+
+        assert "compile_reset=True" in source
+        assert "jax.jit(env.reset_at_phase)" in source
+
     def test_action_diagnostics_distinguish_mean_boundary_from_clipping(self):
         action_mean = np.asarray(
             [[0.0, 0.96, -1.2], [0.5, -0.95, 0.2]], dtype=np.float64
