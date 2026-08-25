@@ -31,6 +31,7 @@ from src.envs.g1_tracking.reward import (
     rmr_regularization_reward,
     rmr_tracking_reward,
     termination_margin_penalty,
+    torso_orientation_tracking_reward,
 )
 
 
@@ -158,6 +159,7 @@ class G1TrackingEnv:
         action_magnitude_weight: float = 0.0,
         termination_margin_weight: float = 0.0,
         tracking_velocity_kernel: str = "exponential",
+        tracking_torso_orientation_weight: float = 0.0,
         reference_reset_noise_scale: float = 0.0,
         reference_root_reset_noise_multiplier: float = 1.0,
         reference_root_reset_noise_probability: float = 0.0,
@@ -266,6 +268,17 @@ class G1TrackingEnv:
                 "'pseudo_huber'"
             )
         self.tracking_velocity_kernel = tracking_velocity_kernel
+        if (
+            isinstance(tracking_torso_orientation_weight, bool)
+            or not np.isfinite(tracking_torso_orientation_weight)
+            or tracking_torso_orientation_weight < 0.0
+        ):
+            raise ValueError(
+                "tracking_torso_orientation_weight must be non-negative and finite"
+            )
+        self.tracking_torso_orientation_weight = float(
+            tracking_torso_orientation_weight
+        )
         if (
             isinstance(termination_margin_weight, bool)
             or not np.isfinite(termination_margin_weight)
@@ -798,7 +811,7 @@ class G1TrackingEnv:
                 body_pos[0], body_quat[0], phase
             )
         )
-        return rmr_tracking_reward(
+        reward, components = rmr_tracking_reward(
             target_anchor_pos=self.body_pos_reference[phase, 0],
             actual_anchor_pos=body_pos[0],
             target_anchor_quat=self.body_quat_reference[phase, 0],
@@ -812,6 +825,16 @@ class G1TrackingEnv:
             target_body_ang_vel=self.body_ang_vel_reference[phase],
             actual_body_ang_vel=body_ang_vel,
             velocity_kernel=self.tracking_velocity_kernel,
+        )
+        if self.tracking_torso_orientation_weight == 0.0:
+            return reward, components
+        torso_orientation = torso_orientation_tracking_reward(
+            target_body_quat, body_quat
+        )
+        return (
+            reward
+            + self.tracking_torso_orientation_weight * torso_orientation,
+            {**components, "torso_orientation": torso_orientation},
         )
 
     def _anchor_relative_reference(
@@ -1031,6 +1054,7 @@ class G1TrackingEnv:
             "rew_body_orientation": zero,
             "rew_body_linear_velocity": zero,
             "rew_body_angular_velocity": zero,
+            "rew_torso_orientation": zero,
             "rew_action_rate": zero,
             "rew_action_magnitude": zero,
             "rew_joint_limit": zero,
@@ -1714,6 +1738,9 @@ class G1TrackingEnv:
             "rew_body_orientation": components["body_orientation"],
             "rew_body_linear_velocity": components["body_linear_velocity"],
             "rew_body_angular_velocity": components["body_angular_velocity"],
+            "rew_torso_orientation": components.get(
+                "torso_orientation", jp.array(0.0)
+            ),
             "rew_action_rate": components["action_rate"],
             "rew_action_magnitude": components["action_magnitude"],
             "rew_joint_limit": components["joint_limit"],

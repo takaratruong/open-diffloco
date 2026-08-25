@@ -33,6 +33,21 @@ def _velocity_tracking_kernel(
     raise ValueError(f"unknown tracking velocity kernel: {kernel}")
 
 
+def torso_orientation_tracking_reward(
+    target_body_quat: jax.Array,
+    actual_body_quat: jax.Array,
+    *,
+    torso_body_slot: int = 7,
+) -> jax.Array:
+    """Return a non-saturating reference-relative torso orientation reward."""
+    angle = quaternion_error_magnitude(
+        target_body_quat[..., torso_body_slot, :],
+        actual_body_quat[..., torso_body_slot, :],
+    )
+    normalized_squared_error = jp.square(angle) / 0.4**2
+    return 2.0 - jp.sqrt(1.0 + 2.0 * normalized_squared_error)
+
+
 def termination_margin_penalty(
     *,
     anchor_z_error: jax.Array,

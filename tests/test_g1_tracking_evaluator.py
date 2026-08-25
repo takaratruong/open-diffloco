@@ -37,6 +37,25 @@ RMR_ACTIONS = Path(
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    def test_training_hparams_restore_torso_orientation_weight_strictly(self):
+        from tools.evaluate_g1_tracking import (
+            resolve_training_torso_orientation_weight,
+        )
+
+        self.assertEqual(resolve_training_torso_orientation_weight({}), 0.0)
+        self.assertEqual(
+            resolve_training_torso_orientation_weight(
+                {"tracking_torso_orientation_weight": 1.0}
+            ),
+            1.0,
+        )
+        for invalid in (-1.0, float("nan"), float("inf"), True):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "torso orientation"):
+                    resolve_training_torso_orientation_weight(
+                        {"tracking_torso_orientation_weight": invalid}
+                    )
+
     def test_training_hparams_restore_tracking_velocity_kernel_strictly(self):
         from tools.evaluate_g1_tracking import (
             resolve_training_tracking_velocity_kernel,
@@ -717,6 +736,14 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         )
 
         self.assertEqual(candidate.tracking_velocity_kernel, "pseudo_huber")
+
+    def test_evaluator_forwards_torso_orientation_weight(self):
+        candidate = make_evaluation_env(
+            "g1_tracking_rmr_50hz_source_step",
+            tracking_torso_orientation_weight=1.0,
+        )
+
+        self.assertEqual(candidate.tracking_torso_orientation_weight, 1.0)
 
     def test_evaluator_cli_accepts_tracking_velocity_kernel(self):
         args = build_parser().parse_args(

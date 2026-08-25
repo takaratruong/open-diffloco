@@ -18,6 +18,79 @@ class _EnvState:
 
 
 class ShacExactResumeTest(unittest.TestCase):
+    def test_torso_orientation_weight_resume_is_explicit_and_fail_closed(self):
+        from src.algorithms.shac.algorithm import (
+            resolve_tracking_torso_orientation_resume_weight,
+        )
+
+        self.assertEqual(
+            resolve_tracking_torso_orientation_resume_weight(
+                None,
+                requested=1.0,
+                allow_change=False,
+                is_resume=False,
+            ),
+            1.0,
+        )
+        self.assertEqual(
+            resolve_tracking_torso_orientation_resume_weight(
+                {},
+                requested=0.0,
+                allow_change=False,
+                is_resume=True,
+            ),
+            0.0,
+        )
+        with self.assertRaisesRegex(ValueError, "hparams"):
+            resolve_tracking_torso_orientation_resume_weight(
+                None,
+                requested=0.0,
+                allow_change=False,
+                is_resume=True,
+            )
+        with self.assertRaisesRegex(ValueError, "must match the checkpoint"):
+            resolve_tracking_torso_orientation_resume_weight(
+                {"tracking_torso_orientation_weight": 0.0},
+                requested=1.0,
+                allow_change=False,
+                is_resume=True,
+            )
+        self.assertEqual(
+            resolve_tracking_torso_orientation_resume_weight(
+                {"tracking_torso_orientation_weight": 0.0},
+                requested=1.0,
+                allow_change=True,
+                is_resume=True,
+            ),
+            1.0,
+        )
+        for invalid in (-1.0, float("nan"), float("inf"), True):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                    ValueError, "tracking_torso_orientation_weight"
+                ):
+                    resolve_tracking_torso_orientation_resume_weight(
+                        {},
+                        requested=invalid,
+                        allow_change=False,
+                        is_resume=False,
+                    )
+
+    def test_torso_orientation_train_settings_are_default_off(self):
+        from src.algorithms.shac.algorithm import train
+
+        parameters = inspect.signature(train).parameters
+
+        self.assertEqual(
+            parameters["tracking_torso_orientation_weight"].default, 0.0
+        )
+        self.assertIs(
+            parameters[
+                "allow_resume_tracking_torso_orientation_change"
+            ].default,
+            False,
+        )
+
     def test_tracking_velocity_kernel_resume_is_explicit_and_fail_closed(self):
         from src.algorithms.shac.algorithm import (
             resolve_tracking_velocity_kernel_resume_setting,

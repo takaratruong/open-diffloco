@@ -791,6 +791,53 @@ def resolve_tracking_velocity_kernel_resume_setting(
     return requested
 
 
+def resolve_tracking_torso_orientation_resume_weight(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested: float,
+    allow_change: bool,
+    is_resume: bool,
+) -> float:
+    """Restore the torso objective exactly unless a change is authorized."""
+    if (
+        isinstance(requested, bool)
+        or not isinstance(requested, (int, float))
+        or not math.isfinite(requested)
+        or requested < 0.0
+    ):
+        raise ValueError(
+            "tracking_torso_orientation_weight must be non-negative and finite"
+        )
+    if not isinstance(allow_change, bool):
+        raise ValueError(
+            "allow_resume_tracking_torso_orientation_change must be boolean"
+        )
+    if not isinstance(is_resume, bool):
+        raise ValueError("is_resume must be boolean")
+    if not is_resume:
+        return float(requested)
+    if resumed_hparams is None:
+        raise ValueError(
+            "resume hparams are required for the torso orientation objective"
+        )
+    saved = resumed_hparams.get("tracking_torso_orientation_weight", 0.0)
+    if (
+        isinstance(saved, bool)
+        or not isinstance(saved, (int, float))
+        or not math.isfinite(saved)
+        or saved < 0.0
+    ):
+        raise ValueError(
+            "checkpoint tracking_torso_orientation_weight is invalid"
+        )
+    if float(saved) != float(requested) and not allow_change:
+        raise ValueError(
+            "tracking_torso_orientation_weight must match the checkpoint unless "
+            "allow_resume_tracking_torso_orientation_change is enabled"
+        )
+    return float(requested)
+
+
 def resolve_residual_preview_adapter_resume_setting(
     resumed_hparams: dict[str, object] | None,
     *,
@@ -1830,6 +1877,8 @@ def train(
     allow_resume_termination_margin_change: bool = False,
     tracking_velocity_kernel: str = "exponential",
     allow_resume_tracking_velocity_kernel_change: bool = False,
+    tracking_torso_orientation_weight: float = 0.0,
+    allow_resume_tracking_torso_orientation_change: bool = False,
     reference_reset_noise_scale: float = 0.0,
     reference_root_reset_noise_multiplier: float = 1.0,
     reference_root_reset_noise_probability: float = 0.0,
@@ -1888,6 +1937,10 @@ def train(
                                   tracking terms.
         allow_resume_tracking_velocity_kernel_change: Explicitly permit a
                                                        resumed kernel change.
+        tracking_torso_orientation_weight: Optional direct pseudo-Huber torso
+                                            orientation reward weight.
+        allow_resume_tracking_torso_orientation_change: Explicitly permit a
+                                                          resumed objective change.
         reference_reset_noise_scale: Scale of upstream RMR reference-reset
                                      perturbations; zero preserves exact RSI.
         reference_root_reset_noise_multiplier: Multiplier applied only to root
@@ -2147,6 +2200,14 @@ def train(
         raise ValueError(
             "allow_resume_tracking_velocity_kernel_change must be boolean"
         )
+    tracking_torso_orientation_weight = (
+        resolve_tracking_torso_orientation_resume_weight(
+            None,
+            requested=tracking_torso_orientation_weight,
+            allow_change=allow_resume_tracking_torso_orientation_change,
+            is_resume=False,
+        )
+    )
     if not isinstance(allow_resume_carried_reset_change, bool):
         raise ValueError(
             "allow_resume_carried_reset_change must be boolean"
@@ -2293,6 +2354,14 @@ def train(
                 resumed_hparams,
                 requested=tracking_velocity_kernel,
                 allow_change=allow_resume_tracking_velocity_kernel_change,
+                is_resume=True,
+            )
+        )
+        tracking_torso_orientation_weight = (
+            resolve_tracking_torso_orientation_resume_weight(
+                resumed_hparams,
+                requested=tracking_torso_orientation_weight,
+                allow_change=allow_resume_tracking_torso_orientation_change,
                 is_resume=True,
             )
         )
@@ -2716,6 +2785,9 @@ def train(
                 "effort_limit_scale": effort_limit_scale,
                 "termination_margin_weight": termination_margin_weight,
                 "tracking_velocity_kernel": tracking_velocity_kernel,
+                "tracking_torso_orientation_weight": (
+                    tracking_torso_orientation_weight
+                ),
                 "reference_reset_noise_scale": reference_reset_noise_scale,
                 "reference_root_reset_noise_multiplier": (
                     reference_root_reset_noise_multiplier
@@ -5050,6 +5122,12 @@ def train(
         "tracking_velocity_kernel": tracking_velocity_kernel,
         "allow_resume_tracking_velocity_kernel_change": (
             allow_resume_tracking_velocity_kernel_change
+        ),
+        "tracking_torso_orientation_weight": (
+            tracking_torso_orientation_weight
+        ),
+        "allow_resume_tracking_torso_orientation_change": (
+            allow_resume_tracking_torso_orientation_change
         ),
         "reference_reset_noise_scale": reference_reset_noise_scale,
         "reference_root_reset_noise_multiplier": (

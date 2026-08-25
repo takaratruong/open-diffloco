@@ -142,6 +142,34 @@ class RMRTrackingRewardTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "velocity kernel"):
             self.reward(velocity_kernel="not-a-kernel")
 
+    def test_torso_orientation_reward_matches_registered_pseudo_huber(self):
+        from src.envs.g1_tracking.reward import torso_orientation_tracking_reward
+
+        target = jnp.tile(jnp.array([1.0, 0.0, 0.0, 0.0]), (14, 1))
+        actual = target.at[7].set(
+            jnp.array([math.cos(0.2), 0.0, math.sin(0.2), 0.0])
+        )
+
+        value = torso_orientation_tracking_reward(target, actual)
+
+        self.assertAlmostEqual(float(value), 2.0 - math.sqrt(3.0), places=5)
+
+    def test_torso_orientation_reward_has_finite_nonsaturating_gradient(self):
+        from src.envs.g1_tracking.reward import torso_orientation_tracking_reward
+
+        target = jnp.tile(jnp.array([1.0, 0.0, 0.0, 0.0]), (14, 1))
+
+        def reward(angle):
+            actual = target.at[7].set(
+                jnp.array([jnp.cos(angle / 2), 0.0, jnp.sin(angle / 2), 0.0])
+            )
+            return torso_orientation_tracking_reward(target, actual)
+
+        gradient = jax.grad(reward)(jnp.array(1.2))
+
+        self.assertTrue(bool(jnp.isfinite(gradient)))
+        self.assertLess(float(gradient), -1.0)
+
     def test_termination_margin_penalty_activates_before_hard_limits(self):
         from src.envs.g1_tracking.reward import termination_margin_penalty
 
