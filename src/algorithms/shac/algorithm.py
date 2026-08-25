@@ -907,14 +907,20 @@ def select_initial_training_state(*, initialized_state, resumed_state):
 
 
 def migrate_env_state_metrics(resumed_env_state, initialized_env_state):
-    """Align diagnostic metric leaves without changing physical state."""
+    """Align diagnostic metric and info leaves without changing physical state."""
     resumed_metrics = resumed_env_state.metrics
     initialized_metrics = initialized_env_state.metrics
     metrics = {
         name: resumed_metrics.get(name, initial_value)
         for name, initial_value in initialized_metrics.items()
     }
-    return resumed_env_state.replace(metrics=metrics)
+    resumed_info = resumed_env_state.info
+    initialized_info = initialized_env_state.info
+    info = {
+        name: resumed_info.get(name, initial_value)
+        for name, initial_value in initialized_info.items()
+    }
+    return resumed_env_state.replace(metrics=metrics, info=info)
 
 
 def update_adaptive_phase_state(

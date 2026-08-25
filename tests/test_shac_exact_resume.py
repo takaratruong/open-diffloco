@@ -12,6 +12,7 @@ import jax.numpy as jnp
 class _EnvState:
     qpos: object
     metrics: dict
+    info: dict
 
     def replace(self, **changes):
         return replace(self, **changes)
@@ -787,12 +788,21 @@ class ShacExactResumeTest(unittest.TestCase):
                 "rew_action_rate": jnp.asarray([3.0]),
                 "legacy_removed_metric": jnp.asarray([9.0]),
             },
+            info={
+                "phase": jnp.asarray([7]),
+                "legacy_removed_info": jnp.asarray([9.0]),
+            },
         )
         initialized = _EnvState(
             qpos=jnp.zeros_like(qpos),
             metrics={
                 "rew_action_rate": jnp.asarray([0.0]),
                 "rew_action_magnitude": jnp.asarray([0.0]),
+            },
+            info={
+                "phase": jnp.asarray([0]),
+                "transition_contact_stiffness": jnp.asarray([0.0]),
+                "transition_contact_topology_event": jnp.asarray([False]),
             },
         )
 
@@ -806,6 +816,21 @@ class ShacExactResumeTest(unittest.TestCase):
         self.assertEqual(float(migrated.metrics["rew_action_rate"][0]), 3.0)
         self.assertEqual(
             float(migrated.metrics["rew_action_magnitude"][0]), 0.0
+        )
+        self.assertEqual(
+            set(migrated.info),
+            {
+                "phase",
+                "transition_contact_stiffness",
+                "transition_contact_topology_event",
+            },
+        )
+        self.assertEqual(int(migrated.info["phase"][0]), 7)
+        self.assertEqual(
+            float(migrated.info["transition_contact_stiffness"][0]), 0.0
+        )
+        self.assertFalse(
+            bool(migrated.info["transition_contact_topology_event"][0])
         )
 
 
