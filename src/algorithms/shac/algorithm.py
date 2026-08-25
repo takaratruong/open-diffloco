@@ -2794,7 +2794,7 @@ def train(
                 actor_reference_lookahead_steps
             ),
             actor_reference_preview_mode=actor_reference_preview_mode,
-            actor_cagrad=actor_cagrad,
+            actor_cagrad=(actor_cagrad or actor_learned_torso_wrench),
             history_len=actor_history_len,
             source_actor_policy=source_actor_policy,
             initial_full_actor_policy=initial_full_actor_policy,

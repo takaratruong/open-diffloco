@@ -37,6 +37,9 @@ def test_learned_wrench_is_written_after_policy_and_before_environment_step():
         residual_validation,
     )
     assert residual_validation < learned_override
+    assert source.count(
+        "actor_cagrad=(actor_cagrad or actor_learned_torso_wrench)"
+    ) == 2
 
 
 def test_learned_wrench_checkpoint_metadata_and_telemetry_are_persisted():
