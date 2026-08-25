@@ -29,6 +29,7 @@ def test_learned_wrench_is_written_after_policy_and_before_environment_step():
     assert head < write < step
     assert "analytic and learned torso wrench treatments are mutually exclusive" in source
     assert "and not actor_learned_torso_wrench" in source
+    assert "actor_cagrad=(actor_cagrad or actor_learned_torso_wrench)" in source
 
 
 def test_learned_wrench_checkpoint_metadata_and_telemetry_are_persisted():
