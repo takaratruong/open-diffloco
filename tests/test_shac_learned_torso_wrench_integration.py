@@ -29,7 +29,14 @@ def test_learned_wrench_is_written_after_policy_and_before_environment_step():
     assert head < write < step
     assert "analytic and learned torso wrench treatments are mutually exclusive" in source
     assert "and not actor_learned_torso_wrench" in source
-    assert "actor_cagrad=(actor_cagrad or actor_learned_torso_wrench)" in source
+    residual_validation = source.index(
+        "validate_residual_preview_adapter_configuration("
+    )
+    learned_override = source.index(
+        "actor_cagrad=(actor_cagrad or actor_learned_torso_wrench)",
+        residual_validation,
+    )
+    assert residual_validation < learned_override
 
 
 def test_learned_wrench_checkpoint_metadata_and_telemetry_are_persisted():
