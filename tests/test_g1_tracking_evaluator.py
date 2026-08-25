@@ -240,6 +240,12 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         )
         self.assertLess(validation, first_write)
 
+    def test_evaluation_artifact_keeps_full_simulator_state(self):
+        source = Path("tools/evaluate_g1_tracking.py").read_text()
+
+        self.assertIn("qpos=np.asarray(qpositions)", source)
+        self.assertIn("qvel=np.asarray(qvelocities)", source)
+
     def test_prepare_evaluation_action_matches_training_squash_boundary(self):
         from tools import evaluate_g1_tracking
 

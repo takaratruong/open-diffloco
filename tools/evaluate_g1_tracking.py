@@ -954,6 +954,8 @@ def main() -> None:
     effective_actions = []
     joint_positions = []
     joint_velocities = []
+    qpositions = []
+    qvelocities = []
     reference_joint_positions = []
     position_targets = []
     recovery_gates = []
@@ -975,6 +977,8 @@ def main() -> None:
 
     for step in range(step_limit):
         phase = int(state.info["phase"])
+        qpositions.append(np.asarray(state.data.qpos))
+        qvelocities.append(np.asarray(state.data.qvel))
         if step % args.render_every == 0:
             frames.append(
                 _render_pair(
@@ -1152,6 +1156,8 @@ def main() -> None:
         actor_joint_names=np.asarray(env.actor_joint_names),
         joint_position=np.asarray(joint_positions),
         joint_velocity=np.asarray(joint_velocities),
+        qpos=np.asarray(qpositions),
+        qvel=np.asarray(qvelocities),
         reference_joint_position=np.asarray(reference_joint_positions),
         position_target=np.asarray(position_targets),
         recovery_gate=np.asarray(recovery_gates),
