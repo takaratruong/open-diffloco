@@ -223,6 +223,53 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
                 ):
                     G1TrackingEnv(tracking_torso_orientation_weight=weight)
 
+    def test_root_velocity_weight_is_default_off_and_validated(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        shifted = G1TrackingEnv(tracking_root_velocity_weight=1.0)
+
+        self.assertEqual(self.env.tracking_root_velocity_weight, 0.0)
+        self.assertEqual(shifted.tracking_root_velocity_weight, 1.0)
+        for weight in (-1.0, float("nan"), float("inf"), True):
+            with self.subTest(weight=weight):
+                with self.assertRaisesRegex(
+                    ValueError, "tracking_root_velocity_weight"
+                ):
+                    G1TrackingEnv(tracking_root_velocity_weight=weight)
+
+    def test_environment_adds_only_explicit_root_velocity_term(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        legacy = G1TrackingEnv(tracking_root_velocity_weight=0.0)
+        treatment = G1TrackingEnv(tracking_root_velocity_weight=1.0)
+        phase = jnp.array(0)
+        body_pos = legacy.body_pos_reference[phase]
+        body_quat = legacy.body_quat_reference[phase]
+        body_lin_vel = legacy.body_lin_vel_reference[phase].at[0, 0].add(1.0)
+        body_ang_vel = legacy.body_ang_vel_reference[phase].at[0, 2].add(math.pi)
+
+        legacy_reward, legacy_components = legacy._tracking_reward_from_body_state(
+            {"phase": phase}, body_pos, body_quat, body_lin_vel, body_ang_vel
+        )
+        treatment_reward, treatment_components = (
+            treatment._tracking_reward_from_body_state(
+                {"phase": phase}, body_pos, body_quat, body_lin_vel, body_ang_vel
+            )
+        )
+
+        expected = 2.0 - math.sqrt(3.0)
+        self.assertNotIn("root_linear_velocity", legacy_components)
+        self.assertNotIn("root_angular_velocity", legacy_components)
+        self.assertAlmostEqual(
+            float(treatment_components["root_linear_velocity"]), expected, places=6
+        )
+        self.assertAlmostEqual(
+            float(treatment_components["root_angular_velocity"]), expected, places=6
+        )
+        self.assertAlmostEqual(
+            float(treatment_reward - legacy_reward), expected, places=6
+        )
+
     def test_environment_adds_only_the_direct_torso_orientation_term(self):
         from src.envs.g1_tracking.environment import G1TrackingEnv, _quat_mul
 

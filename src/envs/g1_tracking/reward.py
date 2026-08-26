@@ -48,6 +48,29 @@ def torso_orientation_tracking_reward(
     return 2.0 - jp.sqrt(1.0 + 2.0 * normalized_squared_error)
 
 
+def root_velocity_tracking_reward(
+    target_body_lin_vel: jax.Array,
+    actual_body_lin_vel: jax.Array,
+    target_body_ang_vel: jax.Array,
+    actual_body_ang_vel: jax.Array,
+    *,
+    root_body_slot: int = 0,
+) -> tuple[jax.Array, jax.Array]:
+    """Return non-saturating pelvis linear and angular velocity rewards."""
+    linear_error = _position_error(
+        target_body_lin_vel[..., root_body_slot, :],
+        actual_body_lin_vel[..., root_body_slot, :],
+    )
+    angular_error = _position_error(
+        target_body_ang_vel[..., root_body_slot, :],
+        actual_body_ang_vel[..., root_body_slot, :],
+    )
+    return (
+        _velocity_tracking_kernel(linear_error / 1.0**2, "pseudo_huber"),
+        _velocity_tracking_kernel(angular_error / jp.pi**2, "pseudo_huber"),
+    )
+
+
 def termination_margin_penalty(
     *,
     anchor_z_error: jax.Array,
