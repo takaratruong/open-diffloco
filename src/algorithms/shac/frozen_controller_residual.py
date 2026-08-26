@@ -15,6 +15,9 @@ from src.algorithms.shac.residual_preview_adapter import (
     PreviewResidualAdapter,
     current_treatment_frame,
 )
+from src.algorithms.shac.counterfactual_wrench_distillation import (
+    scatter_leg_residual,
+)
 
 
 PyTree = Any
@@ -43,6 +46,7 @@ def apply_frozen_controller_residual(
     *,
     history_len: int,
     frame_dim: int,
+    residual_action_indices: tuple[int, ...] | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Return complete-E026 action plus the new zero-head joint correction."""
     if not isinstance(params, FrozenControllerResidualParams) or not isinstance(
@@ -56,11 +60,17 @@ def apply_frozen_controller_residual(
         history_len=history_len,
         treatment_frame_dim=frame_dim,
     )
-    residual_action = adapter_actor.apply(params.adapter, frame)
-    if (
-        parent_action.shape != residual_action.shape
-        or parent_action.shape[-1] != 29
-    ):
+    adapter_action = adapter_actor.apply(params.adapter, frame)
+    residual_action = (
+        scatter_leg_residual(
+            adapter_action,
+            residual_action_indices,
+            action_dim=29,
+        )
+        if residual_action_indices is not None
+        else adapter_action
+    )
+    if parent_action.shape != residual_action.shape or parent_action.shape[-1] != 29:
         raise ValueError("frozen controller residual requires 29 actions")
     return parent_action + residual_action, parent_action, residual_action
 
@@ -76,6 +86,7 @@ def migrate_frozen_controller_residual(
     normalized_observations: jax.Array,
     history_len: int,
     frame_dim: int,
+    residual_action_indices: tuple[int, ...] | None = None,
 ) -> tuple[
     FrozenControllerResidualParams,
     FrozenControllerResidualOptState,
@@ -104,6 +115,7 @@ def migrate_frozen_controller_residual(
         normalized_observations,
         history_len=history_len,
         frame_dim=frame_dim,
+        residual_action_indices=residual_action_indices,
     )
     expected = parent_apply(parent_params, normalized_observations)
     report = {
