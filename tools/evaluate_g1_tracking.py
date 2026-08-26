@@ -14,6 +14,10 @@ import mujoco
 import numpy as np
 
 from src.algorithms.shac.algorithm import load_recovery_support_artifact
+from src.algorithms.shac.centroidal_objective import (
+    CentroidalWindowResult,
+    centroidal_window_objective,
+)
 from src.algorithms.shac.learned_torso_wrench import (
     FrozenControllerWrenchParams,
     LearnedTorsoWrenchHead,
@@ -34,6 +38,9 @@ from src.core.data_structures import Normalizer
 from src.core.networks import Actor
 from src.core.rmr_policy import apply_trainable_rmr_policy, bound_residual_action
 from src.envs.g1_tracking.environment import G1TrackingEnv
+from src.envs.g1_tracking.centroidal_momentum import (
+    mjx_centroidal_momentum,
+)
 from src.envs.g1_tracking.solver_profiles import (
     SOLVER_PROFILES,
     get_solver_profile,
@@ -1182,6 +1189,9 @@ def main() -> None:
     reference_required_forces_yaw = []
     torso_pitches = []
     applied_torso_forces = []
+    centroidal_momentum_states = []
+    reference_centroidal_momentum_states = []
+    centroidal_root_quaternions = []
 
     try:
         remaining = remaining_reference_transitions(
@@ -1199,6 +1209,22 @@ def main() -> None:
 
     for step in range(step_limit):
         phase = int(state.info["phase"])
+        centroidal_momentum_states.append(
+            np.asarray(
+                mjx_centroidal_momentum(
+                    env.mjx_model,
+                    state.data,
+                    env.root_body_id,
+                    env.nominal_total_mass,
+                )
+            )
+        )
+        reference_centroidal_momentum_states.append(
+            np.asarray(env.reference_centroidal_momentum[phase])
+        )
+        centroidal_root_quaternions.append(
+            np.asarray(state.data.xquat[env.anchor_body_id])
+        )
         qpositions.append(np.asarray(state.data.qpos))
         qvelocities.append(np.asarray(state.data.qvel))
         if step % args.render_every == 0:
@@ -1410,6 +1436,24 @@ def main() -> None:
         ):
             break
 
+    final_phase = int(state.info["phase"])
+    centroidal_momentum_states.append(
+        np.asarray(
+            mjx_centroidal_momentum(
+                env.mjx_model,
+                state.data,
+                env.root_body_id,
+                env.nominal_total_mass,
+            )
+        )
+    )
+    reference_centroidal_momentum_states.append(
+        np.asarray(env.reference_centroidal_momentum[final_phase])
+    )
+    centroidal_root_quaternions.append(
+        np.asarray(state.data.xquat[env.anchor_body_id])
+    )
+
     columns = (
         "step",
         "phase",
@@ -1429,6 +1473,27 @@ def main() -> None:
         "termination_distal_z_error",
     )
     values = np.asarray(records, dtype=np.float64)
+    if len(records) >= 4:
+        centroidal_result = centroidal_window_objective(
+            jnp.asarray(centroidal_momentum_states),
+            jnp.asarray(reference_centroidal_momentum_states),
+            jnp.asarray(centroidal_root_quaternions),
+            done=jnp.asarray(values[:, 3] > 0.5),
+            active=jnp.ones((len(records),), dtype=bool),
+            window=4,
+            linear_scale=env.centroidal_linear_scale,
+            angular_scale=env.centroidal_angular_scale,
+            delta=0.1,
+        )
+    else:
+        centroidal_result = CentroidalWindowResult(
+            loss=jnp.asarray(0.0),
+            valid_count=jnp.asarray(0, dtype=jnp.int32),
+            error=jnp.zeros((0, 6), dtype=jnp.float64),
+            normalized_error=jnp.zeros((0, 6), dtype=jnp.float64),
+            valid=jnp.zeros((0,), dtype=bool),
+            p99_forward_abs=jnp.asarray(0.0),
+        )
     propulsion_evidence = validate_propulsion_evidence(
         {
             "constraint_force_world": np.asarray(constraint_forces_world),
@@ -1478,6 +1543,18 @@ def main() -> None:
         reference_required_force_yaw=propulsion_evidence['reference_required_force_yaw'],
         torso_pitch=propulsion_evidence['torso_pitch'],
         applied_torso_force=propulsion_evidence['applied_torso_force'],
+        centroidal_momentum=np.asarray(centroidal_momentum_states),
+        reference_centroidal_momentum=np.asarray(
+            reference_centroidal_momentum_states
+        ),
+        centroidal_root_quaternion=np.asarray(
+            centroidal_root_quaternions
+        ),
+        centroidal_window_error=np.asarray(centroidal_result.error),
+        centroidal_window_error_normalized=np.asarray(
+            centroidal_result.normalized_error
+        ),
+        centroidal_window_valid=np.asarray(centroidal_result.valid),
     )
     rollout_name = (
         "training_rollout.mp4"
@@ -1586,6 +1663,25 @@ def main() -> None:
             else None
         ),
         "completed_reference_suffix": completed_suffix,
+        "centroidal_valid_window_count": int(
+            centroidal_result.valid_count
+        ),
+        "centroidal_p99_forward_abs": float(
+            centroidal_result.p99_forward_abs
+        ),
+        "centroidal_component_rms": np.sqrt(
+            np.sum(
+                np.where(
+                    np.asarray(centroidal_result.valid)[:, None],
+                    np.square(
+                        np.asarray(centroidal_result.normalized_error)
+                    ),
+                    0.0,
+                ),
+                axis=0,
+            )
+            / max(int(centroidal_result.valid_count), 1)
+        ).tolist(),
         "intermediate_reset_occurred": true_terminal,
         "controller": (
             "full_rmr_actor"
