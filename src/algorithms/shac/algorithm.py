@@ -7110,7 +7110,26 @@ def train(
         if actor_counterfactual_wrench_distillation and not bool(
             metrics["actor_counterfactual_valid"]
         ):
-            raise RuntimeError("counterfactual wrench telemetry is invalid")
+            counterfactual_failure = {
+                name: (
+                    int(metrics[f"actor_counterfactual_{name}"])
+                    if name in {"valid_count", "invalid_count"}
+                    else float(metrics[f"actor_counterfactual_{name}"])
+                )
+                for name in (
+                    "valid_count",
+                    "invalid_count",
+                    "loss",
+                    "normalized_error_rms",
+                    "residual_max_abs",
+                    "nonleg_max_abs",
+                    "student_wrench_max_abs",
+                )
+            }
+            raise RuntimeError(
+                "counterfactual wrench telemetry is invalid: "
+                f"{counterfactual_failure}"
+            )
         if actor_policy_anchor_weight > 0.0 and not np.isfinite(
             float(metrics["actor_policy_anchor_squared_error"])
         ):
