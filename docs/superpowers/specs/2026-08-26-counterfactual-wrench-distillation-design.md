@@ -89,13 +89,15 @@ weight `0.01`, and add residual temporal-change weight `0.001`. These constants
 are fixed before observing training and are not command-line sweep parameters.
 
 Retain the established reference-tracking objective and CAGrad phase bins. Add
-the counterfactual loss as one task rather than scalarizing it into the
-tracking reward. Regularize only the 12-D correction magnitude and temporal
-change. Do not add a phase, named-foot reward, capture reward, assistance
-schedule, replay, pushes, observation noise, or physics randomization.
+the counterfactual loss directly to the actor objective, not to the environment
+reward or critic target. Existing CAGrad continues to balance the five reset
+phase bins over that complete actor objective. Regularize only the 12-D
+correction magnitude and temporal change. Do not add a phase, named-foot
+reward, capture reward, assistance schedule, replay, pushes, observation
+noise, or physics randomization.
 
-The four-block counterfactual loss is one CAGrad task beside the unchanged
-tracking tasks. There is no weight sweep.
+The four-block counterfactual loss is one fixed actor-objective term. There is
+no weight sweep.
 
 ## Feasibility Discriminator
 

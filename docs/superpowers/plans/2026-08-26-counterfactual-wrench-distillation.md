@@ -4,7 +4,7 @@
 
 **Goal:** Train an exact-zero-wrench, strictly leg-only residual to reproduce the local closed-loop effect of the successful frozen E004 torso-wrench teacher.
 
-**Architecture:** Add a focused module for the canonical twelve-leg action scatter, counterfactual transition target, normalized loss, and feasibility projection. A guarded evaluator first tests whether the teacher effect is locally reachable through the legs. Only after that gate passes, extend the existing frozen-controller residual path with a 12-output adapter and one counterfactual CAGrad task, then run one fixed 32-update continuation and deterministic CPU selection.
+**Architecture:** Add a focused module for the canonical twelve-leg action scatter, counterfactual transition target, normalized loss, and feasibility projection. A guarded evaluator first tests whether the teacher effect is locally reachable through the legs. Only after that gate passes, extend the existing frozen-controller residual path with a 12-output adapter and a counterfactual actor-objective term while retaining five-phase CAGrad, then run one fixed 32-update continuation and deterministic CPU selection.
 
 **Tech Stack:** Python 3.11, JAX, MJX/MuJoCo, Flax, Optax, NumPy, pytest, Ruff, the existing SHAC trainer and research registry.
 
@@ -167,7 +167,7 @@ git commit -m "feat: add wrench-to-leg feasibility discriminator"
 
 **Interfaces:**
 - Consumes: Task 1 leg residual/objective, exact E004 teacher source path/SHA, fixed target RMS from Task 2, and the existing frozen-controller CAGrad path.
-- Produces: fail-closed `train()` flags, exact resume metadata, per-update counterfactual telemetry, and checkpoint-bound frozen/non-leg/zero-wrench audits.
+- Produces: fail-closed `train()` flags, exact resume metadata, per-update counterfactual telemetry, and checkpoint-bound frozen/non-leg/zero-wrench audits. The counterfactual term augments the actor objective; existing CAGrad continues to combine five phase-bin gradients of that complete objective.
 
 - [ ] **Step 1: Write failing train-interface and source-validation tests**
 
