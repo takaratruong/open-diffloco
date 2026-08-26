@@ -11,6 +11,7 @@ from src.envs.g1_tracking.centroidal_momentum import (
     capture_point_position,
     cpu_capture_point,
     mjx_capture_point,
+    reference_capture_points,
 )
 
 
@@ -94,3 +95,19 @@ def test_cpu_and_mjx_capture_points_match() -> None:
 
     np.testing.assert_allclose(differentiable, cpu, rtol=0.0, atol=1e-9)
 
+
+def test_reference_capture_points_preserve_frame_count() -> None:
+    model = _free_body_model()
+    qpos = np.tile(
+        np.asarray([0.2, -0.1, 0.8, 1.0, 0.0, 0.0, 0.0]), (3, 1)
+    )
+    qvel = np.tile(
+        np.asarray([0.7, -0.4, 0.1, 0.0, 0.0, 0.0]), (3, 1)
+    )
+
+    result = reference_capture_points(model, qpos, qvel, root_body_id=1)
+
+    assert result.shape == (3, 2)
+    np.testing.assert_allclose(
+        result[1:], np.repeat(result[:1], 2, axis=0), rtol=0.0, atol=0.0
+    )

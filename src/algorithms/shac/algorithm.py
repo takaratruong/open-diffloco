@@ -160,7 +160,11 @@ from src.envs.g1_tracking.training_distribution import (
     update_phase_sampler,
 )
 from src.envs.g1_tracking.centroidal_momentum import (
+    mjx_capture_point,
     mjx_centroidal_momentum,
+)
+from src.algorithms.shac.capture_point_objective import (
+    capture_point_objective,
 )
 
 
@@ -1029,6 +1033,73 @@ def validate_centroidal_propulsion_configuration(
         raise ValueError("centroidal window does not fit the actor horizon")
     if not env_variant.startswith("g1_tracking"):
         raise ValueError("centroidal propulsion requires G1 tracking")
+
+
+def resolve_capture_point_tracking_resume_settings(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested_enabled: bool,
+    requested_delta: float,
+    requested_weight: float,
+    allow_start: bool,
+    is_resume: bool,
+) -> tuple[bool, float, float, bool]:
+    """Resolve one explicit capture-point treatment over frozen E026."""
+    if not isinstance(requested_enabled, bool) or not isinstance(allow_start, bool):
+        raise ValueError("capture-point tracking settings must be boolean")
+    if requested_delta != 0.1:
+        raise ValueError("capture-point delta must equal the registered 0.1")
+    if not math.isfinite(requested_weight) or requested_weight <= 0.0:
+        raise ValueError("capture-point weight must be positive and finite")
+    if not is_resume:
+        if requested_enabled:
+            raise ValueError("capture-point tracking requires an E026 resume")
+        return False, 0.1, requested_weight, False
+    if resumed_hparams is None:
+        raise ValueError("capture-point tracking resume hparams are required")
+    saved = resumed_hparams.get("actor_capture_point_tracking", False)
+    if not isinstance(saved, bool):
+        raise ValueError("saved capture-point tracking setting is invalid")
+    upgrade = bool(requested_enabled and not saved)
+    if upgrade and not allow_start:
+        raise ValueError("capture-point tracking requires explicit authority")
+    if saved != requested_enabled and not upgrade:
+        raise ValueError("capture-point tracking must match the checkpoint")
+    if saved:
+        saved_contract = (
+            resumed_hparams.get("actor_capture_point_delta"),
+            resumed_hparams.get("actor_capture_point_weight"),
+        )
+        if saved_contract != (0.1, requested_weight):
+            raise ValueError("saved capture-point tracking contract is invalid")
+    return requested_enabled, 0.1, requested_weight, upgrade
+
+
+def validate_capture_point_tracking_configuration(
+    *,
+    enabled: bool,
+    delta: float,
+    weight: float,
+    frozen_controller_residual: bool,
+    actor_residual_preview_adapter: bool,
+    torso_wrench_assistance: bool,
+    actor_learned_torso_wrench: bool,
+    unroll_length: int,
+    env_variant: str,
+) -> None:
+    """Fail closed around the unassisted capture-point treatment."""
+    if not enabled:
+        return
+    if delta != 0.1 or not math.isfinite(weight) or weight <= 0.0:
+        raise ValueError("capture-point tracking contract is invalid")
+    if not frozen_controller_residual or not actor_residual_preview_adapter:
+        raise ValueError("capture-point tracking requires frozen complete E026")
+    if torso_wrench_assistance or actor_learned_torso_wrench:
+        raise ValueError("capture-point tracking requires exact-zero torso wrench")
+    if unroll_length != 24:
+        raise ValueError("capture-point tracking requires the E026 H24 horizon")
+    if not env_variant.startswith("g1_tracking"):
+        raise ValueError("capture-point tracking requires G1 tracking")
 
 
 def select_initial_training_state(*, initialized_state, resumed_state):
@@ -2067,6 +2138,10 @@ def train(
     actor_centroidal_delta: float = 0.1,
     actor_centroidal_weight: float = 1.0,
     allow_resume_actor_centroidal_propulsion_start: bool = False,
+    actor_capture_point_tracking: bool = False,
+    actor_capture_point_delta: float = 0.1,
+    actor_capture_point_weight: float = 1.0,
+    allow_resume_actor_capture_point_tracking_start: bool = False,
     actor_residual_preview_initial_adapter_path: str | None = None,
     actor_residual_preview_initial_adapter_sha256: str | None = None,
     actor_recovery_teacher_dataset_path: str | None = None,
@@ -2386,6 +2461,17 @@ def train(
         window=actor_centroidal_window,
         delta=actor_centroidal_delta,
         weight=actor_centroidal_weight,
+        frozen_controller_residual=actor_frozen_controller_residual,
+        actor_residual_preview_adapter=actor_residual_preview_adapter,
+        torso_wrench_assistance=torso_wrench_assistance,
+        actor_learned_torso_wrench=actor_learned_torso_wrench,
+        unroll_length=unroll_length,
+        env_variant=env_variant,
+    )
+    validate_capture_point_tracking_configuration(
+        enabled=actor_capture_point_tracking,
+        delta=actor_capture_point_delta,
+        weight=actor_capture_point_weight,
         frozen_controller_residual=actor_frozen_controller_residual,
         actor_residual_preview_adapter=actor_residual_preview_adapter,
         torso_wrench_assistance=torso_wrench_assistance,
@@ -2723,6 +2809,19 @@ def train(
             requested_delta=actor_centroidal_delta,
             requested_weight=actor_centroidal_weight,
             allow_start=allow_resume_actor_centroidal_propulsion_start,
+            is_resume=True,
+        )
+        (
+            actor_capture_point_tracking,
+            actor_capture_point_delta,
+            actor_capture_point_weight,
+            _capture_point_upgrade,
+        ) = resolve_capture_point_tracking_resume_settings(
+            resumed_hparams,
+            requested_enabled=actor_capture_point_tracking,
+            requested_delta=actor_capture_point_delta,
+            requested_weight=actor_capture_point_weight,
+            allow_start=allow_resume_actor_capture_point_tracking_start,
             is_resume=True,
         )
         (
@@ -4001,6 +4100,21 @@ def train(
                         ],
                     }
                 )
+            if actor_capture_point_tracking:
+                transition.update(
+                    {
+                        "capture_point": mjx_capture_point(
+                            env.mjx_model,
+                            state.data,
+                            env.root_body_id,
+                            env.nominal_total_mass,
+                            env.centroidal_gravity,
+                        ),
+                        "reference_capture_point": env.reference_capture_point[
+                            state.info["phase"]
+                        ],
+                    }
+                )
             if recovery_support is not None:
                 transition["recovery_gate"] = recovery_gate
                 transition["gated_residual_action"] = _residual_action
@@ -4099,6 +4213,38 @@ def train(
                 ),
                 "actor_centroidal_component_rms": component_rms,
             }
+        capture_point_result = None
+        if actor_capture_point_tracking:
+            capture_point_result = capture_point_objective(
+                traj["capture_point"],
+                traj["reference_capture_point"],
+                active=traj["ahac_active"],
+                standing_height=env.standing_com_height,
+                delta=actor_capture_point_delta,
+            )
+            valid_denominator = jp.maximum(
+                capture_point_result.valid_count, 1
+            ).astype(capture_point_result.error.dtype)
+            component_rms = jp.sqrt(
+                jp.sum(
+                    jp.where(
+                        capture_point_result.valid[:, None],
+                        jp.square(capture_point_result.normalized_error),
+                        0.0,
+                    ),
+                    axis=0,
+                )
+                / valid_denominator
+            )
+            traj = {
+                **traj,
+                "actor_capture_point_loss": capture_point_result.loss,
+                "actor_capture_point_valid_count": (
+                    capture_point_result.valid_count
+                ),
+                "actor_capture_point_p99_norm": capture_point_result.p99_norm,
+                "actor_capture_point_component_rms": component_rms,
+            }
 
         bootstrap_obs = critic_norm.normalize(
             critic_norm_state, traj["bootstrap_critic_obs"]
@@ -4163,6 +4309,11 @@ def train(
             actor_objective = (
                 actor_objective
                 + actor_centroidal_weight * centroidal_result.loss
+            )
+        if capture_point_result is not None:
+            actor_objective = (
+                actor_objective
+                + actor_capture_point_weight * capture_point_result.loss
             )
         return actor_objective, (traj, final_state)
 
@@ -5457,6 +5608,28 @@ def train(
                     ),
                 }
             )
+        if actor_capture_point_tracking:
+            metrics.update(
+                {
+                    "actor_capture_point_loss": jp.mean(
+                        trajs["actor_capture_point_loss"]
+                    ),
+                    "actor_capture_point_valid_count": jp.sum(
+                        trajs["actor_capture_point_valid_count"]
+                    ),
+                    "actor_capture_point_p99_norm": jp.max(
+                        trajs["actor_capture_point_p99_norm"]
+                    ),
+                    "actor_capture_point_component_rms": jp.sqrt(
+                        jp.mean(
+                            jp.square(
+                                trajs["actor_capture_point_component_rms"]
+                            ),
+                            axis=0,
+                        )
+                    ),
+                }
+            )
         if adaptive_phase_sampling:
             metrics.update(
                 {
@@ -6212,6 +6385,9 @@ def train(
         "actor_centroidal_window": actor_centroidal_window,
         "actor_centroidal_delta": actor_centroidal_delta,
         "actor_centroidal_weight": actor_centroidal_weight,
+        "actor_capture_point_tracking": actor_capture_point_tracking,
+        "actor_capture_point_delta": actor_capture_point_delta,
+        "actor_capture_point_weight": actor_capture_point_weight,
         "actor_residual_preview_initial_adapter_path": (
             actor_residual_preview_initial_adapter_path
         ),

@@ -19,6 +19,7 @@ from src.envs.g1_tracking.contact_topology import (
 )
 from src.envs.g1_tracking.controller import load_rmr_controller
 from src.envs.g1_tracking.centroidal_momentum import (
+    reference_capture_points,
     reference_centroidal_momentum,
     standing_com_height,
 )
@@ -493,6 +494,14 @@ class G1TrackingEnv:
             self.root_body_id,
         )
         self.reference_centroidal_momentum = jp.asarray(reference_momentum)
+        self.reference_capture_point = jp.asarray(
+            reference_capture_points(
+                self.mj_model,
+                self.reference.qpos,
+                self.reference.qvel,
+                self.root_body_id,
+            )
+        )
         self.standing_com_height = standing_com_height(
             self.mj_model, self.mj_model.qpos0, self.root_body_id
         )
@@ -502,6 +511,7 @@ class G1TrackingEnv:
         centroidal_gravity = float(
             np.linalg.norm(self.mj_model.opt.gravity)
         )
+        self.centroidal_gravity = centroidal_gravity
         velocity_scale = math.sqrt(
             centroidal_gravity * self.standing_com_height
         )
@@ -511,6 +521,7 @@ class G1TrackingEnv:
         )
         if (
             not np.isfinite(self.reference_centroidal_momentum).all()
+            or not np.isfinite(self.reference_capture_point).all()
             or not math.isfinite(self.centroidal_linear_scale)
             or not math.isfinite(self.centroidal_angular_scale)
             or self.centroidal_linear_scale <= 0.0

@@ -233,6 +233,31 @@ def reference_centroidal_momentum(
     )
 
 
+def reference_capture_points(
+    model: mujoco.MjModel,
+    qpos: np.ndarray,
+    qvel: np.ndarray,
+    root_body_id: int,
+) -> np.ndarray:
+    """Precompute one CPU capture-point row per reference frame."""
+    positions = np.asarray(qpos, dtype=np.float64)
+    velocities = np.asarray(qvel, dtype=np.float64)
+    if (
+        positions.ndim != 2
+        or positions.shape[1] != model.nq
+        or velocities.shape != (positions.shape[0], model.nv)
+        or positions.shape[0] < 1
+    ):
+        raise ValueError("reference qpos/qvel arrays do not align")
+    return np.stack(
+        tuple(
+            cpu_capture_point(model, position, velocity, root_body_id)
+            for position, velocity in zip(positions, velocities)
+        ),
+        axis=0,
+    )
+
+
 def standing_com_height(
     model: mujoco.MjModel, qpos: np.ndarray, root_body_id: int
 ) -> float:
