@@ -186,3 +186,23 @@ def test_capture_point_treatment_rejects_assistance_and_unfrozen_parent() -> Non
             validate_capture_point_tracking_configuration(
                 **{**valid, **change}
             )
+
+
+def test_first_nested_residual_update_must_be_finite_and_nonzero() -> None:
+    from src.algorithms.shac.algorithm import (
+        validate_first_frozen_controller_update,
+    )
+
+    validate_first_frozen_controller_update(
+        gradient_norm=1.0, update_norm=0.5
+    )
+    for gradient, update in (
+        (0.0, 1.0),
+        (1.0, 0.0),
+        (float("nan"), 1.0),
+        (1.0, float("inf")),
+    ):
+        with pytest.raises(RuntimeError, match="finite and nonzero"):
+            validate_first_frozen_controller_update(
+                gradient_norm=gradient, update_norm=update
+            )

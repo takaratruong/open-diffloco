@@ -1102,6 +1102,23 @@ def validate_capture_point_tracking_configuration(
         raise ValueError("capture-point tracking requires G1 tracking")
 
 
+def validate_first_frozen_controller_update(
+    *, gradient_norm: float, update_norm: float
+) -> None:
+    """Reject a dead/nonfinite first update before a treatment can continue."""
+    values = (gradient_norm, update_norm)
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) <= 0.0
+        for value in values
+    ):
+        raise RuntimeError(
+            "first frozen-controller residual update must be finite and nonzero"
+        )
+
+
 def select_initial_training_state(*, initialized_state, resumed_state):
     """Select the full saved state for an exact continuation."""
     return resumed_state if resumed_state is not None else initialized_state
@@ -6583,6 +6600,11 @@ def train(
             raise RuntimeError("actor recovery teacher telemetry is invalid")
         if frozen_preview_treatment and not bool(metrics["actor_preview_valid"]):
             raise RuntimeError("actor preview adapter telemetry is invalid")
+        if actor_frozen_controller_residual and i == start_iter:
+            validate_first_frozen_controller_update(
+                gradient_norm=float(metrics["actor_preview_gradient_norm"]),
+                update_norm=float(metrics["actor_preview_update_norm"]),
+            )
         if recovery_support is not None and not bool(
             metrics["actor_recovery_valid"]
         ):
