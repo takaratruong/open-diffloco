@@ -98,6 +98,16 @@ from src.algorithms.shac.future_reference_migration import (
     migrate_future_reference_train_state,
     validate_future_reference_migration_report,
 )
+from src.algorithms.shac.centroidal_objective import (
+    centroidal_window_objective,
+)
+from src.algorithms.shac.frozen_controller_residual import (
+    FrozenControllerResidualOptState,
+    FrozenControllerResidualParams,
+    apply_frozen_controller_residual,
+    migrate_frozen_controller_residual,
+    update_frozen_controller_residual,
+)
 from src.algorithms.shac.preview_adapter import (
     apply_preview_adapter_update,
     build_current_preview_mask,
@@ -148,6 +158,9 @@ from src.envs.g1_tracking.training_distribution import (
     init_phase_sampler,
     phase_sampling_probabilities,
     update_phase_sampler,
+)
+from src.envs.g1_tracking.centroidal_momentum import (
+    mjx_centroidal_momentum,
 )
 
 
@@ -909,6 +922,113 @@ def resolve_residual_preview_adapter_resume_setting(
             "actor residual preview settings must match the checkpoint"
         )
     return saved, int(saved_hidden), saved_optimizer
+
+
+def resolve_frozen_controller_residual_resume_setting(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested: bool,
+    requested_hidden: int,
+    allow_start: bool,
+    is_resume: bool,
+) -> tuple[bool, int, bool]:
+    """Resolve one explicit nested-residual upgrade over complete E026."""
+    if not isinstance(requested, bool) or not isinstance(allow_start, bool):
+        raise ValueError("frozen controller residual settings must be boolean")
+    if (
+        isinstance(requested_hidden, bool)
+        or not isinstance(requested_hidden, int)
+        or requested_hidden < 1
+    ):
+        raise ValueError("frozen controller residual hidden width is invalid")
+    if not is_resume:
+        if requested:
+            raise ValueError("frozen controller residual requires an E026 resume")
+        return False, requested_hidden, False
+    if resumed_hparams is None:
+        raise ValueError("frozen controller residual resume hparams are required")
+    saved = resumed_hparams.get("actor_frozen_controller_residual", False)
+    if not isinstance(saved, bool):
+        raise ValueError("saved frozen controller residual setting is invalid")
+    saved_hidden = resumed_hparams.get(
+        "actor_frozen_controller_residual_hidden", requested_hidden
+    )
+    upgrade = bool(requested and not saved)
+    if upgrade and not allow_start:
+        raise ValueError("frozen controller residual requires explicit authority")
+    if saved != requested and not upgrade:
+        raise ValueError("frozen controller residual must match the checkpoint")
+    if saved and saved_hidden != requested_hidden:
+        raise ValueError("frozen controller residual width must match the checkpoint")
+    return requested, requested_hidden, upgrade
+
+
+def resolve_centroidal_propulsion_resume_settings(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested_enabled: bool,
+    requested_window: int,
+    requested_delta: float,
+    requested_weight: float,
+    allow_start: bool,
+    is_resume: bool,
+) -> tuple[bool, int, float, float, bool]:
+    """Resolve the single registered four-step propulsion treatment."""
+    if not isinstance(requested_enabled, bool) or not isinstance(allow_start, bool):
+        raise ValueError("centroidal propulsion settings must be boolean")
+    if requested_window != 4 or requested_delta != 0.1 or requested_weight != 1.0:
+        raise ValueError("centroidal propulsion settings must match the registry")
+    if not is_resume:
+        if requested_enabled:
+            raise ValueError("centroidal propulsion requires an E026 resume")
+        return False, 4, 0.1, 1.0, False
+    if resumed_hparams is None:
+        raise ValueError("centroidal propulsion resume hparams are required")
+    saved = resumed_hparams.get("actor_centroidal_propulsion", False)
+    if not isinstance(saved, bool):
+        raise ValueError("saved centroidal propulsion setting is invalid")
+    upgrade = bool(requested_enabled and not saved)
+    if upgrade and not allow_start:
+        raise ValueError("centroidal propulsion requires explicit authority")
+    if saved != requested_enabled and not upgrade:
+        raise ValueError("centroidal propulsion must match the checkpoint")
+    if saved:
+        saved_contract = (
+            resumed_hparams.get("actor_centroidal_window"),
+            resumed_hparams.get("actor_centroidal_delta"),
+            resumed_hparams.get("actor_centroidal_weight"),
+        )
+        if saved_contract != (4, 0.1, 1.0):
+            raise ValueError("saved centroidal propulsion contract is invalid")
+    return requested_enabled, 4, 0.1, 1.0, upgrade
+
+
+def validate_centroidal_propulsion_configuration(
+    *,
+    enabled: bool,
+    window: int,
+    delta: float,
+    weight: float,
+    frozen_controller_residual: bool,
+    actor_residual_preview_adapter: bool,
+    torso_wrench_assistance: bool,
+    actor_learned_torso_wrench: bool,
+    unroll_length: int,
+    env_variant: str,
+) -> None:
+    """Fail closed around the preregistered unassisted G1 treatment."""
+    if not enabled:
+        return
+    if (window, delta, weight) != (4, 0.1, 1.0):
+        raise ValueError("centroidal propulsion contract is not registered")
+    if not frozen_controller_residual or not actor_residual_preview_adapter:
+        raise ValueError("centroidal propulsion requires frozen complete E026")
+    if torso_wrench_assistance or actor_learned_torso_wrench:
+        raise ValueError("centroidal propulsion requires exact-zero torso wrench")
+    if unroll_length < window:
+        raise ValueError("centroidal window does not fit the actor horizon")
+    if not env_variant.startswith("g1_tracking"):
+        raise ValueError("centroidal propulsion requires G1 tracking")
 
 
 def select_initial_training_state(*, initialized_state, resumed_state):
@@ -1939,6 +2059,14 @@ def train(
     actor_residual_preview_hidden: int = 256,
     actor_residual_preview_optimizer: str = "adam",
     allow_resume_actor_residual_preview_adapter_start: bool = False,
+    actor_frozen_controller_residual: bool = False,
+    actor_frozen_controller_residual_hidden: int = 256,
+    allow_resume_actor_frozen_controller_residual_start: bool = False,
+    actor_centroidal_propulsion: bool = False,
+    actor_centroidal_window: int = 4,
+    actor_centroidal_delta: float = 0.1,
+    actor_centroidal_weight: float = 1.0,
+    allow_resume_actor_centroidal_propulsion_start: bool = False,
     actor_residual_preview_initial_adapter_path: str | None = None,
     actor_residual_preview_initial_adapter_sha256: str | None = None,
     actor_recovery_teacher_dataset_path: str | None = None,
@@ -2253,6 +2381,18 @@ def train(
         initial_full_actor_policy=initial_full_actor_policy,
         env_variant=env_variant,
     )
+    validate_centroidal_propulsion_configuration(
+        enabled=actor_centroidal_propulsion,
+        window=actor_centroidal_window,
+        delta=actor_centroidal_delta,
+        weight=actor_centroidal_weight,
+        frozen_controller_residual=actor_frozen_controller_residual,
+        actor_residual_preview_adapter=actor_residual_preview_adapter,
+        torso_wrench_assistance=torso_wrench_assistance,
+        actor_learned_torso_wrench=actor_learned_torso_wrench,
+        unroll_length=unroll_length,
+        env_variant=env_variant,
+    )
     if not isinstance(adaptive_phase_sampling, bool):
         raise ValueError("adaptive_phase_sampling must be boolean")
     if (
@@ -2480,6 +2620,8 @@ def train(
     resumed_hparams = None
     future_reference_upgrade = False
     residual_adapter_upgrade = False
+    frozen_controller_residual_upgrade = False
+    centroidal_propulsion_upgrade = False
     reference_path_migration_report = None
     recovery_support = None
     recovery_support_report = None
@@ -2556,6 +2698,32 @@ def train(
             allow_start=(
                 allow_resume_actor_residual_preview_adapter_start
             ),
+        )
+        (
+            actor_frozen_controller_residual,
+            actor_frozen_controller_residual_hidden,
+            frozen_controller_residual_upgrade,
+        ) = resolve_frozen_controller_residual_resume_setting(
+            resumed_hparams,
+            requested=actor_frozen_controller_residual,
+            requested_hidden=actor_frozen_controller_residual_hidden,
+            allow_start=allow_resume_actor_frozen_controller_residual_start,
+            is_resume=True,
+        )
+        (
+            actor_centroidal_propulsion,
+            actor_centroidal_window,
+            actor_centroidal_delta,
+            actor_centroidal_weight,
+            centroidal_propulsion_upgrade,
+        ) = resolve_centroidal_propulsion_resume_settings(
+            resumed_hparams,
+            requested_enabled=actor_centroidal_propulsion,
+            requested_window=actor_centroidal_window,
+            requested_delta=actor_centroidal_delta,
+            requested_weight=actor_centroidal_weight,
+            allow_start=allow_resume_actor_centroidal_propulsion_start,
+            is_resume=True,
         )
         (
             actor_policy_anchor_source_path,
@@ -3194,6 +3362,10 @@ def train(
         action_dim=env.action_dim,
         hidden_dim=actor_residual_preview_hidden,
     )
+    frozen_controller_residual_actor = PreviewResidualAdapter(
+        action_dim=env.action_dim,
+        hidden_dim=actor_frozen_controller_residual_hidden,
+    )
     learned_torso_wrench_actor = LearnedTorsoWrenchHead(
         hidden_dim=actor_learned_torso_wrench_hidden,
         condition_on_scale=actor_learned_torso_wrench_condition_on_scale,
@@ -3229,7 +3401,9 @@ def train(
     preview_legacy_frame_dim = 0
     preview_trainable_parameter_count = 0
     frozen_preview_treatment = bool(
-        actor_preview_adapter or actor_residual_preview_adapter
+        actor_preview_adapter
+        or actor_residual_preview_adapter
+        or actor_frozen_controller_residual
     )
     residual_muon_treatment = bool(
         actor_residual_preview_adapter
@@ -3497,7 +3671,30 @@ def train(
                 else actor_params
             )
             residual_logits = None
-            if actor_residual_preview_adapter:
+            if actor_frozen_controller_residual:
+                def frozen_parent_apply(parent_params, observations):
+                    return apply_frozen_preview_residual(
+                        actor,
+                        residual_preview_actor,
+                        parent_params,
+                        observations,
+                        history_len=actor_history_len,
+                        treatment_frame_dim=env.actor_frame_obs_dim,
+                    )[0]
+
+                action, parent_action, _residual_action = (
+                    apply_frozen_controller_residual(
+                        frozen_parent_apply,
+                        frozen_controller_residual_actor,
+                        controller_actor_params,
+                        obs_norm,
+                        history_len=actor_history_len,
+                        frame_dim=env.actor_frame_obs_dim,
+                    )
+                )
+                action = action.astype(jp.float64)
+                parent_action = parent_action.astype(jp.float64)
+            elif actor_residual_preview_adapter:
                 if recovery_support is not None:
                     (
                         action,
@@ -3556,7 +3753,7 @@ def train(
                     parent_action = actor.apply(
                         actor_params, parent_obs
                     ).astype(jp.float64)
-            if actor_residual_preview_adapter:
+            if actor_frozen_controller_residual or actor_residual_preview_adapter:
                 pass
             elif initial_full_actor_policy is not None:
                 action = apply_trainable_rmr_policy(
@@ -3785,6 +3982,25 @@ def train(
                         "transition_phase": transition_phase,
                     }
                 )
+            if actor_centroidal_propulsion:
+                transition.update(
+                    {
+                        "centroidal_momentum": mjx_centroidal_momentum(
+                            env.mjx_model,
+                            state.data,
+                            env.root_body_id,
+                            env.nominal_total_mass,
+                        ),
+                        "reference_centroidal_momentum": (
+                            env.reference_centroidal_momentum[
+                                state.info["phase"]
+                            ]
+                        ),
+                        "root_quaternion": state.data.xquat[
+                            env.anchor_body_id
+                        ],
+                    }
+                )
             if recovery_support is not None:
                 transition["recovery_gate"] = recovery_gate
                 transition["gated_residual_action"] = _residual_action
@@ -3819,6 +4035,70 @@ def train(
         final_state = final_state.replace(
             info={**final_state.info, "foot_bump_ou": final_foot_bump_ou}
         )
+        centroidal_result = None
+        if actor_centroidal_propulsion:
+            final_centroidal = mjx_centroidal_momentum(
+                env.mjx_model,
+                final_state.data,
+                env.root_body_id,
+                env.nominal_total_mass,
+            )
+            actual_momentum = jp.concatenate(
+                (traj["centroidal_momentum"], final_centroidal[None]),
+                axis=0,
+            )
+            reference_momentum = jp.concatenate(
+                (
+                    traj["reference_centroidal_momentum"],
+                    env.reference_centroidal_momentum[
+                        final_state.info["phase"]
+                    ][None],
+                ),
+                axis=0,
+            )
+            root_quaternion = jp.concatenate(
+                (
+                    traj["root_quaternion"],
+                    final_state.data.xquat[env.anchor_body_id][None],
+                ),
+                axis=0,
+            )
+            centroidal_result = centroidal_window_objective(
+                actual_momentum,
+                reference_momentum,
+                root_quaternion,
+                done=traj["done"],
+                active=traj["ahac_active"],
+                window=actor_centroidal_window,
+                linear_scale=env.centroidal_linear_scale,
+                angular_scale=env.centroidal_angular_scale,
+                delta=actor_centroidal_delta,
+            )
+            valid_denominator = jp.maximum(
+                centroidal_result.valid_count, 1
+            ).astype(centroidal_result.error.dtype)
+            component_rms = jp.sqrt(
+                jp.sum(
+                    jp.where(
+                        centroidal_result.valid[:, None],
+                        jp.square(centroidal_result.normalized_error),
+                        0.0,
+                    ),
+                    axis=0,
+                )
+                / valid_denominator
+            )
+            traj = {
+                **traj,
+                "actor_centroidal_loss": centroidal_result.loss,
+                "actor_centroidal_valid_window_count": (
+                    centroidal_result.valid_count
+                ),
+                "actor_centroidal_p99_forward_abs": (
+                    centroidal_result.p99_forward_abs
+                ),
+                "actor_centroidal_component_rms": component_rms,
+            }
 
         bootstrap_obs = critic_norm.normalize(
             critic_norm_state, traj["bootstrap_critic_obs"]
@@ -3878,7 +4158,13 @@ def train(
         anchor_loss = (
             jp.sum(traj["actor_policy_anchor_penalty"]) / active_count
         )
-        return -total_ret / active_count + anchor_loss, (traj, final_state)
+        actor_objective = -total_ret / active_count + anchor_loss
+        if centroidal_result is not None:
+            actor_objective = (
+                actor_objective
+                + actor_centroidal_weight * centroidal_result.loss
+            )
+        return actor_objective, (traj, final_state)
 
     def critic_fit_from_data(
         critic_params,
@@ -4372,7 +4658,20 @@ def train(
 
         actor_grad_norm = compute_grad_norm(grads)
 
-        if (
+        if actor_frozen_controller_residual:
+            updates, new_actor_opt = update_frozen_controller_residual(
+                gradients=grads,
+                optimizer_state=state.actor_opt,
+                params=state.actor_params,
+                adapter_optimizer=actor_opt,
+            )
+            preview_update_diagnostics = {
+                "preview_gradient_norm": compute_grad_norm(grads.adapter),
+                "preview_update_norm": compute_grad_norm(updates.adapter),
+                "frozen_update_max_abs": jp.asarray(0.0),
+                "frozen_moment_drift_max_abs": jp.asarray(0.0),
+            }
+        elif (
             actor_residual_preview_adapter
             and actor_residual_preview_optimizer == "muon"
         ):
@@ -5136,6 +5435,28 @@ def train(
                         ],
                     }
                 )
+        if actor_centroidal_propulsion:
+            metrics.update(
+                {
+                    "actor_centroidal_loss": jp.mean(
+                        trajs["actor_centroidal_loss"]
+                    ),
+                    "actor_centroidal_valid_window_count": jp.sum(
+                        trajs["actor_centroidal_valid_window_count"]
+                    ),
+                    "actor_centroidal_p99_forward_abs": jp.max(
+                        trajs["actor_centroidal_p99_forward_abs"]
+                    ),
+                    "actor_centroidal_component_rms": jp.sqrt(
+                        jp.mean(
+                            jp.square(
+                                trajs["actor_centroidal_component_rms"]
+                            ),
+                            axis=0,
+                        )
+                    ),
+                }
+            )
         if adaptive_phase_sampling:
             metrics.update(
                 {
@@ -5469,6 +5790,67 @@ def train(
                     policy_anchor_source_params,
                     resumed_state.actor_params,
                 )
+        if actor_frozen_controller_residual:
+            if frozen_controller_residual_upgrade:
+                if not isinstance(
+                    resumed_state.actor_params, FrozenPreviewResidualParams
+                ):
+                    raise ValueError(
+                        "frozen controller residual requires complete E026"
+                    )
+                normalized_observations = env.normalize_actor_obs(
+                    actor_norm,
+                    resumed_state.normalizer,
+                    resumed_state.env_state.obs,
+                ).astype(jp.float32)
+
+                def frozen_parent_apply(parent_params, observations):
+                    return apply_frozen_preview_residual(
+                        actor,
+                        residual_preview_actor,
+                        parent_params,
+                        observations,
+                        history_len=actor_history_len,
+                        treatment_frame_dim=env.actor_frame_obs_dim,
+                    )[0]
+
+                (
+                    nested_params,
+                    nested_optimizer_state,
+                    frozen_controller_report,
+                ) = migrate_frozen_controller_residual(
+                    parent_params=resumed_state.actor_params,
+                    parent_optimizer_state=resumed_state.actor_opt,
+                    parent_apply=frozen_parent_apply,
+                    adapter_actor=frozen_controller_residual_actor,
+                    adapter_optimizer=actor_opt,
+                    rng=jax.random.fold_in(k1, 0x434D),
+                    normalized_observations=normalized_observations,
+                    history_len=actor_history_len,
+                    frame_dim=env.actor_frame_obs_dim,
+                )
+                if not frozen_controller_report["valid"]:
+                    raise ValueError(
+                        "frozen controller residual migration is invalid"
+                    )
+                resumed_state = resumed_state.replace(
+                    actor_params=nested_params,
+                    actor_opt=nested_optimizer_state,
+                )
+            elif not isinstance(
+                resumed_state.actor_params, FrozenControllerResidualParams
+            ) or not isinstance(
+                resumed_state.actor_opt, FrozenControllerResidualOptState
+            ):
+                raise ValueError(
+                    "resumed frozen controller residual state is invalid"
+                )
+            preview_trainable_parameter_count = sum(
+                int(np.asarray(leaf).size)
+                for leaf in jax.tree.leaves(
+                    resumed_state.actor_params.adapter
+                )
+            )
         if actor_learned_torso_wrench:
             if isinstance(
                 resumed_state.actor_params, FrozenControllerWrenchParams
@@ -5820,6 +6202,16 @@ def train(
         "actor_residual_preview_optimizer": (
             actor_residual_preview_optimizer
         ),
+        "actor_frozen_controller_residual": (
+            actor_frozen_controller_residual
+        ),
+        "actor_frozen_controller_residual_hidden": (
+            actor_frozen_controller_residual_hidden
+        ),
+        "actor_centroidal_propulsion": actor_centroidal_propulsion,
+        "actor_centroidal_window": actor_centroidal_window,
+        "actor_centroidal_delta": actor_centroidal_delta,
+        "actor_centroidal_weight": actor_centroidal_weight,
         "actor_residual_preview_initial_adapter_path": (
             actor_residual_preview_initial_adapter_path
         ),
@@ -5951,7 +6343,9 @@ def train(
             allow_resume_actor_policy_anchor_source_change
         ),
         "actor_kind": (
-            "flax_residual_preview"
+            "flax_frozen_controller_residual"
+            if actor_frozen_controller_residual
+            else "flax_residual_preview"
             if actor_residual_preview_adapter
             else "full_rmr"
             if initial_full_actor_policy is not None
