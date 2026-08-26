@@ -77,6 +77,32 @@ def test_leg_residual_bounds_are_head_bounds_not_total_action_bounds() -> None:
     np.testing.assert_array_equal(upper, np.full(12, 1.0))
 
 
+def test_projection_solves_coupled_bounds_instead_of_clipping_unconstrained() -> None:
+    coupled = np.asarray(
+        [
+            [-1.16512014, -0.90826511, 0.44977710],
+            [-3.19734539, -1.09267866, 0.79548408],
+            [-0.58673992, -1.62648313, 1.92556666],
+            [-1.41053516, -0.52336555, -0.37273150],
+        ]
+    )
+    jacobian = np.eye(12)
+    jacobian[:4, :3] = coupled
+    jacobian[:4, 3:] = 0.0
+    target = np.zeros(12)
+    target[:4] = [0.08314439, -0.36950520, -0.08096508, 0.05749458]
+
+    report = bounded_damped_projection(
+        jacobian,
+        target,
+        lower=np.full(12, -0.2),
+        upper=np.full(12, 0.2),
+        damping=1e-6,
+    )
+
+    assert report["residual_norm"] < 0.16
+
+
 @pytest.mark.parametrize(
     ("rows", "outcome"),
     [

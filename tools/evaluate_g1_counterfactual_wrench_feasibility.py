@@ -15,6 +15,7 @@ from typing import Any, Sequence
 import jax
 import jax.numpy as jnp
 import numpy as np
+from scipy.optimize import lsq_linear
 
 from src.algorithms.shac.counterfactual_wrench_distillation import (
     counterfactual_target_change,
@@ -108,10 +109,17 @@ def bounded_damped_projection(
         (matrix, math.sqrt(damping) * np.eye(12)), axis=0
     )
     augmented_target = np.concatenate((desired, np.zeros(12)), axis=0)
-    unconstrained = np.linalg.lstsq(
-        augmented_matrix, augmented_target, rcond=None
-    )[0]
-    correction = np.clip(unconstrained, low, high)
+    solution = lsq_linear(
+        augmented_matrix,
+        augmented_target,
+        bounds=(low, high),
+        tol=1e-12,
+        lsmr_tol=1e-12,
+        max_iter=500,
+    )
+    if not solution.success or not np.isfinite(solution.x).all():
+        raise ValueError("bounded projection did not converge")
+    correction = solution.x
     achieved = matrix @ correction
     target_norm = float(np.linalg.norm(desired))
     residual_norm = float(np.linalg.norm(achieved - desired))
