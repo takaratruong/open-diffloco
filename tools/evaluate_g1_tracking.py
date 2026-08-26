@@ -213,6 +213,7 @@ def make_evaluation_env(
     actor_observe_motion_anchor_position: bool = False,
     tracking_velocity_kernel: str = "exponential",
     tracking_torso_orientation_weight: float = 0.0,
+    tracking_root_velocity_weight: float = 0.0,
     actor_observation_noise: bool = False,
     domain_randomization: bool = False,
     friction_range: tuple[float, float] = (1.0, 1.0),
@@ -237,6 +238,7 @@ def make_evaluation_env(
         ),
         "tracking_velocity_kernel": tracking_velocity_kernel,
         "tracking_torso_orientation_weight": tracking_torso_orientation_weight,
+        "tracking_root_velocity_weight": tracking_root_velocity_weight,
         "actor_observation_noise": actor_observation_noise,
         "domain_randomization": domain_randomization,
         "friction_range": friction_range,
@@ -295,6 +297,21 @@ def resolve_training_torso_orientation_weight(
         or value < 0.0
     ):
         raise ValueError("training torso orientation weight is invalid")
+    return float(value)
+
+
+def resolve_training_root_velocity_weight(
+    hparams: dict[str, object],
+) -> float:
+    """Restore the checkpoint root-velocity objective without coercion."""
+    value = hparams.get("tracking_root_velocity_weight", 0.0)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0.0
+    ):
+        raise ValueError("training root velocity weight is invalid")
     return float(value)
 
 
@@ -830,6 +847,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--tracking-torso-orientation-weight", type=float, default=0.0
     )
     parser.add_argument(
+        "--tracking-root-velocity-weight", type=float, default=0.0
+    )
+    parser.add_argument(
         "--reference-residual-control", action="store_true"
     )
     parser.add_argument(
@@ -969,6 +989,9 @@ def main() -> None:
         args.tracking_torso_orientation_weight = (
             resolve_training_torso_orientation_weight(training_hparams)
         )
+        args.tracking_root_velocity_weight = (
+            resolve_training_root_velocity_weight(training_hparams)
+        )
         args.reference_residual_control = bool(
             training_hparams["reference_residual_control"]
         )
@@ -1025,6 +1048,7 @@ def main() -> None:
         tracking_torso_orientation_weight=(
             args.tracking_torso_orientation_weight
         ),
+        tracking_root_velocity_weight=args.tracking_root_velocity_weight,
         actor_observation_noise=visualization_controls.actor_observation_noise,
         domain_randomization=(
             bool(training_hparams["domain_randomization"])
@@ -1755,6 +1779,7 @@ def main() -> None:
         "tracking_torso_orientation_weight": (
             env.tracking_torso_orientation_weight
         ),
+        "tracking_root_velocity_weight": env.tracking_root_velocity_weight,
         "reference_states": env.reference_length,
         "reference_transitions": env.reference_transitions,
         "evaluation_start_phase": start_phase,

@@ -35,6 +35,7 @@ def test_flax_phase_grid_payload_records_exact_suffix_completion():
         actor_observe_motion_anchor_position=True,
         tracking_velocity_kernel="pseudo_huber",
         tracking_torso_orientation_weight=1.0,
+        tracking_root_velocity_weight=1.0,
         actor_residual_preview_adapter=True,
         actor_residual_preview_hidden=256,
         actor_residual_preview_trainable_parameter_count=91_677,
@@ -55,6 +56,7 @@ def test_flax_phase_grid_payload_records_exact_suffix_completion():
     assert payload["actor_observe_motion_anchor_position"] is True
     assert payload["tracking_velocity_kernel"] == "pseudo_huber"
     assert payload["tracking_torso_orientation_weight"] == 1.0
+    assert payload["tracking_root_velocity_weight"] == 1.0
     assert payload["actor_residual_preview_adapter"] is True
     assert payload["actor_residual_preview_hidden"] == 256
     assert payload["actor_residual_preview_trainable_parameter_count"] == 91_677
@@ -145,6 +147,7 @@ def test_phase_grid_loads_environment_contract_from_checkpoint_hparams(
         "actor_reference_lookahead_steps": (4, 8, 12),
         "tracking_velocity_kernel": "exponential",
         "tracking_torso_orientation_weight": 0.0,
+        "tracking_root_velocity_weight": 0.0,
     }
 
     for stored, expected_value in ((None, False), (False, False), (True, True)):
@@ -173,6 +176,17 @@ def test_phase_grid_loads_environment_contract_from_checkpoint_hparams(
     contract = load_checkpoint_environment_contract(checkpoint)
     assert contract["tracking_torso_orientation_weight"] == 1.0
 
+    candidate["tracking_root_velocity_weight"] = 1.0
+    (tmp_path / "hparams.json").write_text(json.dumps(candidate))
+    contract = load_checkpoint_environment_contract(checkpoint)
+    assert contract["tracking_root_velocity_weight"] == 1.0
+
+    candidate["tracking_root_velocity_weight"] = -1.0
+    (tmp_path / "hparams.json").write_text(json.dumps(candidate))
+    with pytest.raises(ValueError, match="evaluation contract is invalid"):
+        load_checkpoint_environment_contract(checkpoint)
+
+    candidate["tracking_root_velocity_weight"] = 0.0
     candidate["tracking_torso_orientation_weight"] = -1.0
     (tmp_path / "hparams.json").write_text(json.dumps(candidate))
     with pytest.raises(ValueError, match="evaluation contract is invalid"):

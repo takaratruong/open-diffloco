@@ -40,6 +40,25 @@ RMR_ACTIONS = Path(
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    def test_training_hparams_restore_root_velocity_weight_strictly(self):
+        from tools.evaluate_g1_tracking import (
+            resolve_training_root_velocity_weight,
+        )
+
+        self.assertEqual(resolve_training_root_velocity_weight({}), 0.0)
+        self.assertEqual(
+            resolve_training_root_velocity_weight(
+                {"tracking_root_velocity_weight": 1.0}
+            ),
+            1.0,
+        )
+        for invalid in (-1.0, float("nan"), float("inf"), True):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "root velocity"):
+                    resolve_training_root_velocity_weight(
+                        {"tracking_root_velocity_weight": invalid}
+                    )
+
     @staticmethod
     def _propulsion_evidence(rows=4):
         return {
@@ -937,6 +956,14 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         )
 
         self.assertEqual(candidate.tracking_torso_orientation_weight, 1.0)
+
+    def test_evaluator_forwards_root_velocity_weight(self):
+        candidate = make_evaluation_env(
+            "g1_tracking_rmr_50hz_source_step",
+            tracking_root_velocity_weight=1.0,
+        )
+
+        self.assertEqual(candidate.tracking_root_velocity_weight, 1.0)
 
     def test_evaluator_cli_accepts_tracking_velocity_kernel(self):
         args = build_parser().parse_args(

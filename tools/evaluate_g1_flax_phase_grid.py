@@ -64,6 +64,7 @@ def build_payload(
     actor_observe_motion_anchor_position: bool,
     tracking_velocity_kernel: str,
     tracking_torso_orientation_weight: float,
+    tracking_root_velocity_weight: float = 0.0,
     actor_residual_preview_adapter: bool = False,
     actor_residual_preview_hidden: int = 256,
     actor_residual_preview_trainable_parameter_count: int = 0,
@@ -96,6 +97,7 @@ def build_payload(
         "tracking_torso_orientation_weight": (
             tracking_torso_orientation_weight
         ),
+        "tracking_root_velocity_weight": tracking_root_velocity_weight,
         "actor_residual_preview_adapter": actor_residual_preview_adapter,
         "actor_residual_preview_hidden": actor_residual_preview_hidden,
         "actor_residual_preview_trainable_parameter_count": (
@@ -168,6 +170,9 @@ def load_checkpoint_environment_contract(checkpoint_path: Path) -> dict:
         "tracking_torso_orientation_weight": hparams.get(
             "tracking_torso_orientation_weight", 0.0
         ),
+        "tracking_root_velocity_weight": hparams.get(
+            "tracking_root_velocity_weight", 0.0
+        ),
         "reference_residual_control": hparams[
             "reference_residual_control"
         ],
@@ -206,6 +211,12 @@ def load_checkpoint_environment_contract(checkpoint_path: Path) -> dict:
         )
         or not math.isfinite(contract["tracking_torso_orientation_weight"])
         or contract["tracking_torso_orientation_weight"] < 0.0
+        or isinstance(contract["tracking_root_velocity_weight"], bool)
+        or not isinstance(
+            contract["tracking_root_velocity_weight"], (int, float)
+        )
+        or not math.isfinite(contract["tracking_root_velocity_weight"])
+        or contract["tracking_root_velocity_weight"] < 0.0
         or not isinstance(contract["reference_residual_control"], bool)
         or isinstance(contract["reference_residual_scale"], bool)
         or not math.isfinite(float(contract["reference_residual_scale"]))
@@ -381,6 +392,9 @@ def main() -> None:
         tracking_torso_orientation_weight=contract[
             "tracking_torso_orientation_weight"
         ],
+        tracking_root_velocity_weight=contract[
+            "tracking_root_velocity_weight"
+        ],
         reference_residual_control=contract["reference_residual_control"],
         reference_residual_scale=contract["reference_residual_scale"],
     )
@@ -530,6 +544,9 @@ def main() -> None:
         tracking_velocity_kernel=contract["tracking_velocity_kernel"],
         tracking_torso_orientation_weight=contract[
             "tracking_torso_orientation_weight"
+        ],
+        tracking_root_velocity_weight=contract[
+            "tracking_root_velocity_weight"
         ],
         actor_residual_preview_adapter=(
             args.actor_residual_preview_adapter
