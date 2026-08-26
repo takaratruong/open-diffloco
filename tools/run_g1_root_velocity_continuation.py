@@ -74,8 +74,12 @@ def build_root_velocity_kwargs(
 
 def classify_selection(
     candidates: dict[int, dict[str, object]],
+    *,
+    source_survival: list[int],
 ) -> dict[str, object]:
     """Select only a componentwise-safe strict improvement over E026."""
+    if tuple(source_survival) != E026_SURVIVAL:
+        raise ValueError("source E026 survival does not match the registered baseline")
     if set(candidates) != set(expected_checkpoint_steps()):
         raise ValueError("root-velocity selection requires the exact checkpoint grid")
     records: list[dict[str, object]] = []
@@ -134,7 +138,7 @@ def classify_selection(
     return {
         "protocol": "g1-root-velocity-selection-v1",
         "phases": [0, 25, 50, 75, 100],
-        "e026_survival": list(E026_SURVIVAL),
+        "source_survival": source_survival,
         "checkpoints": records,
         "outcome": (
             "root-velocity-advances"
@@ -280,6 +284,7 @@ def _plot_survival(selection: dict[str, object], output: Path) -> None:
 def evaluate_and_select(
     run_directory: Path,
     *,
+    source_checkpoint: Path,
     reference: Path,
     output_root: Path,
     code_commit: str,
@@ -294,6 +299,38 @@ def evaluate_and_select(
         "JAX_ENABLE_X64": "1",
         "MUJOCO_GL": "egl",
     }
+    source_phase_grid = evaluation_root / "source_e026.json"
+    subprocess.run(
+        _phase_grid_command(
+            checkpoint=source_checkpoint,
+            reference=reference,
+            output=source_phase_grid,
+            code_commit=code_commit,
+        ),
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment,
+        check=True,
+    )
+    source_payload = json.loads(source_phase_grid.read_text(encoding="utf-8"))
+    source_summary = source_payload.get("summary")
+    source_survival = (
+        source_summary.get("survival")
+        if isinstance(source_summary, dict)
+        else None
+    )
+    if (
+        source_payload.get("checkpoint_path")
+        != str(source_checkpoint.resolve())
+        or source_payload.get("checkpoint_sha256")
+        != sha256_file(source_checkpoint)
+        or source_payload.get("reference_sha256") != sha256_file(reference)
+        or source_payload.get("tracking_root_velocity_weight") != 0.0
+        or not isinstance(source_summary, dict)
+        or source_summary.get("phases") != [0, 25, 50, 75, 100]
+        or not isinstance(source_survival, list)
+        or tuple(source_survival) != E026_SURVIVAL
+    ):
+        raise ValueError("source E026 phase-grid evidence is invalid")
     candidates: dict[int, dict[str, object]] = {}
     for step in expected_checkpoint_steps():
         checkpoint = run_directory / f"checkpoint_step_{step}.pkl"
@@ -326,7 +363,14 @@ def evaluate_and_select(
             "checkpoint_sha256": payload["checkpoint_sha256"],
             "survival": survival,
         }
-    selection = classify_selection(candidates)
+    selection = classify_selection(
+        candidates,
+        source_survival=source_survival,
+    )
+    selection["source_checkpoint_sha256"] = source_payload[
+        "checkpoint_sha256"
+    ]
+    selection["source_phase_grid_sha256"] = sha256_file(source_phase_grid)
     records = selection["checkpoints"]
     rendered = (
         next(
@@ -349,7 +393,6 @@ def evaluate_and_select(
     selection["render_purpose"] = (
         "retained-policy" if selection["policy_retained"] else "diagnostic-only"
     )
-    _write_json_atomically(output_root / "selection.json", selection)
     _plot_survival(selection, output_root / "learning_curves.png")
     render_directory = output_root / "selected_preview"
     subprocess.run(
@@ -364,17 +407,36 @@ def evaluate_and_select(
         env=environment,
         check=True,
     )
-    render_summary = json.loads(
-        (render_directory / "summary.json").read_text(encoding="utf-8")
+    render_summary_path = render_directory / "summary.json"
+    render_video_path = render_directory / "evaluation.mp4"
+    render_contact_sheet_path = render_directory / "contact_sheet.png"
+    render_summary = json.loads(render_summary_path.read_text(encoding="utf-8"))
+    rendered_checkpoint = (
+        run_directory / f"checkpoint_step_{rendered['checkpoint_step']}.pkl"
     )
     if (
         render_summary.get("evaluation_start_phase") != 0
         or render_summary.get("tracking_root_velocity_weight")
         != ROOT_VELOCITY_WEIGHT
-        or not (render_directory / "evaluation.mp4").is_file()
-        or not (render_directory / "contact_sheet.png").is_file()
+        or render_summary.get("checkpoint_path")
+        != str(rendered_checkpoint.resolve())
+        or render_summary.get("checkpoint_sha256")
+        != rendered["checkpoint_sha256"]
+        or render_summary.get("reference_sha256") != sha256_file(reference)
+        or not render_video_path.is_file()
+        or not render_contact_sheet_path.is_file()
     ):
         raise ValueError("root-velocity preview is invalid")
+    selection.update(
+        render_checkpoint_sha256=render_summary["checkpoint_sha256"],
+        render_summary_sha256=sha256_file(render_summary_path),
+        render_mp4_sha256=sha256_file(render_video_path),
+        render_contact_sheet_sha256=sha256_file(render_contact_sheet_path),
+        learning_curves_sha256=sha256_file(
+            output_root / "learning_curves.png"
+        ),
+    )
+    _write_json_atomically(output_root / "selection.json", selection)
     return selection
 
 
@@ -434,6 +496,7 @@ def main() -> None:
     _write_json_atomically(output_root / "training_validation.json", validation)
     evaluate_and_select(
         run_directory,
+        source_checkpoint=args.resume_from.resolve(),
         reference=args.reference_path.resolve(),
         output_root=output_root,
         code_commit=args.code_commit,
