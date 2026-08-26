@@ -1,6 +1,7 @@
 import hashlib
 import json
 import pickle
+from pathlib import Path
 from types import SimpleNamespace
 
 import jax
@@ -22,9 +23,12 @@ from src.algorithms.shac.residual_preview_adapter import (
 )
 from src.core.rmr_action_noise import RMR_ACTION_STD_JOINT_NAMES
 from tools.run_g1_counterfactual_wrench_distillation import (
+    E026_SURVIVAL,
     END_STEP,
     START_STEP,
     build_counterfactual_kwargs,
+    classify_counterfactual_selection,
+    evaluate_and_select,
     expected_checkpoint_steps,
     validate_training_artifacts,
 )
@@ -227,4 +231,145 @@ def test_tracking_evaluator_scatter_loads_twelve_leg_adapter(tmp_path):
         ),
     )[0]
     np.testing.assert_array_equal(actor.apply(loaded, observations), expected)
+    total, parent, raw, scattered = actor.apply_with_diagnostics(
+        loaded, observations
+    )
+    np.testing.assert_array_equal(total, expected)
+    assert parent.shape == (1, 29)
+    assert raw.shape == (1, 12)
+    assert scattered.shape == (1, 29)
+    leg_indices = resolve_leg_action_indices(RMR_ACTION_STD_JOINT_NAMES)
+    nonleg = sorted(set(range(29)) - set(leg_indices))
+    np.testing.assert_array_equal(scattered[:, nonleg], 0.0)
+    np.testing.assert_array_equal(scattered[:, leg_indices], raw)
     assert normalizer == "n"
+
+
+def test_selection_requires_componentwise_e026_preservation_and_improvement():
+    candidates = {
+        expected_checkpoint_steps()[0]: {
+            "checkpoint_sha256": "a" * 64,
+            "survival": [132, 114, 74, 71, 74],
+        },
+        expected_checkpoint_steps()[1]: {
+            "checkpoint_sha256": "b" * 64,
+            "survival": [200, 113, 100, 100, 100],
+        },
+        expected_checkpoint_steps()[2]: {
+            "checkpoint_sha256": "c" * 64,
+            "survival": list(E026_SURVIVAL),
+        },
+        expected_checkpoint_steps()[3]: {
+            "checkpoint_sha256": "d" * 64,
+            "survival": [140, 120, 80, 75, 90],
+        },
+    }
+
+    result = classify_counterfactual_selection(candidates)
+
+    assert result["outcome"] == "leg-counterfactual-advances"
+    assert result["selected_step"] == expected_checkpoint_steps()[3]
+    assert result["policy_retained"] is True
+    records = {row["checkpoint_step"]: row for row in result["checkpoints"]}
+    assert records[expected_checkpoint_steps()[1]]["eligible"] is False
+    assert records[expected_checkpoint_steps()[2]]["eligible"] is False
+
+
+def test_selection_reports_insufficient_when_no_checkpoint_advances():
+    candidates = {
+        step: {
+            "checkpoint_sha256": f"{index + 1:x}" * 64,
+            "survival": list(E026_SURVIVAL),
+        }
+        for index, step in enumerate(expected_checkpoint_steps())
+    }
+
+    result = classify_counterfactual_selection(candidates)
+
+    assert result["outcome"] == "leg-counterfactual-feasible-but-insufficient"
+    assert result["selected_step"] is None
+    assert result["policy_retained"] is False
+
+
+def test_evaluation_runs_exact_grid_and_publishes_diagnostic(
+    tmp_path, monkeypatch
+):
+    import tools.run_g1_counterfactual_wrench_distillation as runner
+
+    run = tmp_path / "run"
+    run.mkdir()
+    reference = tmp_path / "reference.npz"
+    reference.write_bytes(b"reference")
+    survival_by_step = {
+        step: [140 + index, 120, 80, 75, 90]
+        for index, step in enumerate(expected_checkpoint_steps())
+    }
+    for step in expected_checkpoint_steps():
+        (run / f"checkpoint_step_{step}.pkl").write_bytes(str(step).encode())
+    (run / "checkpoint_phase_metrics.json").write_text(
+        json.dumps(
+            [
+                {"step": step, "actor_counterfactual_loss": 1.0}
+                for step in expected_checkpoint_steps()
+            ]
+        )
+    )
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if "tools.evaluate_g1_flax_phase_grid" in command:
+            checkpoint = Path(command[command.index("--checkpoint") + 1])
+            output = Path(command[command.index("--output") + 1])
+            step = int(checkpoint.stem.removeprefix("checkpoint_step_"))
+            output.write_text(
+                json.dumps(
+                    {
+                        "checkpoint_path": str(checkpoint.resolve()),
+                        "checkpoint_sha256": hashlib.sha256(
+                            checkpoint.read_bytes()
+                        ).hexdigest(),
+                        "reference_sha256": hashlib.sha256(
+                            reference.read_bytes()
+                        ).hexdigest(),
+                        "summary": {
+                            "phases": [0, 25, 50, 75, 100],
+                            "survival": survival_by_step[step],
+                        },
+                    }
+                )
+            )
+        else:
+            output = Path(command[command.index("--output-dir") + 1])
+            output.mkdir()
+            (output / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "evaluation_start_phase": 0,
+                        "counterfactual_leg_residual_evidence": True,
+                        "counterfactual_student_torso_wrench_max_abs": 0.0,
+                    }
+                )
+            )
+            (output / "evaluation.mp4").write_bytes(b"video")
+            (output / "contact_sheet.png").write_bytes(b"image")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        runner,
+        "_plot_evaluation_curves",
+        lambda **kwargs: kwargs["output"].write_bytes(b"plot"),
+    )
+
+    result = evaluate_and_select(
+        run,
+        reference=reference,
+        output_root=tmp_path / "output",
+        code_commit="f" * 40,
+    )
+
+    assert result["outcome"] == "leg-counterfactual-advances"
+    assert result["rendered_step"] == expected_checkpoint_steps()[-1]
+    assert len(calls) == 5
+    assert (tmp_path / "output" / "selection.json").is_file()
+    assert (tmp_path / "output" / "selected_preview" / "evaluation.mp4").is_file()

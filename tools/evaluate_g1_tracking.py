@@ -20,10 +20,10 @@ from src.algorithms.shac.centroidal_objective import (
 )
 from src.algorithms.shac.counterfactual_wrench_distillation import (
     resolve_leg_action_indices,
+    scatter_leg_residual,
 )
 from src.algorithms.shac.frozen_controller_residual import (
     FrozenControllerResidualParams,
-    apply_frozen_controller_residual,
 )
 from src.algorithms.shac.learned_torso_wrench import (
     FrozenControllerWrenchParams,
@@ -39,6 +39,7 @@ from src.algorithms.shac.residual_preview_adapter import (
     FrozenPreviewResidualParams,
     PreviewResidualAdapter,
     apply_frozen_preview_residual,
+    current_treatment_frame,
     split_residual_adapter_params,
 )
 from src.core.data_structures import Normalizer
@@ -659,16 +660,38 @@ def _load_policy(
                     self.residual_action_indices = residual_action_indices
 
                 def apply(self, params, observations):
-                    action, _, _ = apply_frozen_controller_residual(
-                        self.parent_actor.apply,
-                        self.residual_actor,
-                        params,
-                        observations,
-                        history_len=env.actor_history_len,
-                        frame_dim=env.actor_frame_obs_dim,
-                        residual_action_indices=self.residual_action_indices,
+                    action, _, _, _ = self.apply_with_diagnostics(
+                        params, observations
                     )
                     return action
+
+                def apply_with_diagnostics(self, params, observations):
+                    parent_action = self.parent_actor.apply(
+                        params.parent, observations
+                    )
+                    frame = current_treatment_frame(
+                        observations,
+                        history_len=env.actor_history_len,
+                        treatment_frame_dim=env.actor_frame_obs_dim,
+                    )
+                    raw_residual = self.residual_actor.apply(
+                        params.adapter, frame
+                    )
+                    scattered_residual = (
+                        scatter_leg_residual(
+                            raw_residual,
+                            self.residual_action_indices,
+                            action_dim=env.action_dim,
+                        )
+                        if self.residual_action_indices is not None
+                        else raw_residual
+                    )
+                    return (
+                        parent_action + scattered_residual,
+                        parent_action,
+                        raw_residual,
+                        scattered_residual,
+                    )
 
             actor = FrozenControllerResidualCheckpointActor()
         if learned_wrench:
@@ -1243,6 +1266,10 @@ def main() -> None:
     centroidal_momentum_states = []
     reference_centroidal_momentum_states = []
     centroidal_root_quaternions = []
+    counterfactual_parent_actions = []
+    counterfactual_leg_residuals_raw = []
+    counterfactual_leg_residuals_scattered = []
+    counterfactual_student_torso_wrenches = []
 
     try:
         remaining = remaining_reference_transitions(
@@ -1351,9 +1378,26 @@ def main() -> None:
                     gated_action.astype(jnp.float64), args.action_gain
                 )
             else:
+                if hasattr(actor, "apply_with_diagnostics"):
+                    (
+                        candidate,
+                        parent_action,
+                        raw_leg_residual,
+                        scattered_leg_residual,
+                    ) = actor.apply_with_diagnostics(actor_params, normalized)
+                    counterfactual_parent_actions.append(
+                        np.asarray(parent_action)
+                    )
+                    counterfactual_leg_residuals_raw.append(
+                        np.asarray(raw_leg_residual)
+                    )
+                    counterfactual_leg_residuals_scattered.append(
+                        np.asarray(scattered_leg_residual)
+                    )
+                else:
+                    candidate = actor.apply(actor_params, normalized)
                 action = scale_policy_action(
-                    actor.apply(actor_params, normalized).astype(jnp.float64),
-                    args.action_gain,
+                    candidate.astype(jnp.float64), args.action_gain
                 )
         if isinstance(actor_params, FrozenControllerWrenchParams):
             normalized_wrench = actor.normalized_wrench(
@@ -1407,6 +1451,12 @@ def main() -> None:
         joint_velocities.append(velocity)
         reference_joint_positions.append(reference)
         position_targets.append(target)
+        if counterfactual_parent_actions:
+            counterfactual_student_torso_wrenches.append(
+                np.asarray(
+                    state.data.xfrc_applied[diagnostic_torso_body_id]
+                )
+            )
         step_scope = (
             nullcontext() if profile is None else solver_context(profile)
         )
@@ -1606,6 +1656,18 @@ def main() -> None:
             centroidal_result.normalized_error
         ),
         centroidal_window_valid=np.asarray(centroidal_result.valid),
+        counterfactual_parent_action=np.asarray(
+            counterfactual_parent_actions
+        ),
+        counterfactual_leg_residual_raw=np.asarray(
+            counterfactual_leg_residuals_raw
+        ),
+        counterfactual_leg_residual_scattered=np.asarray(
+            counterfactual_leg_residuals_scattered
+        ),
+        counterfactual_student_torso_wrench=np.asarray(
+            counterfactual_student_torso_wrenches
+        ),
     )
     rollout_name = (
         "training_rollout.mp4"
@@ -1734,6 +1796,21 @@ def main() -> None:
             / max(int(centroidal_result.valid_count), 1)
         ).tolist(),
         "intermediate_reset_occurred": true_terminal,
+        "counterfactual_leg_residual_evidence": bool(
+            counterfactual_parent_actions
+        ),
+        "counterfactual_student_torso_wrench_max_abs": (
+            float(
+                np.max(
+                    np.abs(
+                        np.asarray(counterfactual_student_torso_wrenches)
+                    ),
+                    initial=0.0,
+                )
+            )
+            if counterfactual_student_torso_wrenches
+            else None
+        ),
         "controller": (
             "full_rmr_actor"
             if full_rmr_actor is not None
