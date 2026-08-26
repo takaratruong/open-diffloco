@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import hashlib
+import json
+from pathlib import Path
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jp
@@ -32,6 +36,142 @@ _BLOCK_NAMES = (
     "centroidal_linear",
     "centroidal_angular",
 )
+
+
+class CounterfactualFeasibility(NamedTuple):
+    """Immutable inputs certified by the frozen-teacher discriminator."""
+
+    target_rms: np.ndarray
+    teacher_checkpoint_sha256: str
+    teacher_tree_sha256: str
+    e026_tree_sha256: str
+    wrench_tree_sha256: str
+    artifact_sha256: str
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def parameter_tree_sha256(tree: object) -> str:
+    """Hash pytree structure, paths, dtypes, shapes, and exact leaf bytes."""
+    digest = hashlib.sha256()
+    paths_and_leaves, treedef = jax.tree_util.tree_flatten_with_path(tree)
+    digest.update(repr(treedef).encode("utf-8"))
+    for path, value in paths_and_leaves:
+        digest.update(repr(path).encode("utf-8"))
+        array = np.ascontiguousarray(np.asarray(value))
+        digest.update(b"array")
+        digest.update(str(array.dtype).encode("ascii"))
+        digest.update(repr(array.shape).encode("ascii"))
+        digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+def load_counterfactual_feasibility(
+    path: str | Path,
+    *,
+    expected_sha256: str,
+) -> CounterfactualFeasibility:
+    """Load one passing, hash-bound feasibility result or fail closed."""
+    artifact_path = Path(path).expanduser().resolve()
+    if not artifact_path.is_file() or _sha256_file(artifact_path) != expected_sha256:
+        raise ValueError("counterfactual feasibility artifact hash mismatch")
+    try:
+        payload = json.loads(artifact_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("counterfactual feasibility artifact is invalid") from error
+    if (
+        payload.get("protocol") != "g1-counterfactual-wrench-feasibility-v1"
+        or payload.get("valid") is not True
+        or payload.get("outcome") != "leg-counterfactual-feasible"
+        or payload.get("phases") != [0, 25, 50, 75, 100]
+        or payload.get("threshold") != 0.5
+        or not isinstance(payload.get("phase_counts"), dict)
+        or any(payload["phase_counts"].get(str(phase), 0) < 1 for phase in payload["phases"])
+        or payload.get("row_count", 0) < 5
+        or not np.isfinite(payload.get("median_normalized_residual", np.nan))
+        or payload["median_normalized_residual"] > payload["threshold"]
+    ):
+        raise ValueError("counterfactual feasibility gate did not pass")
+    target_rms = np.asarray(payload.get("target_rms"), dtype=np.float64)
+    if target_rms.shape != (12,) or not np.all(np.isfinite(target_rms)) or np.any(target_rms <= 0.0):
+        raise ValueError("counterfactual target RMS is invalid")
+    npz_name = payload.get("npz_file")
+    npz_sha = payload.get("npz_sha256")
+    npz_path = artifact_path.parent / str(npz_name)
+    if (
+        not isinstance(npz_name, str)
+        or Path(npz_name).name != npz_name
+        or not isinstance(npz_sha, str)
+        or not npz_path.is_file()
+        or _sha256_file(npz_path) != npz_sha
+    ):
+        raise ValueError("counterfactual feasibility raw evidence is invalid")
+    hashes = tuple(
+        payload.get(key)
+        for key in (
+            "teacher_checkpoint_sha256",
+            "teacher_tree_sha256",
+            "e026_tree_sha256",
+            "wrench_tree_sha256",
+        )
+    )
+    if any(not isinstance(value, str) or len(value) != 64 for value in hashes):
+        raise ValueError("counterfactual feasibility provenance is invalid")
+    return CounterfactualFeasibility(
+        target_rms=target_rms,
+        teacher_checkpoint_sha256=hashes[0],
+        teacher_tree_sha256=hashes[1],
+        e026_tree_sha256=hashes[2],
+        wrench_tree_sha256=hashes[3],
+        artifact_sha256=expected_sha256,
+    )
+
+
+def resolve_counterfactual_wrench_resume_setting(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested: bool,
+    teacher_sha256: str | None,
+    feasibility_sha256: str | None,
+    allow_start: bool,
+    is_resume: bool,
+) -> tuple[bool, bool]:
+    """Resolve the single explicit zero-wrench distillation upgrade."""
+    if not all(isinstance(value, bool) for value in (requested, allow_start, is_resume)):
+        raise ValueError("counterfactual settings must be boolean")
+    if requested and (
+        not isinstance(teacher_sha256, str)
+        or len(teacher_sha256) != 64
+        or not isinstance(feasibility_sha256, str)
+        or len(feasibility_sha256) != 64
+    ):
+        raise ValueError("counterfactual source hashes are required")
+    if not is_resume:
+        if requested:
+            raise ValueError("counterfactual distillation requires an E026 resume")
+        return False, False
+    if resumed_hparams is None:
+        raise ValueError("counterfactual resume metadata is required")
+    saved = resumed_hparams.get("actor_counterfactual_wrench_distillation", False)
+    if not isinstance(saved, bool):
+        raise ValueError("saved counterfactual setting is invalid")
+    upgrade = bool(requested and not saved)
+    if upgrade and not allow_start:
+        raise ValueError("counterfactual distillation requires explicit authority")
+    if saved != requested and not upgrade:
+        raise ValueError("counterfactual setting must match the checkpoint")
+    if saved:
+        if resumed_hparams.get("actor_counterfactual_wrench_teacher_sha256") != teacher_sha256:
+            raise ValueError("counterfactual teacher must match the checkpoint")
+        if resumed_hparams.get("actor_counterfactual_wrench_feasibility_sha256") != feasibility_sha256:
+            raise ValueError("counterfactual feasibility must match the checkpoint")
+    return requested, upgrade
 
 
 def resolve_leg_action_indices(actor_joint_names: Sequence[str]) -> tuple[int, ...]:

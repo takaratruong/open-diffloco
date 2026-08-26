@@ -108,6 +108,14 @@ from src.algorithms.shac.frozen_controller_residual import (
     migrate_frozen_controller_residual,
     update_frozen_controller_residual,
 )
+from src.algorithms.shac.counterfactual_wrench_distillation import (
+    counterfactual_target_change,
+    counterfactual_transition_loss,
+    load_counterfactual_feasibility,
+    parameter_tree_sha256,
+    resolve_counterfactual_wrench_resume_setting,
+    resolve_leg_action_indices,
+)
 from src.algorithms.shac.preview_adapter import (
     apply_preview_adapter_update,
     build_current_preview_mask,
@@ -491,6 +499,51 @@ def build_checkpoint_recovery_teacher_telemetry(
             for name, value in values.items()
         },
         "actor_recovery_teacher_valid": True,
+    }
+
+
+def build_counterfactual_wrench_telemetry(metrics) -> dict[str, object]:
+    """Serialize and fail closed on the leg-only teacher objective."""
+    names = (
+        "loss",
+        "base_linear_loss",
+        "base_angular_loss",
+        "centroidal_linear_loss",
+        "centroidal_angular_loss",
+        "cosine",
+        "student_rms",
+        "teacher_rms",
+        "normalized_error_rms",
+        "residual_rms",
+        "residual_max_abs",
+        "residual_bound_fraction",
+        "nonleg_max_abs",
+        "student_wrench_max_abs",
+        "teacher_wrench_rms",
+    )
+    values = {
+        name: float(metrics[f"actor_counterfactual_{name}"])
+        for name in names
+    }
+    valid_count = int(metrics["actor_counterfactual_valid_count"])
+    if (
+        not all(math.isfinite(value) for value in values.values())
+        or valid_count < 1
+        or values["residual_rms"] < 0.0
+        or values["residual_max_abs"] < 0.0
+        or not 0.0 <= values["residual_bound_fraction"] <= 1.0
+        or values["nonleg_max_abs"] != 0.0
+        or values["student_wrench_max_abs"] != 0.0
+        or not bool(metrics["actor_counterfactual_valid"])
+    ):
+        raise ValueError("counterfactual wrench telemetry is invalid")
+    return {
+        **{
+            f"actor_counterfactual_{name}": value
+            for name, value in values.items()
+        },
+        "actor_counterfactual_valid_count": valid_count,
+        "actor_counterfactual_valid": True,
     }
 
 
@@ -2151,6 +2204,12 @@ def train(
     actor_frozen_controller_residual: bool = False,
     actor_frozen_controller_residual_hidden: int = 256,
     allow_resume_actor_frozen_controller_residual_start: bool = False,
+    actor_counterfactual_wrench_distillation: bool = False,
+    actor_counterfactual_wrench_teacher_path: str | None = None,
+    actor_counterfactual_wrench_teacher_sha256: str | None = None,
+    actor_counterfactual_wrench_feasibility_path: str | None = None,
+    actor_counterfactual_wrench_feasibility_sha256: str | None = None,
+    allow_resume_actor_counterfactual_wrench_distillation_start: bool = False,
     actor_centroidal_propulsion: bool = False,
     actor_centroidal_window: int = 4,
     actor_centroidal_delta: float = 0.1,
@@ -2725,6 +2784,7 @@ def train(
     future_reference_upgrade = False
     residual_adapter_upgrade = False
     frozen_controller_residual_upgrade = False
+    counterfactual_wrench_upgrade = False
     centroidal_propulsion_upgrade = False
     reference_path_migration_report = None
     recovery_support = None
@@ -3043,6 +3103,26 @@ def train(
                 critic_per_env_grad_clip = resumed_hparams[
                     "critic_per_env_grad_clip"
                 ]
+    (
+        actor_counterfactual_wrench_distillation,
+        counterfactual_wrench_upgrade,
+    ) = resolve_counterfactual_wrench_resume_setting(
+        resumed_hparams,
+        requested=actor_counterfactual_wrench_distillation,
+        teacher_sha256=actor_counterfactual_wrench_teacher_sha256,
+        feasibility_sha256=actor_counterfactual_wrench_feasibility_sha256,
+        allow_start=(
+            allow_resume_actor_counterfactual_wrench_distillation_start
+        ),
+        is_resume=resume_from is not None,
+    )
+    if (
+        actor_counterfactual_wrench_distillation
+        and counterfactual_wrench_upgrade != frozen_controller_residual_upgrade
+    ):
+        raise ValueError(
+            "counterfactual and leg-residual upgrades must start together"
+        )
     demonstration_replay_threshold = (
         resolve_demonstration_replay_resume_setting(
             resumed_hparams,
@@ -3290,6 +3370,98 @@ def train(
     if env_variant.startswith("g1_tracking"):
         max_episode_length = env.reference_transitions
         reference_hparams = reference_hparams_for_env(env)
+    counterfactual_feasibility = None
+    counterfactual_teacher_params = None
+    counterfactual_target_rms = None
+    counterfactual_leg_indices = None
+    counterfactual_nonleg_mask = None
+    if actor_counterfactual_wrench_distillation:
+        if (
+            not actor_frozen_controller_residual
+            or not actor_cagrad
+            or actor_phase_bin_count != 5
+            or gradient_accumulation_steps != 2
+            or actor_residual_preview_adapter is False
+            or torso_wrench_assistance
+            or actor_learned_torso_wrench
+            or demonstration_replay_threshold is not None
+            or domain_randomization
+            or actor_observation_noise
+            or not env_variant.startswith("g1_tracking")
+        ):
+            raise ValueError(
+                "counterfactual distillation requires the exact zero-wrench "
+                "E026 five-phase CAGrad treatment"
+            )
+        if actor_counterfactual_wrench_teacher_path is None:
+            raise ValueError("counterfactual teacher checkpoint is required")
+        if actor_counterfactual_wrench_feasibility_path is None:
+            raise ValueError("counterfactual feasibility artifact is required")
+        counterfactual_feasibility = load_counterfactual_feasibility(
+            actor_counterfactual_wrench_feasibility_path,
+            expected_sha256=(
+                actor_counterfactual_wrench_feasibility_sha256
+            ),
+        )
+        teacher_path = Path(
+            actor_counterfactual_wrench_teacher_path
+        ).expanduser().resolve()
+        if (
+            not teacher_path.is_file()
+            or _sha256_file(teacher_path)
+            != actor_counterfactual_wrench_teacher_sha256
+            or actor_counterfactual_wrench_teacher_sha256
+            != counterfactual_feasibility.teacher_checkpoint_sha256
+        ):
+            raise ValueError("counterfactual teacher checkpoint hash mismatch")
+        teacher_state, teacher_hparams, teacher_step = load_checkpoint(
+            str(teacher_path)
+        )
+        if (
+            not isinstance(teacher_state.actor_params, FrozenControllerWrenchParams)
+            or not isinstance(
+                teacher_state.actor_params.controller,
+                FrozenPreviewResidualParams,
+            )
+            or teacher_step != 1_966_080
+            or not isinstance(teacher_hparams, dict)
+            or teacher_hparams.get("actor_learned_torso_wrench") is not True
+        ):
+            raise ValueError("counterfactual teacher checkpoint is invalid")
+        counterfactual_teacher_params = jax.tree.map(
+            jax.lax.stop_gradient, teacher_state.actor_params
+        )
+        resumed_counterfactual_parent = (
+            resumed_state.actor_params.parent
+            if isinstance(
+                resumed_state.actor_params, FrozenControllerResidualParams
+            )
+            else resumed_state.actor_params
+        ) if resumed_state is not None else None
+        if (
+            parameter_tree_sha256(counterfactual_teacher_params)
+            != counterfactual_feasibility.teacher_tree_sha256
+            or parameter_tree_sha256(counterfactual_teacher_params.controller)
+            != counterfactual_feasibility.e026_tree_sha256
+            or parameter_tree_sha256(counterfactual_teacher_params.wrench)
+            != counterfactual_feasibility.wrench_tree_sha256
+            or resumed_state is None
+            or parameter_tree_sha256(resumed_counterfactual_parent)
+            != counterfactual_feasibility.e026_tree_sha256
+            or parameter_tree_sha256(resumed_state.normalizer)
+            != parameter_tree_sha256(teacher_state.normalizer)
+        ):
+            raise ValueError("counterfactual frozen-tree provenance mismatch")
+        counterfactual_target_rms = jp.asarray(
+            counterfactual_feasibility.target_rms, dtype=jp.float64
+        )
+        counterfactual_leg_indices = resolve_leg_action_indices(
+            env.actor_joint_names
+        )
+        counterfactual_nonleg_mask = jp.ones((env.action_dim,), dtype=bool)
+        counterfactual_nonleg_mask = counterfactual_nonleg_mask.at[
+            jp.asarray(counterfactual_leg_indices, dtype=jp.int32)
+        ].set(False)
     torso_body_id = -1
     torso_slot = -1
     torso_wrench_parameters = None
@@ -3420,7 +3592,11 @@ def train(
             "learned torso wrench setting differs from the checkpoint without "
             "explicit resume authority"
         )
-    if torso_wrench_assistance or actor_learned_torso_wrench:
+    if (
+        torso_wrench_assistance
+        or actor_learned_torso_wrench
+        or actor_counterfactual_wrench_distillation
+    ):
         torso_body_id, torso_wrench_parameters = (
             torso_wrench_parameters_from_environment(env)
         )
@@ -3480,7 +3656,7 @@ def train(
         hidden_dim=actor_residual_preview_hidden,
     )
     frozen_controller_residual_actor = PreviewResidualAdapter(
-        action_dim=env.action_dim,
+        action_dim=(12 if actor_counterfactual_wrench_distillation else env.action_dim),
         hidden_dim=actor_frozen_controller_residual_hidden,
     )
     learned_torso_wrench_actor = LearnedTorsoWrenchHead(
@@ -3807,6 +3983,7 @@ def train(
                         obs_norm,
                         history_len=actor_history_len,
                         frame_dim=env.actor_frame_obs_dim,
+                        residual_action_indices=counterfactual_leg_indices,
                     )
                 )
                 action = action.astype(jp.float64)
@@ -3944,6 +4121,59 @@ def train(
             if clip_sampled_actor_actions:
                 noisy_action = jp.clip(noisy_action, -1.0, 1.0)
 
+            counterfactual_teacher_next_state = None
+            counterfactual_before_features = None
+            teacher_world_wrench = jp.zeros((6,), dtype=state.data.qpos.dtype)
+            if actor_counterfactual_wrench_distillation:
+                state = state.replace(
+                    data=state.data.replace(
+                        xfrc_applied=jp.zeros_like(state.data.xfrc_applied)
+                    )
+                )
+                counterfactual_before_features = jp.concatenate(
+                    (
+                        state.data.qvel[:6],
+                        mjx_centroidal_momentum(
+                            env.mjx_model,
+                            state.data,
+                            env.root_body_id,
+                            env.nominal_total_mass,
+                        ),
+                    )
+                )
+                teacher_frame = current_treatment_frame(
+                    obs_norm,
+                    history_len=actor_history_len,
+                    treatment_frame_dim=env.actor_frame_obs_dim,
+                )
+                teacher_normalized_wrench = apply_learned_torso_wrench(
+                    learned_torso_wrench_actor,
+                    counterfactual_teacher_params,
+                    teacher_frame,
+                )
+                teacher_world_wrench = normalized_yaw_wrench_to_world(
+                    teacher_normalized_wrench.astype(state.data.qpos.dtype),
+                    root_quaternion=state.data.qpos[3:7],
+                    force_cap=torso_wrench_parameters.force_cap,
+                    torque_cap=torso_wrench_parameters.torque_cap,
+                    scale=1.0,
+                )
+                teacher_xfrc = write_torso_wrench(
+                    jp.zeros_like(state.data.xfrc_applied),
+                    torso_body_id=torso_body_id,
+                    world_wrench=teacher_world_wrench,
+                )
+                teacher_state = state.replace(
+                    data=state.data.replace(xfrc_applied=teacher_xfrc)
+                )
+                teacher_noisy_action = noisy_action - _residual_action
+                teacher_next_state = env.step(
+                    teacher_state, teacher_noisy_action
+                )
+                counterfactual_teacher_next_state = jax.lax.stop_gradient(
+                    teacher_next_state
+                )
+
             learned_torso_wrench = jp.zeros((6,), dtype=state.data.qpos.dtype)
             learned_torso_wrench_normalized = jp.zeros(
                 (6,), dtype=jp.float32
@@ -3994,6 +4224,65 @@ def train(
                     reference_length=env.reference_length,
                 )
             candidate_unreplayed_state = env.step(state, noisy_action)
+            counterfactual_step_loss = jp.asarray(
+                0.0, dtype=candidate_unreplayed_state.reward.dtype
+            )
+            counterfactual_step_valid = jp.asarray(True)
+            counterfactual_step_telemetry = {
+                "base_linear_loss": counterfactual_step_loss,
+                "base_angular_loss": counterfactual_step_loss,
+                "centroidal_linear_loss": counterfactual_step_loss,
+                "centroidal_angular_loss": counterfactual_step_loss,
+                "cosine": counterfactual_step_loss,
+                "student_rms": counterfactual_step_loss,
+                "teacher_rms": counterfactual_step_loss,
+                "normalized_error_rms": counterfactual_step_loss,
+                "valid": jp.asarray(1.0),
+            }
+            if actor_counterfactual_wrench_distillation:
+                student_features = jp.concatenate(
+                    (
+                        candidate_unreplayed_state.data.qvel[:6],
+                        mjx_centroidal_momentum(
+                            env.mjx_model,
+                            candidate_unreplayed_state.data,
+                            env.root_body_id,
+                            env.nominal_total_mass,
+                        ),
+                    )
+                )
+                teacher_features = jp.concatenate(
+                    (
+                        counterfactual_teacher_next_state.data.qvel[:6],
+                        mjx_centroidal_momentum(
+                            env.mjx_model,
+                            counterfactual_teacher_next_state.data,
+                            env.root_body_id,
+                            env.nominal_total_mass,
+                        ),
+                    )
+                )
+                student_change = counterfactual_target_change(
+                    counterfactual_before_features, student_features
+                )
+                teacher_change = counterfactual_target_change(
+                    counterfactual_before_features, teacher_features
+                )
+                (
+                    counterfactual_step_loss,
+                    counterfactual_step_telemetry,
+                ) = counterfactual_transition_loss(
+                    student_change,
+                    teacher_change,
+                    counterfactual_target_rms,
+                )
+                counterfactual_step_valid = (
+                    (candidate_unreplayed_state.done == 0)
+                    & (counterfactual_teacher_next_state.done == 0)
+                    & jp.asarray(
+                        counterfactual_step_telemetry["valid"], dtype=bool
+                    )
+                )
             if demonstration_replay_threshold is not None:
                 candidate_next_state, demonstration_replay = (
                     apply_demonstration_replay(
@@ -4148,6 +4437,35 @@ def train(
                 )
                 transition["learned_torso_wrench_penalty"] = (
                     learned_torso_wrench_step_penalty
+                )
+            if actor_counterfactual_wrench_distillation:
+                transition.update(
+                    {
+                        "counterfactual_loss": jp.where(
+                            active & counterfactual_step_valid,
+                            counterfactual_step_loss,
+                            0.0,
+                        ),
+                        "counterfactual_valid": (
+                            active & counterfactual_step_valid
+                        ),
+                        "counterfactual_residual_action": _residual_action,
+                        "counterfactual_teacher_wrench": teacher_world_wrench,
+                        "counterfactual_student_wrench_max": jp.max(
+                            jp.abs(state.data.xfrc_applied)
+                        ),
+                        **{
+                            f"counterfactual_{name}": jp.where(
+                                active & counterfactual_step_valid,
+                                value,
+                                0.0,
+                            )
+                            for name, value in (
+                                counterfactual_step_telemetry.items()
+                            )
+                            if name != "valid"
+                        },
+                    }
                 )
             return (next_state, foot_bump_ou), transition
 
@@ -4345,6 +4663,37 @@ def train(
             jp.sum(traj["actor_policy_anchor_penalty"]) / active_count
         )
         actor_objective = -total_ret / active_count + anchor_loss
+        if actor_counterfactual_wrench_distillation:
+            counterfactual_valid_count = jp.maximum(
+                jp.sum(traj["counterfactual_valid"]), 1
+            )
+            counterfactual_task_loss = (
+                jp.sum(traj["counterfactual_loss"])
+                / counterfactual_valid_count
+            )
+            counterfactual_residual = traj[
+                "counterfactual_residual_action"
+            ]
+            counterfactual_leg_residual = counterfactual_residual[
+                ..., jp.asarray(counterfactual_leg_indices, dtype=jp.int32)
+            ]
+            counterfactual_residual_magnitude = jp.mean(
+                jp.square(counterfactual_leg_residual)
+            )
+            counterfactual_residual_change = jp.diff(
+                counterfactual_leg_residual, axis=0
+            )
+            counterfactual_residual_temporal_weight = 0.001
+            counterfactual_objective = (
+                counterfactual_task_loss
+                + 0.01 * counterfactual_residual_magnitude
+                + counterfactual_residual_temporal_weight
+                * (
+                    jp.sum(jp.square(counterfactual_residual_change))
+                    / jp.maximum(counterfactual_residual_change.size, 1)
+                )
+            )
+            actor_objective = actor_objective + counterfactual_objective
         if centroidal_result is not None:
             actor_objective = (
                 actor_objective
@@ -5425,6 +5774,96 @@ def train(
                     ),
                 }
             )
+        if actor_counterfactual_wrench_distillation:
+            counterfactual_valid_count = jp.sum(
+                trajs["counterfactual_valid"]
+            )
+            counterfactual_residual = trajs[
+                "counterfactual_residual_action"
+            ]
+            counterfactual_leg_residual = counterfactual_residual[
+                ..., jp.asarray(counterfactual_leg_indices, dtype=jp.int32)
+            ]
+            counterfactual_nonleg_max = jp.max(
+                jp.abs(
+                    counterfactual_residual[..., counterfactual_nonleg_mask]
+                )
+            )
+            counterfactual_teacher_wrench = trajs[
+                "counterfactual_teacher_wrench"
+            ]
+            counterfactual_metric_names = (
+                "base_linear_loss",
+                "base_angular_loss",
+                "centroidal_linear_loss",
+                "centroidal_angular_loss",
+                "cosine",
+                "student_rms",
+                "teacher_rms",
+                "normalized_error_rms",
+            )
+            counterfactual_finite = jp.all(
+                jp.stack(
+                    [
+                        jp.all(
+                            jp.isfinite(
+                                trajs[f"counterfactual_{name}"]
+                            )
+                        )
+                        for name in counterfactual_metric_names
+                    ]
+                )
+            )
+            metrics.update(
+                {
+                    "actor_counterfactual_loss": jp.sum(
+                        trajs["counterfactual_loss"]
+                    )
+                    / jp.maximum(counterfactual_valid_count, 1),
+                    **{
+                        f"actor_counterfactual_{name}": jp.sum(
+                            trajs[f"counterfactual_{name}"]
+                        )
+                        / jp.maximum(counterfactual_valid_count, 1)
+                        for name in counterfactual_metric_names
+                    },
+                    "actor_counterfactual_valid_count": (
+                        counterfactual_valid_count
+                    ),
+                    "actor_counterfactual_residual_rms": jp.sqrt(
+                        jp.mean(jp.square(counterfactual_leg_residual))
+                    ),
+                    "actor_counterfactual_residual_max_abs": jp.max(
+                        jp.abs(counterfactual_leg_residual)
+                    ),
+                    "actor_counterfactual_residual_bound_fraction": jp.mean(
+                        jp.abs(counterfactual_leg_residual) >= 0.95
+                    ),
+                    "actor_counterfactual_nonleg_max_abs": (
+                        counterfactual_nonleg_max
+                    ),
+                    "actor_counterfactual_student_wrench_max_abs": jp.max(
+                        trajs["counterfactual_student_wrench_max"]
+                    ),
+                    "actor_counterfactual_teacher_wrench_rms": jp.sqrt(
+                        jp.mean(jp.square(counterfactual_teacher_wrench))
+                    ),
+                    "actor_counterfactual_valid": (
+                        (counterfactual_valid_count > 0)
+                        & counterfactual_finite
+                        & jp.all(jp.isfinite(counterfactual_residual))
+                        & (counterfactual_nonleg_max == 0.0)
+                        & (
+                            jp.max(
+                                trajs[
+                                    "counterfactual_student_wrench_max"
+                                ]
+                            )
+                            == 0.0
+                        )
+                    ),
+                }
+            )
         if actor_cagrad:
             cagrad_result = cagrad_reduction["result"]
             cagrad_counts_match = jp.all(
@@ -6041,6 +6480,7 @@ def train(
                     normalized_observations=normalized_observations,
                     history_len=actor_history_len,
                     frame_dim=env.actor_frame_obs_dim,
+                    residual_action_indices=counterfactual_leg_indices,
                 )
                 if not frozen_controller_report["valid"]:
                     raise ValueError(
@@ -6421,6 +6861,38 @@ def train(
         "actor_frozen_controller_residual_hidden": (
             actor_frozen_controller_residual_hidden
         ),
+        "actor_counterfactual_wrench_distillation": (
+            actor_counterfactual_wrench_distillation
+        ),
+        "actor_counterfactual_wrench_teacher_path": (
+            str(Path(actor_counterfactual_wrench_teacher_path).resolve())
+            if actor_counterfactual_wrench_teacher_path is not None
+            else None
+        ),
+        "actor_counterfactual_wrench_teacher_sha256": (
+            actor_counterfactual_wrench_teacher_sha256
+        ),
+        "actor_counterfactual_wrench_feasibility_path": (
+            str(Path(actor_counterfactual_wrench_feasibility_path).resolve())
+            if actor_counterfactual_wrench_feasibility_path is not None
+            else None
+        ),
+        "actor_counterfactual_wrench_feasibility_sha256": (
+            actor_counterfactual_wrench_feasibility_sha256
+        ),
+        "actor_counterfactual_wrench_target_rms": (
+            counterfactual_feasibility.target_rms.tolist()
+            if counterfactual_feasibility is not None
+            else None
+        ),
+        "actor_counterfactual_wrench_leg_indices": (
+            list(counterfactual_leg_indices)
+            if counterfactual_leg_indices is not None
+            else None
+        ),
+        "actor_counterfactual_wrench_loss_weight": 1.0,
+        "actor_counterfactual_wrench_residual_magnitude_weight": 0.01,
+        "actor_counterfactual_wrench_residual_temporal_weight": 0.001,
         "actor_centroidal_propulsion": actor_centroidal_propulsion,
         "actor_centroidal_window": actor_centroidal_window,
         "actor_centroidal_delta": actor_centroidal_delta,
@@ -6614,6 +7086,10 @@ def train(
             metrics["learned_torso_wrench_valid"]
         ):
             raise RuntimeError("learned torso wrench telemetry is invalid")
+        if actor_counterfactual_wrench_distillation and not bool(
+            metrics["actor_counterfactual_valid"]
+        ):
+            raise RuntimeError("counterfactual wrench telemetry is invalid")
         if actor_policy_anchor_weight > 0.0 and not np.isfinite(
             float(metrics["actor_policy_anchor_squared_error"])
         ):
@@ -6977,6 +7453,10 @@ def train(
                             ),
                         }
                     )
+                if actor_counterfactual_wrench_distillation:
+                    diag_entry.update(
+                        build_counterfactual_wrench_telemetry(metrics)
+                    )
                 if adaptive_phase_sampling:
                     if not bool(metrics["adaptive_phase_sampling_valid"]):
                         raise RuntimeError(
@@ -7048,6 +7528,7 @@ def train(
                 and state.step > 5000
                 and not torso_wrench_assistance
                 and not actor_learned_torso_wrench
+                and not actor_counterfactual_wrench_distillation
                 and demonstration_replay_threshold is None
             ):
                 best_reward = reward
@@ -7129,6 +7610,10 @@ def train(
                         metrics,
                         max_ratio=actor_recovery_teacher_gradient_ratio,
                     )
+                )
+            if actor_counterfactual_wrench_distillation:
+                checkpoint_metrics.update(
+                    build_counterfactual_wrench_telemetry(metrics)
                 )
             if actor_policy_anchor_weight > 0.0:
                 checkpoint_metrics.update(
