@@ -76,6 +76,37 @@ def yaw_frame_momentum(
     )
 
 
+def capture_point_position(
+    com_world: jax.Array,
+    linear_momentum_world: jax.Array,
+    *,
+    total_mass: float,
+    gravity_magnitude: float,
+) -> jax.Array:
+    """Return the planar divergent component of motion in world coordinates."""
+    com = jp.asarray(com_world)
+    momentum = jp.asarray(linear_momentum_world)
+    if com.shape != (3,) or momentum.shape != (3,):
+        raise ValueError("COM and linear momentum must each have shape (3,)")
+    _validate_concrete_finite("COM", com)
+    _validate_concrete_finite("linear momentum", momentum)
+    if not math.isfinite(total_mass) or total_mass <= 0.0:
+        raise ValueError("total_mass must be positive and finite")
+    if not math.isfinite(gravity_magnitude) or gravity_magnitude <= 0.0:
+        raise ValueError("gravity_magnitude must be positive and finite")
+    try:
+        concrete_height = float(np.asarray(com[2]))
+    except jax.errors.TracerArrayConversionError:
+        concrete_height = 1.0
+    if concrete_height <= 0.0:
+        raise ValueError("COM height must be positive")
+    omega = jp.sqrt(
+        jp.asarray(gravity_magnitude, dtype=com.dtype) / com[2]
+    )
+    velocity_xy = momentum[:2] / jp.asarray(total_mass, dtype=momentum.dtype)
+    return com[:2] + velocity_xy / omega
+
+
 def mjx_centroidal_momentum(
     model: mjx.Model,
     data: mjx.Data,
@@ -94,6 +125,25 @@ def mjx_centroidal_momentum(
     )
     angular = measured._impl.subtree_angmom[root_body_id]
     return jp.concatenate((linear, angular))
+
+
+def mjx_capture_point(
+    model: mjx.Model,
+    data: mjx.Data,
+    root_body_id: int,
+    total_mass: float,
+    gravity_magnitude: float,
+) -> jax.Array:
+    """Return the differentiable planar capture point for one MJX state."""
+    momentum = mjx_centroidal_momentum(
+        model, data, root_body_id, total_mass
+    )
+    return capture_point_position(
+        data.subtree_com[root_body_id],
+        momentum[:3],
+        total_mass=total_mass,
+        gravity_magnitude=gravity_magnitude,
+    )
 
 
 def cpu_centroidal_momentum(
@@ -121,6 +171,39 @@ def cpu_centroidal_momentum(
             model.body_subtreemass[root_body_id]
             * data.subtree_linvel[root_body_id],
             data.subtree_angmom[root_body_id],
+        )
+    )
+
+
+def cpu_capture_point(
+    model: mujoco.MjModel,
+    qpos: np.ndarray,
+    qvel: np.ndarray,
+    root_body_id: int,
+) -> np.ndarray:
+    """Return the matching MuJoCo CPU planar capture point."""
+    position = np.asarray(qpos, dtype=np.float64)
+    velocity = np.asarray(qvel, dtype=np.float64)
+    if position.shape != (model.nq,) or velocity.shape != (model.nv,):
+        raise ValueError("qpos/qvel shapes do not match the model")
+    if not np.isfinite(position).all() or not np.isfinite(velocity).all():
+        raise ValueError("qpos/qvel must be finite")
+    if root_body_id < 1 or root_body_id >= model.nbody:
+        raise ValueError("root_body_id must identify a non-world body")
+    data = mujoco.MjData(model)
+    data.qpos[:] = position
+    data.qvel[:] = velocity
+    mujoco.mj_forward(model, data)
+    mujoco.mj_subtreeVel(model, data)
+    total_mass = float(model.body_subtreemass[root_body_id])
+    momentum = total_mass * data.subtree_linvel[root_body_id]
+    gravity_magnitude = float(np.linalg.norm(model.opt.gravity))
+    return np.asarray(
+        capture_point_position(
+            data.subtree_com[root_body_id],
+            momentum,
+            total_mass=total_mass,
+            gravity_magnitude=gravity_magnitude,
         )
     )
 
