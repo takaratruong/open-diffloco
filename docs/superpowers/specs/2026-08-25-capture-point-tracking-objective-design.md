@@ -39,10 +39,19 @@ credit for the observed backward lean and insufficient recovery step.
 3. Audit one frozen-E026 training batch before treatment. Register one static
    loss weight from the measured auxiliary/base gradient-norm ratio; do not
    sweep weights.
-4. Only after all gates pass, train a new zero-head joint residual over the
-   exact frozen E026 composite. Assistance remains exactly disabled.
+4. Only after all gates pass, train a matched pair of new zero-head joint
+   residuals over the exact frozen E026 composite. Both arms use the same
+   prefix-exact continuous reference, uniform exact reference-state resets,
+   no carried bank, no policy-anchor penalty, and exact-zero assistance. The
+   treatment adds only the capture-point loss; the control weight is zero.
 5. Select only replay-free five-phase survival. The capture loss is a training
    diagnostic and never a checkpoint-selection substitute.
+
+The continuous reference and reset distribution are intentional shared arm
+conditions, not inherited learned-wrench behavior: the short E026 reference
+ends before the failure being solved. Causal interpretation comes from the
+matched zero-capture residual control, while the original E026 policy remains
+bit-exact frozen in both arms.
 
 ## Rejected alternatives
 
@@ -53,4 +62,3 @@ credit for the observed backward lean and insufficient recovery step.
   distance than E026 while setting up the next step.
 - Do not add another reward/horizon/noise sweep. The next run changes only the
   physically motivated capture objective behind a frozen parent.
-

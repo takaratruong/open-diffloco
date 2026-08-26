@@ -4215,10 +4215,36 @@ def train(
             }
         capture_point_result = None
         if actor_capture_point_tracking:
+            final_capture_point = mjx_capture_point(
+                env.mjx_model,
+                final_state.data,
+                env.root_body_id,
+                env.nominal_total_mass,
+                env.centroidal_gravity,
+            )
+            actual_capture_point = jp.concatenate(
+                (traj["capture_point"], final_capture_point[None]), axis=0
+            )
+            reference_capture_point = jp.concatenate(
+                (
+                    traj["reference_capture_point"],
+                    env.reference_capture_point[
+                        final_state.info["phase"]
+                    ][None],
+                ),
+                axis=0,
+            )
+            capture_active = jp.concatenate(
+                (
+                    traj["ahac_active"],
+                    (traj["ahac_active"][-1] & ~traj["done"][-1])[None],
+                ),
+                axis=0,
+            )
             capture_point_result = capture_point_objective(
-                traj["capture_point"],
-                traj["reference_capture_point"],
-                active=traj["ahac_active"],
+                actual_capture_point,
+                reference_capture_point,
+                active=capture_active,
                 standing_height=env.standing_com_height,
                 delta=actor_capture_point_delta,
             )

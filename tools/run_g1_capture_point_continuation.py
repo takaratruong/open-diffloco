@@ -50,8 +50,11 @@ def build_capture_point_kwargs(
     resume_from: str | Path,
     *,
     capture_weight: float,
+    capture_enabled: bool = True,
 ) -> dict[str, Any]:
     """Apply only a new joint residual and capture-point auxiliary loss."""
+    if not isinstance(capture_enabled, bool):
+        raise ValueError("capture_enabled must be boolean")
     if not math.isfinite(capture_weight) or capture_weight <= 0.0:
         raise ValueError("capture weight must be positive and finite")
     kwargs = build_learned_wrench_kwargs(
@@ -65,10 +68,10 @@ def build_capture_point_kwargs(
         actor_frozen_controller_residual=True,
         actor_frozen_controller_residual_hidden=256,
         allow_resume_actor_frozen_controller_residual_start=True,
-        actor_capture_point_tracking=True,
+        actor_capture_point_tracking=capture_enabled,
         actor_capture_point_delta=0.1,
         actor_capture_point_weight=float(capture_weight),
-        allow_resume_actor_capture_point_tracking_start=True,
+        allow_resume_actor_capture_point_tracking_start=capture_enabled,
         total_steps=END_STEP,
         checkpoint_steps=expected_checkpoint_steps(),
     )
@@ -104,7 +107,9 @@ def validate_training_artifacts(
     hparams = json.loads((root / "hparams.json").read_text(encoding="utf-8"))
     required = {
         "actor_frozen_controller_residual": True,
-        "actor_capture_point_tracking": True,
+        "actor_capture_point_tracking": expected_kwargs[
+            "actor_capture_point_tracking"
+        ],
         "actor_capture_point_delta": 0.1,
         "actor_capture_point_weight": expected_kwargs[
             "actor_capture_point_weight"
@@ -142,13 +147,8 @@ def validate_training_artifacts(
     scalar_keys = (
         "actor_preview_gradient_norm",
         "actor_preview_update_norm",
-        "actor_capture_point_loss",
-        "actor_capture_point_p99_norm",
     )
     for row in rows:
-        components = np.asarray(
-            row.get("actor_capture_point_component_rms"), dtype=np.float64
-        )
         if (
             row.get("actor_preview_valid") is not True
             or any(
@@ -159,21 +159,41 @@ def validate_training_artifacts(
             )
             or float(row["actor_preview_gradient_norm"]) <= 0.0
             or float(row["actor_preview_update_norm"]) <= 0.0
-            or not isinstance(row.get("actor_capture_point_valid_count"), int)
-            or int(row["actor_capture_point_valid_count"]) <= 0
-            or components.shape != (2,)
-            or not np.isfinite(components).all()
             or row.get("actor_preview_frozen_parameter_drift_max_abs") != 0.0
             or row.get("actor_preview_frozen_moment_drift_max_abs") != 0.0
             or row.get("actor_preview_normalizer_drift_max_abs") != 0.0
         ):
             raise ValueError("capture-point checkpoint telemetry is invalid")
+        if expected_kwargs["actor_capture_point_tracking"]:
+            components = np.asarray(
+                row.get("actor_capture_point_component_rms"), dtype=np.float64
+            )
+            capture_scalars = (
+                row.get("actor_capture_point_loss"),
+                row.get("actor_capture_point_p99_norm"),
+            )
+            if (
+                any(
+                    not isinstance(value, (int, float))
+                    or isinstance(value, bool)
+                    or not math.isfinite(float(value))
+                    for value in capture_scalars
+                )
+                or not isinstance(
+                    row.get("actor_capture_point_valid_count"), int
+                )
+                or int(row["actor_capture_point_valid_count"]) <= 0
+                or components.shape != (2,)
+                or not np.isfinite(components).all()
+            ):
+                raise ValueError("capture-point telemetry is invalid")
     return {
         "valid": True,
         "protocol": "g1-capture-point-continuation-training-v1",
         "checkpoint_steps": list(expected_checkpoint_steps()),
         "source_checkpoint_sha256": EXPECTED_CHECKPOINT_SHA256,
         "capture_weight": expected_kwargs["actor_capture_point_weight"],
+        "capture_enabled": expected_kwargs["actor_capture_point_tracking"],
     }
 
 
@@ -185,6 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--code-commit", required=True)
     parser.add_argument("--capture-weight", type=float, required=True)
+    parser.add_argument("--arm", choices=("control", "capture"), required=True)
     parser.add_argument("--seed", type=int, default=0)
     return parser
 
@@ -207,6 +228,7 @@ def main() -> None:
         updates=UPDATES,
         checkpoint_steps=list(expected_checkpoint_steps()),
         capture_weight=args.capture_weight,
+        arm=args.arm,
         scientific_delta=[
             "actor_frozen_controller_residual",
             "actor_capture_point_tracking",
@@ -222,6 +244,7 @@ def main() -> None:
         args.seed,
         args.resume_from.resolve(),
         capture_weight=args.capture_weight,
+        capture_enabled=args.arm == "capture",
     )
     configure_jax()
     previous = Path.cwd()

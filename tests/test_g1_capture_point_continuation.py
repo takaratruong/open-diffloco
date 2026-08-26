@@ -43,6 +43,26 @@ def test_capture_point_kwargs_change_only_registered_treatment() -> None:
     assert kwargs["carried_reset_probability"] == 0.0
     assert kwargs["reference_reset_noise_scale"] == 0.0
 
+    control = build_capture_point_kwargs(
+        "g1-4x5",
+        "/tmp/reference.npz",
+        0,
+        "/tmp/checkpoint.pkl",
+        capture_weight=0.25,
+        capture_enabled=False,
+    )
+    assert control["actor_capture_point_tracking"] is False
+    assert control["allow_resume_actor_capture_point_tracking_start"] is False
+    expected_differing = {
+        "actor_capture_point_tracking",
+        "allow_resume_actor_capture_point_tracking_start",
+    }
+    assert all(
+        repr(kwargs[key]) == repr(control[key])
+        for key in kwargs
+        if key not in expected_differing
+    )
+
 
 def test_runner_invokes_exact_solver_and_training_validator() -> None:
     from tools import run_g1_capture_point_continuation as runner
