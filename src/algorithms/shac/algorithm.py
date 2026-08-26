@@ -7249,6 +7249,23 @@ def train(
                         ),
                     }
                 )
+            if actor_capture_point_tracking:
+                checkpoint_metrics.update(
+                    {
+                        "actor_capture_point_loss": float(
+                            metrics["actor_capture_point_loss"]
+                        ),
+                        "actor_capture_point_valid_count": int(
+                            metrics["actor_capture_point_valid_count"]
+                        ),
+                        "actor_capture_point_p99_norm": float(
+                            metrics["actor_capture_point_p99_norm"]
+                        ),
+                        "actor_capture_point_component_rms": np.asarray(
+                            metrics["actor_capture_point_component_rms"]
+                        ).tolist(),
+                    }
+                )
             if recovery_support is not None:
                 checkpoint_metrics.update(
                     {
