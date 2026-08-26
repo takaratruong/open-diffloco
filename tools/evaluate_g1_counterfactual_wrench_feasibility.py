@@ -439,6 +439,21 @@ def _collect_rows(
     wrench_rows: list[np.ndarray] = []
     support_rows: list[np.ndarray] = []
     reset_key = jax.random.PRNGKey(seed)
+
+    def teacher_step(teacher_state, teacher_action):
+        return env.step(teacher_state, teacher_action)
+
+    def student_change(residual, clean_state, base_action, before_features):
+        student_action = base_action + scatter_leg_residual(
+            residual, leg_indices, action_dim=29
+        ).astype(base_action.dtype)
+        next_state = env.step(clean_state, student_action)
+        return counterfactual_target_change(
+            before_features, _state_features(env, next_state)
+        )
+
+    compiled_teacher_step = jax.jit(teacher_step)
+    compiled_leg_jacobian = jax.jit(jax.jacfwd(student_change, argnums=0))
     for reset_phase in phases:
         state = reset_evaluation_state(
             env,
@@ -480,7 +495,7 @@ def _collect_rows(
             )
             scope = nullcontext() if profile is None else solver_context(profile)
             with scope:
-                teacher_next = env.step(teacher_state, base_action)
+                teacher_next = compiled_teacher_step(teacher_state, base_action)
             if bool(np.asarray(teacher_next.done)):
                 break
             before_features = _state_features(env, clean_state)
@@ -489,19 +504,13 @@ def _collect_rows(
             )
             support = np.asarray(env.foot_support_signature(clean_state.data))
             if bool(np.any(support)) and float(np.linalg.norm(np.asarray(world_wrench))) > 1e-8:
-                def student_change(residual):
-                    student_action = base_action + scatter_leg_residual(
-                        residual, leg_indices, action_dim=29
-                    ).astype(base_action.dtype)
-                    next_state = env.step(clean_state, student_action)
-                    return counterfactual_target_change(
-                        before_features, _state_features(env, next_state)
-                    )
-
                 scope = nullcontext() if profile is None else solver_context(profile)
                 with scope:
-                    jacobian = jax.jacfwd(student_change)(
-                        jnp.zeros((12,), dtype=base_action.dtype)
+                    jacobian = compiled_leg_jacobian(
+                        jnp.zeros((12,), dtype=base_action.dtype),
+                        clean_state,
+                        base_action,
+                        before_features,
                     )
                 target_np = np.asarray(teacher_change, dtype=np.float64)
                 jacobian_np = np.asarray(jacobian, dtype=np.float64)
