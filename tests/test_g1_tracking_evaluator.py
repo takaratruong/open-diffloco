@@ -636,6 +636,73 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
             actor.apply(loaded_params, observations), expected
         )
 
+    def test_checkpoint_loader_applies_joint_residual_over_frozen_e026(self):
+        from src.algorithms.shac.frozen_controller_residual import (
+            FrozenControllerResidualParams,
+            apply_frozen_controller_residual,
+        )
+        from src.algorithms.shac.residual_preview_adapter import (
+            FrozenPreviewResidualParams,
+            PreviewResidualAdapter,
+            apply_frozen_preview_residual,
+        )
+
+        env = SimpleNamespace(
+            action_dim=29,
+            squash_actor_actions=True,
+            actor_obs_dim=15,
+            actor_frame_obs_dim=5,
+            actor_history_len=3,
+        )
+        parent = Actor(29, hidden=(4,), squash=True, zero_output=False)
+        e026_adapter = PreviewResidualAdapter(action_dim=29, hidden_dim=4)
+        joint_adapter = PreviewResidualAdapter(action_dim=29, hidden_dim=4)
+        parent_params = parent.init(
+            jax.random.PRNGKey(41), jnp.zeros((1, 15))
+        )
+        e026_adapter_params = e026_adapter.init(
+            jax.random.PRNGKey(42), jnp.zeros((1, 5))
+        )
+        joint_adapter_params = joint_adapter.init(
+            jax.random.PRNGKey(43), jnp.zeros((1, 5))
+        )
+        e026 = FrozenPreviewResidualParams(parent_params, e026_adapter_params)
+        params = FrozenControllerResidualParams(e026, joint_adapter_params)
+        state = SimpleNamespace(actor_params=params, normalizer="normalizer")
+        observations = jnp.arange(15, dtype=jnp.float32).reshape(1, 15)
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "checkpoint.pkl"
+            with checkpoint.open("wb") as handle:
+                pickle.dump(state, handle)
+            actor, loaded_params, normalizer = _load_policy(
+                env, checkpoint, seed=0
+            )
+
+        def apply_e026(e026_params, actor_observations):
+            action, _, _ = apply_frozen_preview_residual(
+                parent,
+                e026_adapter,
+                e026_params,
+                actor_observations,
+                history_len=3,
+                treatment_frame_dim=5,
+            )
+            return action
+
+        expected, _, _ = apply_frozen_controller_residual(
+            apply_e026,
+            joint_adapter,
+            params,
+            observations,
+            history_len=3,
+            frame_dim=5,
+        )
+        np.testing.assert_array_equal(
+            actor.apply(loaded_params, observations), expected
+        )
+        self.assertEqual(normalizer, "normalizer")
+
     def test_checkpoint_loader_preserves_controller_and_exposes_zero_wrench_head(self):
         from src.algorithms.shac.learned_torso_wrench import (
             FrozenControllerWrenchParams,

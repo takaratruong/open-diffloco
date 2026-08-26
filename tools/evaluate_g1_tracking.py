@@ -18,6 +18,10 @@ from src.algorithms.shac.centroidal_objective import (
     CentroidalWindowResult,
     centroidal_window_objective,
 )
+from src.algorithms.shac.frozen_controller_residual import (
+    FrozenControllerResidualParams,
+    apply_frozen_controller_residual,
+)
 from src.algorithms.shac.learned_torso_wrench import (
     FrozenControllerWrenchParams,
     LearnedTorsoWrenchHead,
@@ -543,9 +547,14 @@ def _load_policy(
         learned_wrench = isinstance(
             state.actor_params, FrozenControllerWrenchParams
         )
+        frozen_controller_residual = isinstance(
+            state.actor_params, FrozenControllerResidualParams
+        )
         controller_params = (
             state.actor_params.controller
             if learned_wrench
+            else state.actor_params.parent
+            if frozen_controller_residual
             else state.actor_params
         )
         composite = isinstance(
@@ -620,6 +629,29 @@ def _load_policy(
                     return action
 
             actor = FrozenResidualCheckpointActor()
+        if frozen_controller_residual:
+            frozen_controller_actor = actor
+            adapter_kernel, _ = split_residual_adapter_params(
+                state.actor_params.adapter
+            )
+            residual_actor = PreviewResidualAdapter(
+                action_dim=env.action_dim,
+                hidden_dim=int(adapter_kernel.shape[1]),
+            )
+
+            class FrozenControllerResidualCheckpointActor:
+                def apply(self, params, observations):
+                    action, _, _ = apply_frozen_controller_residual(
+                        frozen_controller_actor.apply,
+                        residual_actor,
+                        params,
+                        observations,
+                        history_len=env.actor_history_len,
+                        frame_dim=env.actor_frame_obs_dim,
+                    )
+                    return action
+
+            actor = FrozenControllerResidualCheckpointActor()
         if learned_wrench:
             controller_actor = actor
             wrench_modules = state.actor_params.wrench["params"]
