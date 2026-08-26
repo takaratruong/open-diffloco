@@ -8,6 +8,8 @@ import jax
 import jax.numpy as jp
 import numpy as np
 
+from src.envs.g1_tracking.centroidal_momentum import yaw_frame_vector
+
 
 def _validate_host_array(name: str, value: jax.Array) -> None:
     """Validate concrete values while remaining compatible with JAX tracing."""
@@ -17,45 +19,6 @@ def _validate_host_array(name: str, value: jax.Array) -> None:
         return
     if not np.isfinite(concrete).all():
         raise ValueError(f"{name} must be finite")
-
-
-def _unit_quaternion(quaternion: jax.Array) -> jax.Array:
-    value = jp.asarray(quaternion)
-    if value.shape != (4,):
-        raise ValueError("root quaternion must have shape (4,)")
-    _validate_host_array("root quaternion", value)
-    try:
-        concrete_norm = float(np.linalg.norm(np.asarray(value)))
-    except jax.errors.TracerArrayConversionError:
-        concrete_norm = 1.0
-    if concrete_norm <= 1e-12:
-        raise ValueError("root quaternion must have nonzero norm")
-    return value / jp.maximum(jp.linalg.norm(value), 1e-12)
-
-
-def yaw_frame_vector(
-    world_vector: jax.Array, root_quaternion: jax.Array
-) -> jax.Array:
-    """Rotate one world-frame vector into the pelvis-yaw frame."""
-    vector = jp.asarray(world_vector)
-    if vector.shape != (3,):
-        raise ValueError("world vector must have shape (3,)")
-    _validate_host_array("world vector", vector)
-    w, x, y, z = _unit_quaternion(root_quaternion)
-    yaw = jp.arctan2(
-        2.0 * (w * z + x * y),
-        1.0 - 2.0 * (y * y + z * z),
-    )
-    cosine = jp.cos(yaw)
-    sine = jp.sin(yaw)
-    return jp.asarray(
-        (
-            cosine * vector[0] + sine * vector[1],
-            -sine * vector[0] + cosine * vector[1],
-            vector[2],
-        ),
-        dtype=vector.dtype,
-    )
 
 
 def constraint_propulsion_sample(

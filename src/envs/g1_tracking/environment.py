@@ -18,6 +18,10 @@ from src.envs.g1_tracking.contact_topology import (
     grouped_foot_support,
 )
 from src.envs.g1_tracking.controller import load_rmr_controller
+from src.envs.g1_tracking.centroidal_momentum import (
+    reference_centroidal_momentum,
+    standing_com_height,
+)
 from src.envs.g1_tracking.reference import (
     RMR_G1_BODY_NAMES,
     load_mujoco_reference,
@@ -479,6 +483,42 @@ class G1TrackingEnv:
         self.body_ids = tuple(self.reference.body_ids)
         self.anchor_body_id = self.body_ids[0]
         self.pelvis_body_id = self.anchor_body_id
+        self.root_body_id = int(
+            self.mj_model.body_rootid[self.anchor_body_id]
+        )
+        reference_momentum = reference_centroidal_momentum(
+            self.mj_model,
+            self.reference.qpos,
+            self.reference.qvel,
+            self.root_body_id,
+        )
+        self.reference_centroidal_momentum = jp.asarray(reference_momentum)
+        self.standing_com_height = standing_com_height(
+            self.mj_model, self.mj_model.qpos0, self.root_body_id
+        )
+        centroidal_mass = float(
+            self.mj_model.body_subtreemass[self.root_body_id]
+        )
+        centroidal_gravity = float(
+            np.linalg.norm(self.mj_model.opt.gravity)
+        )
+        velocity_scale = math.sqrt(
+            centroidal_gravity * self.standing_com_height
+        )
+        self.centroidal_linear_scale = centroidal_mass * velocity_scale
+        self.centroidal_angular_scale = (
+            centroidal_mass * self.standing_com_height * velocity_scale
+        )
+        if (
+            not np.isfinite(self.reference_centroidal_momentum).all()
+            or not math.isfinite(self.centroidal_linear_scale)
+            or not math.isfinite(self.centroidal_angular_scale)
+            or self.centroidal_linear_scale <= 0.0
+            or self.centroidal_angular_scale <= 0.0
+        ):
+            raise ValueError(
+                "centroidal reference and normalization must be finite"
+            )
         if not isinstance(randomization_com_body_name, str) or not (
             randomization_com_body_name.strip()
         ):
