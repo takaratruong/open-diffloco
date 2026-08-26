@@ -21,9 +21,9 @@ error separates the successful assisted controller from both failures:
 
 | Controller | RMS | p99 | final |
 | --- | ---: | ---: | ---: |
-| retained unassisted E026 | 0.3651 | 0.9479 | 0.9877 |
-| successful assisted E004 | 0.1908 | 0.4426 | 0.4616 |
-| exact-zero E005 | 0.4842 | 1.4369 | 1.4849 |
+| retained unassisted E026 | 0.3455 | 0.8969 | 0.9346 |
+| successful assisted E004 | 0.1805 | 0.4188 | 0.4368 |
+| exact-zero E005 | 0.4582 | 1.3596 | 1.4050 |
 
 This succeeds where raw four-step momentum failed because assistance need not
 imitate the reference force or momentum increment. It must keep the combined
@@ -36,9 +36,10 @@ credit for the observed backward lean and insufficient recovery step.
    p99 and final error must each be at most 80 percent of both comparators.
 2. Verify CPU and MJX capture-point measurements agree and gradients are
    finite and nonzero.
-3. Audit one frozen-E026 training batch before treatment. Register one static
-   loss weight from the measured auxiliary/base gradient-norm ratio; do not
-   sweep weights.
+3. The registered loss weight is exactly 1.0 after standing-height
+   normalization and component averaging. It is not a CLI parameter and must
+   not be swept. The first compiled treatment update must have finite nonzero
+   adapter gradient/update norms or both arms stop before checkpoint one.
 4. Only after all gates pass, train a matched pair of new zero-head joint
    residuals over the exact frozen E026 composite. Both arms use the same
    prefix-exact continuous reference, uniform exact reference-state resets,

@@ -34,6 +34,7 @@ TRANSITIONS_PER_UPDATE = 512 * 24
 CHECKPOINT_EVERY_UPDATES = 8
 CHECKPOINT_INTERVAL = CHECKPOINT_EVERY_UPDATES * TRANSITIONS_PER_UPDATE
 END_STEP = START_STEP + UPDATES * TRANSITIONS_PER_UPDATE
+CAPTURE_WEIGHT = 1.0
 
 
 def expected_checkpoint_steps() -> tuple[int, ...]:
@@ -49,14 +50,11 @@ def build_capture_point_kwargs(
     seed: int,
     resume_from: str | Path,
     *,
-    capture_weight: float,
     capture_enabled: bool = True,
 ) -> dict[str, Any]:
     """Apply only a new joint residual and capture-point auxiliary loss."""
     if not isinstance(capture_enabled, bool):
         raise ValueError("capture_enabled must be boolean")
-    if not math.isfinite(capture_weight) or capture_weight <= 0.0:
-        raise ValueError("capture weight must be positive and finite")
     kwargs = build_learned_wrench_kwargs(
         profile_name, reference_path, seed, resume_from
     )
@@ -70,7 +68,7 @@ def build_capture_point_kwargs(
         allow_resume_actor_frozen_controller_residual_start=True,
         actor_capture_point_tracking=capture_enabled,
         actor_capture_point_delta=0.1,
-        actor_capture_point_weight=float(capture_weight),
+        actor_capture_point_weight=CAPTURE_WEIGHT,
         allow_resume_actor_capture_point_tracking_start=capture_enabled,
         total_steps=END_STEP,
         checkpoint_steps=expected_checkpoint_steps(),
@@ -204,7 +202,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume-from", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--code-commit", required=True)
-    parser.add_argument("--capture-weight", type=float, required=True)
     parser.add_argument("--arm", choices=("control", "capture"), required=True)
     parser.add_argument("--seed", type=int, default=0)
     return parser
@@ -227,7 +224,7 @@ def main() -> None:
         end_step=END_STEP,
         updates=UPDATES,
         checkpoint_steps=list(expected_checkpoint_steps()),
-        capture_weight=args.capture_weight,
+        capture_weight=CAPTURE_WEIGHT,
         arm=args.arm,
         scientific_delta=[
             "actor_frozen_controller_residual",
@@ -243,7 +240,6 @@ def main() -> None:
         args.reference_path.resolve(),
         args.seed,
         args.resume_from.resolve(),
-        capture_weight=args.capture_weight,
         capture_enabled=args.arm == "capture",
     )
     configure_jax()

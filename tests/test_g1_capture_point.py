@@ -14,6 +14,8 @@ from src.envs.g1_tracking.centroidal_momentum import (
     reference_capture_points,
 )
 
+jax.config.update("jax_enable_x64", True)
+
 
 def _free_body_model() -> mujoco.MjModel:
     return mujoco.MjModel.from_xml_string(
@@ -94,6 +96,31 @@ def test_cpu_and_mjx_capture_points_match() -> None:
     )
 
     np.testing.assert_allclose(differentiable, cpu, rtol=0.0, atol=1e-9)
+
+
+def test_mjx_capture_point_has_finite_nonzero_state_gradient() -> None:
+    model = _free_body_model()
+    data = mujoco.MjData(model)
+    data.qpos[:] = np.asarray([0.2, -0.1, 0.8, 1.0, 0.0, 0.0, 0.0])
+    data.qvel[:] = np.asarray([0.7, -0.4, 0.1, 0.0, 0.0, 0.0])
+    mujoco.mj_forward(model, data)
+    mjx_model = mjx.put_model(model)
+    mjx_data = mjx.put_data(model, data)
+
+    gradient = jax.grad(
+        lambda qvel: jnp.sum(
+            mjx_capture_point(
+                mjx_model,
+                mjx.forward(mjx_model, mjx_data.replace(qvel=qvel)),
+                root_body_id=1,
+                total_mass=float(model.body_subtreemass[1]),
+                gravity_magnitude=9.81,
+            )
+        )
+    )(mjx_data.qvel)
+
+    assert jnp.isfinite(gradient).all()
+    assert float(jnp.linalg.norm(gradient)) > 0.0
 
 
 def test_reference_capture_points_preserve_frame_count() -> None:

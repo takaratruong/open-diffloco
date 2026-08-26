@@ -9,8 +9,9 @@
 4. Add an immutable matched-control/frozen-E026 continuation runner and
    exact-delta tests. Both arms change to the same continuous target and reset
    distribution; only the treatment enables the capture loss.
-5. Run the no-training discriminator and a bounded derivative/gradient-scale
-   audit. Register one static weight; no sweep.
+5. Run the no-training discriminator and the direct MJX derivative audit.
+   Enforce the registered static weight 1.0 and stop both arms if the first
+   compiled update is nonfinite or has zero adapter gradient/update norm.
 6. If and only if those gates pass, run control and treatment concurrently,
    evaluate all checkpoints on the replay-free five-phase grid, publish
    video/curves, and register the result in the research graph.

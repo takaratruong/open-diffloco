@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 
 from tools.run_g1_capture_point_continuation import (
+    CAPTURE_WEIGHT,
     CHECKPOINT_INTERVAL,
     END_STEP,
     START_STEP,
@@ -25,7 +26,6 @@ def test_capture_point_kwargs_change_only_registered_treatment() -> None:
         "/tmp/reference.npz",
         0,
         "/tmp/checkpoint.pkl",
-        capture_weight=0.25,
     )
 
     assert kwargs["total_steps"] == END_STEP
@@ -35,7 +35,7 @@ def test_capture_point_kwargs_change_only_registered_treatment() -> None:
     assert kwargs["allow_resume_actor_frozen_controller_residual_start"] is True
     assert kwargs["actor_capture_point_tracking"] is True
     assert kwargs["actor_capture_point_delta"] == 0.1
-    assert kwargs["actor_capture_point_weight"] == 0.25
+    assert kwargs["actor_capture_point_weight"] == CAPTURE_WEIGHT == 1.0
     assert kwargs["allow_resume_actor_capture_point_tracking_start"] is True
     assert kwargs["actor_learned_torso_wrench"] is False
     assert kwargs["torso_wrench_assistance"] is False
@@ -48,7 +48,6 @@ def test_capture_point_kwargs_change_only_registered_treatment() -> None:
         "/tmp/reference.npz",
         0,
         "/tmp/checkpoint.pkl",
-        capture_weight=0.25,
         capture_enabled=False,
     )
     assert control["actor_capture_point_tracking"] is False
