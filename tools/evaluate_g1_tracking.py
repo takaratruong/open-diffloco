@@ -18,6 +18,9 @@ from src.algorithms.shac.centroidal_objective import (
     CentroidalWindowResult,
     centroidal_window_objective,
 )
+from src.algorithms.shac.counterfactual_wrench_distillation import (
+    resolve_leg_action_indices,
+)
 from src.algorithms.shac.frozen_controller_residual import (
     FrozenControllerResidualParams,
     apply_frozen_controller_residual,
@@ -618,8 +621,8 @@ def _load_policy(
 
                 def apply(self, params, observations):
                     action, _, _ = apply_frozen_preview_residual(
-                        parent_actor,
-                        residual_actor,
+                        self.parent_actor,
+                        self.residual_actor,
                         params,
                         observations,
                         history_len=env.actor_history_len,
@@ -631,23 +634,39 @@ def _load_policy(
             actor = FrozenResidualCheckpointActor()
         if frozen_controller_residual:
             frozen_controller_actor = actor
-            adapter_kernel, _ = split_residual_adapter_params(
+            adapter_kernel, adapter_aux = split_residual_adapter_params(
                 state.actor_params.adapter
             )
+            residual_action_dim = int(adapter_aux.dense1_bias.shape[-1])
+            if residual_action_dim not in (12, env.action_dim):
+                raise ValueError(
+                    "frozen controller residual output width is invalid"
+                )
+            residual_action_indices = (
+                resolve_leg_action_indices(env.actor_joint_names)
+                if residual_action_dim == 12
+                else None
+            )
             residual_actor = PreviewResidualAdapter(
-                action_dim=env.action_dim,
+                action_dim=residual_action_dim,
                 hidden_dim=int(adapter_kernel.shape[1]),
             )
 
             class FrozenControllerResidualCheckpointActor:
+                def __init__(self):
+                    self.parent_actor = frozen_controller_actor
+                    self.residual_actor = residual_actor
+                    self.residual_action_indices = residual_action_indices
+
                 def apply(self, params, observations):
                     action, _, _ = apply_frozen_controller_residual(
-                        frozen_controller_actor.apply,
-                        residual_actor,
+                        self.parent_actor.apply,
+                        self.residual_actor,
                         params,
                         observations,
                         history_len=env.actor_history_len,
                         frame_dim=env.actor_frame_obs_dim,
+                        residual_action_indices=self.residual_action_indices,
                     )
                     return action
 
