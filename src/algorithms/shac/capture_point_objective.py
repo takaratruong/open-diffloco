@@ -22,6 +22,22 @@ class CapturePointResult(NamedTuple):
     p99_norm: jax.Array
 
 
+def capture_state_validity(
+    active: jax.Array, done: jax.Array
+) -> jax.Array:
+    """Return H scan-state masks plus the non-reset final-state mask."""
+    active_values = jp.asarray(active, dtype=bool)
+    done_values = jp.asarray(done, dtype=bool)
+    if (
+        active_values.ndim != 1
+        or done_values.shape != active_values.shape
+        or active_values.shape[0] < 1
+    ):
+        raise ValueError("active/done transition arrays do not align")
+    final_valid = active_values[-1] & ~done_values[-1]
+    return jp.concatenate((active_values, final_valid[None]), axis=0)
+
+
 def capture_point_objective(
     actual: jax.Array,
     reference: jax.Array,

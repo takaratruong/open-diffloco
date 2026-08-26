@@ -165,6 +165,7 @@ from src.envs.g1_tracking.centroidal_momentum import (
 )
 from src.algorithms.shac.capture_point_objective import (
     capture_point_objective,
+    capture_state_validity,
 )
 
 
@@ -4251,12 +4252,8 @@ def train(
                 ),
                 axis=0,
             )
-            capture_active = jp.concatenate(
-                (
-                    traj["ahac_active"],
-                    (traj["ahac_active"][-1] & ~traj["done"][-1])[None],
-                ),
-                axis=0,
+            capture_active = capture_state_validity(
+                traj["ahac_active"], traj["done"]
             )
             capture_point_result = capture_point_objective(
                 actual_capture_point,

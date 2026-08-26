@@ -5,7 +5,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from src.algorithms.shac.capture_point_objective import capture_point_objective
+from src.algorithms.shac.capture_point_objective import (
+    capture_point_objective,
+    capture_state_validity,
+)
 
 
 def test_capture_objective_masks_inactive_states_without_padding() -> None:
@@ -69,6 +72,16 @@ def test_no_valid_capture_states_returns_finite_zero() -> None:
     assert int(result.valid_count) == 0
 
 
+def test_capture_state_validity_accepts_float_done_telemetry() -> None:
+    active = jnp.asarray([True, True, True])
+    done = jnp.asarray([0.0, 0.0, 1.0], dtype=jnp.float64)
+
+    validity = capture_state_validity(active, done)
+
+    assert validity.dtype == jnp.bool_
+    assert validity.tolist() == [True, True, True, False]
+
+
 @pytest.mark.parametrize(
     "standing_height,delta",
     [(0.0, 0.1), (0.7, 0.2), (float("nan"), 0.1)],
@@ -85,4 +98,3 @@ def test_capture_objective_enforces_registered_contract(
             standing_height=standing_height,
             delta=delta,
         )
-

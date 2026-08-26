@@ -98,7 +98,7 @@ def test_train_wires_nested_controller_and_window_objective() -> None:
     assert "final_capture_point = mjx_capture_point(" in source
     assert "actual_capture_point = jp.concatenate(" in source
     assert "reference_capture_point = jp.concatenate(" in source
-    assert "capture_active = jp.concatenate(" in source
+    assert "capture_active = capture_state_validity(" in source
     assert '"actor_capture_point_tracking"' in source
     assert '"actor_capture_point_p99_norm"' in source
 
