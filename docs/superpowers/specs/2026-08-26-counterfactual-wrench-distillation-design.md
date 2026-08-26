@@ -156,3 +156,23 @@ curves, phase-zero video, and contact sheet.
 Any nonfinite teacher/student state, mismatched reset, stale `xfrc_applied`,
 nonzero frozen or non-leg update, missing artifact, or provenance mismatch is
 invalid execution rather than negative scientific evidence.
+
+## Post-E000 Terminal-Pair Amendment
+
+E-20260826-000 invalidly stopped on its second update under the rule above.
+The captured evidence was specific: `12,233` paired transitions were valid,
+one transition had different teacher/student `done` values, all objective
+telemetry was finite, the non-leg residual was exactly zero, and the student
+torso wrench was exactly zero. Because `env.step` auto-resets a terminated arm,
+the two resulting next states are not comparable. Treating this expected
+policy-outcome divergence as corrupt execution makes the objective unusable as
+soon as the assisted teacher changes survival.
+
+Beginning with the separately registered E-20260826-001 protocol, any pair in
+which either arm terminates is excluded from the counterfactual objective.
+Teacher/student terminal disagreements are counted and persisted separately.
+They do not invalidate an update; selection still judges whether the student
+actually survives. Nonfinite transition features, stale/nonzero student
+`xfrc_applied`, non-leg residual, frozen-state drift, missing evidence, or
+provenance mismatch remain invalid execution. This amendment is explicitly
+post-observation and does not retroactively validate E-20260826-000.

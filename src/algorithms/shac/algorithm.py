@@ -527,10 +527,14 @@ def build_counterfactual_wrench_telemetry(metrics) -> dict[str, object]:
     }
     valid_count = int(metrics["actor_counterfactual_valid_count"])
     invalid_count = int(metrics["actor_counterfactual_invalid_count"])
+    done_mismatch_count = int(
+        metrics["actor_counterfactual_done_mismatch_count"]
+    )
     if (
         not all(math.isfinite(value) for value in values.values())
         or valid_count < 1
         or invalid_count != 0
+        or done_mismatch_count < 0
         or values["residual_rms"] < 0.0
         or values["residual_max_abs"] < 0.0
         or not 0.0 <= values["residual_bound_fraction"] <= 1.0
@@ -546,6 +550,7 @@ def build_counterfactual_wrench_telemetry(metrics) -> dict[str, object]:
         },
         "actor_counterfactual_valid_count": valid_count,
         "actor_counterfactual_invalid_count": invalid_count,
+        "actor_counterfactual_done_mismatch_count": done_mismatch_count,
         "actor_counterfactual_valid": True,
     }
 
@@ -4284,8 +4289,7 @@ def train(
                     == counterfactual_teacher_next_state.done
                 )
                 counterfactual_step_integrity = (
-                    counterfactual_done_match
-                    & jp.asarray(
+                    jp.asarray(
                         counterfactual_step_telemetry["valid"], dtype=bool
                     )
                 )
@@ -4462,6 +4466,9 @@ def train(
                         ),
                         "counterfactual_integrity": (
                             (~active) | counterfactual_step_integrity
+                        ),
+                        "counterfactual_done_mismatch": (
+                            active & (~counterfactual_done_match)
                         ),
                         "counterfactual_residual_action": _residual_action,
                         "counterfactual_teacher_wrench": teacher_world_wrench,
@@ -5795,6 +5802,9 @@ def train(
             counterfactual_invalid_count = jp.sum(
                 ~trajs["counterfactual_integrity"]
             )
+            counterfactual_done_mismatch_count = jp.sum(
+                trajs["counterfactual_done_mismatch"]
+            )
             counterfactual_residual = trajs[
                 "counterfactual_residual_action"
             ]
@@ -5849,6 +5859,9 @@ def train(
                     ),
                     "actor_counterfactual_invalid_count": (
                         counterfactual_invalid_count
+                    ),
+                    "actor_counterfactual_done_mismatch_count": (
+                        counterfactual_done_mismatch_count
                     ),
                     "actor_counterfactual_residual_rms": jp.sqrt(
                         jp.mean(jp.square(counterfactual_leg_residual))
@@ -7119,6 +7132,7 @@ def train(
                 for name in (
                     "valid_count",
                     "invalid_count",
+                    "done_mismatch_count",
                     "loss",
                     "normalized_error_rms",
                     "residual_max_abs",

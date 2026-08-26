@@ -135,6 +135,7 @@ def test_train_wires_zero_wrench_teacher_and_leg_only_student():
     assert "candidate_unreplayed_state.done == 0" in source
     assert "counterfactual_teacher_next_state.done == 0" in source
     assert "counterfactual_done_match" in source
+    assert '"counterfactual_done_mismatch"' in source
     assert '"counterfactual_integrity"' in source
     assert "counterfactual_invalid_count == 0" in source
     assert "actor_objective + counterfactual_objective" in source
@@ -171,10 +172,12 @@ def test_checkpoint_counterfactual_telemetry_fails_closed():
         actor_counterfactual_student_wrench_max_abs=0.0,
         actor_counterfactual_valid_count=12,
         actor_counterfactual_invalid_count=0,
+        actor_counterfactual_done_mismatch_count=1,
         actor_counterfactual_valid=True,
     )
     report = algorithm.build_counterfactual_wrench_telemetry(metrics)
     assert report["actor_counterfactual_valid"] is True
+    assert report["actor_counterfactual_done_mismatch_count"] == 1
     assert report["actor_counterfactual_valid_count"] == 12
     metrics["actor_counterfactual_nonleg_max_abs"] = 1e-12
     with pytest.raises(ValueError):

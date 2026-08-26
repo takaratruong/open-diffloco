@@ -136,6 +136,7 @@ def test_validation_rejects_nonzero_nonleg_or_student_wrench(tmp_path):
             "actor_counterfactual_valid": True,
             "actor_counterfactual_valid_count": 1,
             "actor_counterfactual_invalid_count": 0,
+            "actor_counterfactual_done_mismatch_count": 0,
             "actor_counterfactual_nonleg_max_abs": 1e-6,
             "actor_counterfactual_student_wrench_max_abs": 0.0,
             "action_noise_current": 0.2,
