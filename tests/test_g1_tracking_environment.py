@@ -209,6 +209,24 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "tracking_velocity_kernel"):
             G1TrackingEnv(tracking_velocity_kernel="not-a-kernel")
 
+    def test_anchor_position_kernel_is_explicit_and_validated(self):
+        from src.envs.g1_tracking.environment import G1TrackingEnv
+
+        treatment = G1TrackingEnv(
+            tracking_anchor_position_kernel="dual_scale"
+        )
+
+        self.assertEqual(
+            self.env.tracking_anchor_position_kernel, "exponential"
+        )
+        self.assertEqual(
+            treatment.tracking_anchor_position_kernel, "dual_scale"
+        )
+        with self.assertRaisesRegex(
+            ValueError, "tracking_anchor_position_kernel"
+        ):
+            G1TrackingEnv(tracking_anchor_position_kernel="not-a-kernel")
+
     def test_torso_orientation_weight_is_default_off_and_validated(self):
         from src.envs.g1_tracking.environment import G1TrackingEnv
 

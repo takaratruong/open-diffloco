@@ -63,6 +63,7 @@ def build_payload(
     actor_history_len: int,
     actor_observe_motion_anchor_position: bool,
     tracking_velocity_kernel: str,
+    tracking_anchor_position_kernel: str = "exponential",
     tracking_torso_orientation_weight: float,
     tracking_root_velocity_weight: float = 0.0,
     actor_residual_preview_adapter: bool = False,
@@ -94,6 +95,7 @@ def build_payload(
             actor_observe_motion_anchor_position
         ),
         "tracking_velocity_kernel": tracking_velocity_kernel,
+        "tracking_anchor_position_kernel": tracking_anchor_position_kernel,
         "tracking_torso_orientation_weight": (
             tracking_torso_orientation_weight
         ),
@@ -167,6 +169,9 @@ def load_checkpoint_environment_contract(checkpoint_path: Path) -> dict:
         "tracking_velocity_kernel": hparams.get(
             "tracking_velocity_kernel", "exponential"
         ),
+        "tracking_anchor_position_kernel": hparams.get(
+            "tracking_anchor_position_kernel", "exponential"
+        ),
         "tracking_torso_orientation_weight": hparams.get(
             "tracking_torso_orientation_weight", 0.0
         ),
@@ -205,6 +210,8 @@ def load_checkpoint_environment_contract(checkpoint_path: Path) -> dict:
         )
         or contract["tracking_velocity_kernel"]
         not in {"exponential", "pseudo_huber"}
+        or contract["tracking_anchor_position_kernel"]
+        not in {"exponential", "dual_scale"}
         or isinstance(contract["tracking_torso_orientation_weight"], bool)
         or not isinstance(
             contract["tracking_torso_orientation_weight"], (int, float)
@@ -389,6 +396,9 @@ def main() -> None:
             "actor_observe_motion_anchor_position"
         ],
         tracking_velocity_kernel=contract["tracking_velocity_kernel"],
+        tracking_anchor_position_kernel=contract[
+            "tracking_anchor_position_kernel"
+        ],
         tracking_torso_orientation_weight=contract[
             "tracking_torso_orientation_weight"
         ],
@@ -542,6 +552,9 @@ def main() -> None:
             "actor_observe_motion_anchor_position"
         ],
         tracking_velocity_kernel=contract["tracking_velocity_kernel"],
+        tracking_anchor_position_kernel=contract[
+            "tracking_anchor_position_kernel"
+        ],
         tracking_torso_orientation_weight=contract[
             "tracking_torso_orientation_weight"
         ],

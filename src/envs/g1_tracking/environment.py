@@ -165,6 +165,7 @@ class G1TrackingEnv:
         action_magnitude_weight: float = 0.0,
         termination_margin_weight: float = 0.0,
         tracking_velocity_kernel: str = "exponential",
+        tracking_anchor_position_kernel: str = "exponential",
         tracking_torso_orientation_weight: float = 0.0,
         tracking_root_velocity_weight: float = 0.0,
         reference_reset_noise_scale: float = 0.0,
@@ -275,6 +276,17 @@ class G1TrackingEnv:
                 "'pseudo_huber'"
             )
         self.tracking_velocity_kernel = tracking_velocity_kernel
+        if tracking_anchor_position_kernel not in {
+            "exponential",
+            "dual_scale",
+        }:
+            raise ValueError(
+                "tracking_anchor_position_kernel must be 'exponential' or "
+                "'dual_scale'"
+            )
+        self.tracking_anchor_position_kernel = (
+            tracking_anchor_position_kernel
+        )
         if (
             isinstance(tracking_torso_orientation_weight, bool)
             or not np.isfinite(tracking_torso_orientation_weight)
@@ -889,6 +901,7 @@ class G1TrackingEnv:
             target_body_ang_vel=self.body_ang_vel_reference[phase],
             actual_body_ang_vel=body_ang_vel,
             velocity_kernel=self.tracking_velocity_kernel,
+            anchor_position_kernel=self.tracking_anchor_position_kernel,
         )
         if self.tracking_torso_orientation_weight > 0.0:
             torso_orientation = torso_orientation_tracking_reward(

@@ -160,6 +160,27 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
                         {"tracking_velocity_kernel": invalid}
                     )
 
+    def test_training_hparams_restore_anchor_position_kernel_strictly(self):
+        from tools.evaluate_g1_tracking import (
+            resolve_training_anchor_position_kernel,
+        )
+
+        self.assertEqual(
+            resolve_training_anchor_position_kernel({}), "exponential"
+        )
+        self.assertEqual(
+            resolve_training_anchor_position_kernel(
+                {"tracking_anchor_position_kernel": "dual_scale"}
+            ),
+            "dual_scale",
+        )
+        for invalid in (None, True, "unknown"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "anchor position kernel"):
+                    resolve_training_anchor_position_kernel(
+                        {"tracking_anchor_position_kernel": invalid}
+                    )
+
     def test_training_hparams_restore_motion_anchor_position_strictly(self):
         from tools.evaluate_g1_tracking import (
             resolve_training_motion_anchor_position_observation,
@@ -948,6 +969,16 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         )
 
         self.assertEqual(candidate.tracking_velocity_kernel, "pseudo_huber")
+
+    def test_evaluator_forwards_anchor_position_kernel(self):
+        candidate = make_evaluation_env(
+            "g1_tracking_rmr_50hz_source_step",
+            tracking_anchor_position_kernel="dual_scale",
+        )
+
+        self.assertEqual(
+            candidate.tracking_anchor_position_kernel, "dual_scale"
+        )
 
     def test_evaluator_forwards_torso_orientation_weight(self):
         candidate = make_evaluation_env(

@@ -98,6 +98,44 @@ class RMRTrackingRewardTest(unittest.TestCase):
         self.assertTrue(bool(jnp.isfinite(gradient)))
         self.assertLess(float(gradient), 0.0)
 
+    def test_dual_scale_anchor_position_preserves_peak_and_registered_mix(self):
+        _, at_reference = self.reward(anchor_position_kernel="dual_scale")
+        _, displaced = self.reward(
+            actual_anchor_pos=jnp.array([0.3, 0.0, 0.0]),
+            anchor_position_kernel="dual_scale",
+        )
+
+        self.assertAlmostEqual(float(at_reference["anchor_position"]), 1.0)
+        expected = 0.75 * math.exp(-1.0) + 0.25 * math.exp(
+            -(0.3 / 0.8) ** 2
+        )
+        self.assertAlmostEqual(
+            float(displaced["anchor_position"]), expected, places=6
+        )
+
+    def test_dual_scale_anchor_position_has_more_far_error_gradient(self):
+        def component(error, kernel):
+            _, components = self.reward(
+                actual_anchor_pos=jnp.array([error, 0.0, 0.0]),
+                anchor_position_kernel=kernel,
+            )
+            return components["anchor_position"]
+
+        legacy = jax.grad(lambda error: component(error, "exponential"))(
+            jnp.array(0.74)
+        )
+        treatment = jax.grad(lambda error: component(error, "dual_scale"))(
+            jnp.array(0.74)
+        )
+
+        self.assertTrue(bool(jnp.isfinite(treatment)))
+        self.assertLess(float(treatment), 0.0)
+        self.assertGreater(abs(float(treatment)), 7.0 * abs(float(legacy)))
+
+    def test_tracking_reward_rejects_unknown_anchor_position_kernel(self):
+        with self.assertRaisesRegex(ValueError, "anchor position kernel"):
+            self.reward(anchor_position_kernel="not-a-kernel")
+
     def test_pseudo_huber_velocity_kernel_matches_registered_formula(self):
         actual_body_lin_vel = self.body_lin_vel.at[0, 1].set(1.0)
 

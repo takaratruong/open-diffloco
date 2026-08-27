@@ -33,6 +33,19 @@ def _velocity_tracking_kernel(
     raise ValueError(f"unknown tracking velocity kernel: {kernel}")
 
 
+def _anchor_position_tracking_kernel(
+    squared_error: jax.Array,
+    kernel: str,
+) -> jax.Array:
+    if kernel == "exponential":
+        return jp.exp(-squared_error / 0.3**2)
+    if kernel == "dual_scale":
+        return 0.75 * jp.exp(-squared_error / 0.3**2) + 0.25 * jp.exp(
+            -squared_error / 0.8**2
+        )
+    raise ValueError(f"unknown anchor position kernel: {kernel}")
+
+
 def torso_orientation_tracking_reward(
     target_body_quat: jax.Array,
     actual_body_quat: jax.Array,
@@ -152,6 +165,7 @@ def rmr_tracking_reward(
     target_body_ang_vel: jax.Array,
     actual_body_ang_vel: jax.Array,
     velocity_kernel: str = "exponential",
+    anchor_position_kernel: str = "exponential",
 ) -> tuple[jax.Array, Mapping[str, jax.Array]]:
     """Computes the six default RMR tracking terms and their weighted sum.
 
@@ -160,8 +174,9 @@ def rmr_tracking_reward(
     applying each exponential, matching the upstream task.
     """
     components = {
-        "anchor_position": jp.exp(
-            -_position_error(target_anchor_pos, actual_anchor_pos) / 0.3**2
+        "anchor_position": _anchor_position_tracking_kernel(
+            _position_error(target_anchor_pos, actual_anchor_pos),
+            anchor_position_kernel,
         ),
         "anchor_orientation": jp.exp(
             -jp.square(

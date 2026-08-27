@@ -212,6 +212,7 @@ def make_evaluation_env(
     actor_reference_preview_mode: str = "absolute",
     actor_observe_motion_anchor_position: bool = False,
     tracking_velocity_kernel: str = "exponential",
+    tracking_anchor_position_kernel: str = "exponential",
     tracking_torso_orientation_weight: float = 0.0,
     tracking_root_velocity_weight: float = 0.0,
     actor_observation_noise: bool = False,
@@ -237,6 +238,7 @@ def make_evaluation_env(
             actor_observe_motion_anchor_position
         ),
         "tracking_velocity_kernel": tracking_velocity_kernel,
+        "tracking_anchor_position_kernel": tracking_anchor_position_kernel,
         "tracking_torso_orientation_weight": tracking_torso_orientation_weight,
         "tracking_root_velocity_weight": tracking_root_velocity_weight,
         "actor_observation_noise": actor_observation_noise,
@@ -282,6 +284,16 @@ def resolve_training_tracking_velocity_kernel(
     value = hparams.get("tracking_velocity_kernel", "exponential")
     if value not in {"exponential", "pseudo_huber"}:
         raise ValueError("training tracking velocity kernel is invalid")
+    return value
+
+
+def resolve_training_anchor_position_kernel(
+    hparams: dict[str, object],
+) -> str:
+    """Restore the checkpoint anchor-position kernel without coercion."""
+    value = hparams.get("tracking_anchor_position_kernel", "exponential")
+    if value not in {"exponential", "dual_scale"}:
+        raise ValueError("training anchor position kernel is invalid")
     return value
 
 
@@ -844,6 +856,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="exponential",
     )
     parser.add_argument(
+        "--tracking-anchor-position-kernel",
+        choices=("exponential", "dual_scale"),
+        default="exponential",
+    )
+    parser.add_argument(
         "--tracking-torso-orientation-weight", type=float, default=0.0
     )
     parser.add_argument(
@@ -986,6 +1003,9 @@ def main() -> None:
         args.tracking_velocity_kernel = (
             resolve_training_tracking_velocity_kernel(training_hparams)
         )
+        args.tracking_anchor_position_kernel = (
+            resolve_training_anchor_position_kernel(training_hparams)
+        )
         args.tracking_torso_orientation_weight = (
             resolve_training_torso_orientation_weight(training_hparams)
         )
@@ -1045,6 +1065,9 @@ def main() -> None:
             args.actor_observe_motion_anchor_position
         ),
         tracking_velocity_kernel=args.tracking_velocity_kernel,
+        tracking_anchor_position_kernel=(
+            args.tracking_anchor_position_kernel
+        ),
         tracking_torso_orientation_weight=(
             args.tracking_torso_orientation_weight
         ),
@@ -1776,6 +1799,9 @@ def main() -> None:
             env.actor_observe_motion_anchor_position
         ),
         "tracking_velocity_kernel": env.tracking_velocity_kernel,
+        "tracking_anchor_position_kernel": (
+            env.tracking_anchor_position_kernel
+        ),
         "tracking_torso_orientation_weight": (
             env.tracking_torso_orientation_weight
         ),

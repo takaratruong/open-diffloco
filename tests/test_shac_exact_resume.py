@@ -223,6 +223,57 @@ class ShacExactResumeTest(unittest.TestCase):
             False,
         )
 
+    def test_anchor_position_kernel_resume_is_explicit_and_fail_closed(self):
+        from src.algorithms.shac.algorithm import (
+            resolve_anchor_position_kernel_resume_setting,
+            train,
+        )
+
+        self.assertEqual(
+            resolve_anchor_position_kernel_resume_setting(
+                None,
+                requested="exponential",
+                allow_change=False,
+                is_resume=False,
+            ),
+            "exponential",
+        )
+        self.assertEqual(
+            resolve_anchor_position_kernel_resume_setting(
+                {"tracking_anchor_position_kernel": "exponential"},
+                requested="dual_scale",
+                allow_change=True,
+                is_resume=True,
+            ),
+            "dual_scale",
+        )
+        with self.assertRaisesRegex(ValueError, "must match"):
+            resolve_anchor_position_kernel_resume_setting(
+                {"tracking_anchor_position_kernel": "exponential"},
+                requested="dual_scale",
+                allow_change=False,
+                is_resume=True,
+            )
+        with self.assertRaisesRegex(ValueError, "resume hparams"):
+            resolve_anchor_position_kernel_resume_setting(
+                None,
+                requested="dual_scale",
+                allow_change=True,
+                is_resume=True,
+            )
+
+        parameters = inspect.signature(train).parameters
+        self.assertEqual(
+            parameters["tracking_anchor_position_kernel"].default,
+            "exponential",
+        )
+        self.assertIs(
+            parameters[
+                "allow_resume_tracking_anchor_position_kernel_change"
+            ].default,
+            False,
+        )
+
     def test_future_reference_train_settings_are_default_off(self):
         from src.algorithms.shac.algorithm import train
 

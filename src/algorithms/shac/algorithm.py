@@ -880,6 +880,42 @@ def resolve_tracking_velocity_kernel_resume_setting(
     return requested
 
 
+def resolve_anchor_position_kernel_resume_setting(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested: str,
+    allow_change: bool,
+    is_resume: bool,
+) -> str:
+    """Restore the exact anchor-position objective unless authorized."""
+    valid = {"exponential", "dual_scale"}
+    if requested not in valid:
+        raise ValueError("requested anchor position kernel is invalid")
+    if not isinstance(allow_change, bool):
+        raise ValueError(
+            "allow_resume_tracking_anchor_position_kernel_change must be boolean"
+        )
+    if not isinstance(is_resume, bool):
+        raise ValueError("is_resume must be boolean")
+    if not is_resume:
+        return requested
+    if resumed_hparams is None:
+        raise ValueError(
+            "resume hparams are required for the anchor position kernel"
+        )
+    saved = resumed_hparams.get(
+        "tracking_anchor_position_kernel", "exponential"
+    )
+    if saved not in valid:
+        raise ValueError("checkpoint anchor position kernel is invalid")
+    if saved != requested and not allow_change:
+        raise ValueError(
+            "anchor position kernel must match the checkpoint unless "
+            "allow_resume_tracking_anchor_position_kernel_change is enabled"
+        )
+    return requested
+
+
 def resolve_tracking_torso_orientation_resume_weight(
     resumed_hparams: dict[str, object] | None,
     *,
@@ -2324,6 +2360,8 @@ def train(
     allow_resume_termination_margin_change: bool = False,
     tracking_velocity_kernel: str = "exponential",
     allow_resume_tracking_velocity_kernel_change: bool = False,
+    tracking_anchor_position_kernel: str = "exponential",
+    allow_resume_tracking_anchor_position_kernel_change: bool = False,
     tracking_torso_orientation_weight: float = 0.0,
     allow_resume_tracking_torso_orientation_change: bool = False,
     tracking_root_velocity_weight: float = 0.0,
@@ -2397,6 +2435,10 @@ def train(
                                   tracking terms.
         allow_resume_tracking_velocity_kernel_change: Explicitly permit a
                                                        resumed kernel change.
+        tracking_anchor_position_kernel: Kernel used by the G1 anchor-position
+                                         tracking term.
+        allow_resume_tracking_anchor_position_kernel_change: Explicitly permit
+                                                               its resumed change.
         tracking_torso_orientation_weight: Optional direct pseudo-Huber torso
                                             orientation reward weight.
         allow_resume_tracking_torso_orientation_change: Explicitly permit a
@@ -2699,6 +2741,14 @@ def train(
         raise ValueError(
             "allow_resume_tracking_velocity_kernel_change must be boolean"
         )
+    if tracking_anchor_position_kernel not in {"exponential", "dual_scale"}:
+        raise ValueError("tracking anchor position kernel is invalid")
+    if not isinstance(
+        allow_resume_tracking_anchor_position_kernel_change, bool
+    ):
+        raise ValueError(
+            "allow_resume_tracking_anchor_position_kernel_change must be boolean"
+        )
     tracking_torso_orientation_weight = (
         resolve_tracking_torso_orientation_resume_weight(
             None,
@@ -2862,6 +2912,16 @@ def train(
                 resumed_hparams,
                 requested=tracking_velocity_kernel,
                 allow_change=allow_resume_tracking_velocity_kernel_change,
+                is_resume=True,
+            )
+        )
+        tracking_anchor_position_kernel = (
+            resolve_anchor_position_kernel_resume_setting(
+                resumed_hparams,
+                requested=tracking_anchor_position_kernel,
+                allow_change=(
+                    allow_resume_tracking_anchor_position_kernel_change
+                ),
                 is_resume=True,
             )
         )
@@ -3369,6 +3429,9 @@ def train(
                 "effort_limit_scale": effort_limit_scale,
                 "termination_margin_weight": termination_margin_weight,
                 "tracking_velocity_kernel": tracking_velocity_kernel,
+                "tracking_anchor_position_kernel": (
+                    tracking_anchor_position_kernel
+                ),
                 "tracking_torso_orientation_weight": (
                     tracking_torso_orientation_weight
                 ),
@@ -6813,6 +6876,10 @@ def train(
         "tracking_velocity_kernel": tracking_velocity_kernel,
         "allow_resume_tracking_velocity_kernel_change": (
             allow_resume_tracking_velocity_kernel_change
+        ),
+        "tracking_anchor_position_kernel": tracking_anchor_position_kernel,
+        "allow_resume_tracking_anchor_position_kernel_change": (
+            allow_resume_tracking_anchor_position_kernel_change
         ),
         "tracking_torso_orientation_weight": (
             tracking_torso_orientation_weight

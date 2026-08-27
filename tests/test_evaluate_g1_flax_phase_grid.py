@@ -145,8 +145,9 @@ def test_phase_grid_loads_environment_contract_from_checkpoint_hparams(
     expected = {
         **hparams,
         "actor_reference_lookahead_steps": (4, 8, 12),
-        "tracking_velocity_kernel": "exponential",
-        "tracking_torso_orientation_weight": 0.0,
+            "tracking_velocity_kernel": "exponential",
+            "tracking_anchor_position_kernel": "exponential",
+            "tracking_torso_orientation_weight": 0.0,
         "tracking_root_velocity_weight": 0.0,
     }
 
