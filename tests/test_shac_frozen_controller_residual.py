@@ -94,6 +94,50 @@ def test_migration_preserves_complete_parent_action_bit_exactly() -> None:
     assert state.parent_optimizer_state is parent_opt
 
 
+def test_second_migration_preserves_complete_nested_parent_bit_exactly() -> None:
+    (
+        _parent_params,
+        _parent_opt,
+        adapter,
+        optimizer,
+        observation,
+        first_params,
+        first_state,
+        _report,
+    ) = _migrated()
+
+    def apply_controller(params, observations):
+        if isinstance(params, FrozenPreviewResidualParams):
+            return _parent_apply(params, observations)
+        return apply_frozen_controller_residual(
+            apply_controller,
+            adapter,
+            params,
+            observations,
+            history_len=2,
+            frame_dim=4,
+        )[0]
+
+    second_params, second_state, report = migrate_frozen_controller_residual(
+        parent_params=first_params,
+        parent_optimizer_state=first_state,
+        parent_apply=apply_controller,
+        adapter_actor=adapter,
+        adapter_optimizer=optimizer,
+        rng=jax.random.PRNGKey(8),
+        normalized_observations=observation,
+        history_len=2,
+        frame_dim=4,
+    )
+
+    expected = apply_controller(first_params, observation)
+    actual = apply_controller(second_params, observation)
+    np.testing.assert_array_equal(actual, expected)
+    assert second_params.parent is first_params
+    assert second_state.parent_optimizer_state is first_state
+    assert report["valid"] is True
+
+
 def test_only_new_adapter_changes_after_update() -> None:
     _, parent_opt, _, optimizer, _, params, state, _ = _migrated()
     gradients = FrozenControllerResidualParams(
@@ -122,12 +166,12 @@ def test_only_new_adapter_changes_after_update() -> None:
     assert next_state.parent_optimizer_state is parent_opt
 
 
-def test_application_rejects_non_e026_parent_and_wrong_action_width() -> None:
+def test_application_rejects_invalid_parent_and_wrong_action_width() -> None:
     _, _, adapter, _, observation, params, _, _ = _migrated()
     invalid = FrozenControllerResidualParams(
         parent={"not": "e026"}, adapter=params.adapter
     )
-    with pytest.raises(ValueError, match="E026"):
+    with pytest.raises(ValueError, match="frozen-preview base"):
         apply_frozen_controller_residual(
             _parent_apply,
             adapter,

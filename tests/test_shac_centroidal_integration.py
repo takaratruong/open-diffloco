@@ -11,6 +11,7 @@ def test_centroidal_and_frozen_controller_flags_are_default_off() -> None:
     parameters = inspect.signature(train).parameters
     assert parameters["actor_frozen_controller_residual"].default is False
     assert parameters["actor_frozen_controller_residual_hidden"].default == 256
+    assert parameters["actor_frozen_controller_residual_depth"].default == 1
     assert (
         parameters["allow_resume_actor_frozen_controller_residual_start"].default
         is False
@@ -43,6 +44,7 @@ def test_frozen_controller_upgrade_requires_explicit_resume_authority() -> None:
             legacy,
             requested=True,
             requested_hidden=256,
+            requested_depth=1,
             allow_start=False,
             is_resume=True,
         )
@@ -50,9 +52,49 @@ def test_frozen_controller_upgrade_requires_explicit_resume_authority() -> None:
         legacy,
         requested=True,
         requested_hidden=256,
+        requested_depth=1,
         allow_start=True,
         is_resume=True,
-    ) == (True, 256, True)
+    ) == (True, 256, 1, True)
+
+
+def test_frozen_controller_can_add_exactly_one_parent_preserving_layer() -> None:
+    from src.algorithms.shac.algorithm import (
+        resolve_frozen_controller_residual_resume_setting,
+    )
+
+    e002 = {
+        "actor_frozen_controller_residual": True,
+        "actor_frozen_controller_residual_hidden": 256,
+        "actor_frozen_controller_residual_depth": 1,
+    }
+    with pytest.raises(ValueError, match="explicit authority"):
+        resolve_frozen_controller_residual_resume_setting(
+            e002,
+            requested=True,
+            requested_hidden=256,
+            requested_depth=2,
+            allow_start=False,
+            is_resume=True,
+        )
+    assert resolve_frozen_controller_residual_resume_setting(
+        e002,
+        requested=True,
+        requested_hidden=256,
+        requested_depth=2,
+        allow_start=True,
+        is_resume=True,
+    ) == (True, 256, 2, True)
+
+    with pytest.raises(ValueError, match="one layer"):
+        resolve_frozen_controller_residual_resume_setting(
+            e002,
+            requested=True,
+            requested_hidden=256,
+            requested_depth=3,
+            allow_start=True,
+            is_resume=True,
+        )
 
 
 def test_centroidal_upgrade_requires_exact_registered_settings() -> None:

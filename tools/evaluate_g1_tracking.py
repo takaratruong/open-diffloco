@@ -586,17 +586,20 @@ def _load_policy(
         controller_params = (
             state.actor_params.controller
             if learned_wrench
-            else state.actor_params.parent
-            if frozen_controller_residual
             else state.actor_params
         )
+        base_controller_params = controller_params
+        while isinstance(
+            base_controller_params, FrozenControllerResidualParams
+        ):
+            base_controller_params = base_controller_params.parent
         composite = isinstance(
-            controller_params, FrozenPreviewResidualParams
+            base_controller_params, FrozenPreviewResidualParams
         )
         modules = (
-            controller_params.parent["params"]
+            base_controller_params.parent["params"]
             if composite
-            else controller_params["params"]
+            else base_controller_params["params"]
         )
         dense_names = sorted(
             (name for name in modules if name.startswith("Dense_")),
@@ -631,7 +634,7 @@ def _load_policy(
         if composite:
             parent_actor = actor
             adapter_kernel, _ = split_residual_adapter_params(
-                controller_params.adapter
+                base_controller_params.adapter
             )
             residual_actor = PreviewResidualAdapter(
                 action_dim=env.action_dim,
@@ -664,29 +667,10 @@ def _load_policy(
             actor = FrozenResidualCheckpointActor()
         if frozen_controller_residual:
             frozen_controller_actor = actor
-            adapter_kernel, adapter_aux = split_residual_adapter_params(
-                state.actor_params.adapter
-            )
-            residual_action_dim = int(adapter_aux.dense1_bias.shape[-1])
-            if residual_action_dim not in (12, env.action_dim):
-                raise ValueError(
-                    "frozen controller residual output width is invalid"
-                )
-            residual_action_indices = (
-                resolve_leg_action_indices(env.actor_joint_names)
-                if residual_action_dim == 12
-                else None
-            )
-            residual_actor = PreviewResidualAdapter(
-                action_dim=residual_action_dim,
-                hidden_dim=int(adapter_kernel.shape[1]),
-            )
 
             class FrozenControllerResidualCheckpointActor:
                 def __init__(self):
                     self.parent_actor = frozen_controller_actor
-                    self.residual_actor = residual_actor
-                    self.residual_action_indices = residual_action_indices
 
                 def apply(self, params, observations):
                     action, _, _, _ = self.apply_with_diagnostics(
@@ -695,24 +679,53 @@ def _load_policy(
                     return action
 
                 def apply_with_diagnostics(self, params, observations):
-                    parent_action = self.parent_actor.apply(
-                        params.parent, observations
+                    if not isinstance(params, FrozenControllerResidualParams):
+                        raise ValueError(
+                            "frozen controller residual parameters are invalid"
+                        )
+                    parent_action = (
+                        self.apply(params.parent, observations)
+                        if isinstance(
+                            params.parent, FrozenControllerResidualParams
+                        )
+                        else self.parent_actor.apply(
+                            params.parent, observations
+                        )
+                    )
+                    adapter_kernel, adapter_aux = (
+                        split_residual_adapter_params(params.adapter)
+                    )
+                    residual_action_dim = int(
+                        adapter_aux.dense1_bias.shape[-1]
+                    )
+                    if residual_action_dim not in (12, env.action_dim):
+                        raise ValueError(
+                            "frozen controller residual output width is invalid"
+                        )
+                    residual_action_indices = (
+                        resolve_leg_action_indices(env.actor_joint_names)
+                        if residual_action_dim == 12
+                        else None
+                    )
+                    residual_actor = PreviewResidualAdapter(
+                        action_dim=residual_action_dim,
+                        hidden_dim=int(adapter_kernel.shape[1]),
                     )
                     frame = current_treatment_frame(
                         observations,
                         history_len=env.actor_history_len,
                         treatment_frame_dim=env.actor_frame_obs_dim,
                     )
-                    raw_residual = self.residual_actor.apply(
+                    raw_residual = residual_actor.apply(
                         params.adapter, frame
                     )
                     scattered_residual = (
                         scatter_leg_residual(
                             raw_residual,
-                            self.residual_action_indices,
+                            residual_action_indices,
                             action_dim=env.action_dim,
                         )
-                        if self.residual_action_indices is not None
+                        if residual_action_indices is not None
                         else raw_residual
                     )
                     return (

@@ -105,6 +105,7 @@ from src.algorithms.shac.frozen_controller_residual import (
     FrozenControllerResidualOptState,
     FrozenControllerResidualParams,
     apply_frozen_controller_residual,
+    frozen_controller_residual_depth,
     migrate_frozen_controller_residual,
     update_frozen_controller_residual,
 )
@@ -1076,10 +1077,11 @@ def resolve_frozen_controller_residual_resume_setting(
     *,
     requested: bool,
     requested_hidden: int,
+    requested_depth: int,
     allow_start: bool,
     is_resume: bool,
-) -> tuple[bool, int, bool]:
-    """Resolve one explicit nested-residual upgrade over complete E026."""
+) -> tuple[bool, int, int, bool]:
+    """Resolve at most one explicit parent-preserving residual upgrade."""
     if not isinstance(requested, bool) or not isinstance(allow_start, bool):
         raise ValueError("frozen controller residual settings must be boolean")
     if (
@@ -1088,10 +1090,16 @@ def resolve_frozen_controller_residual_resume_setting(
         or requested_hidden < 1
     ):
         raise ValueError("frozen controller residual hidden width is invalid")
+    if (
+        isinstance(requested_depth, bool)
+        or not isinstance(requested_depth, int)
+        or requested_depth < 1
+    ):
+        raise ValueError("frozen controller residual depth is invalid")
     if not is_resume:
         if requested:
             raise ValueError("frozen controller residual requires an E026 resume")
-        return False, requested_hidden, False
+        return False, requested_hidden, requested_depth, False
     if resumed_hparams is None:
         raise ValueError("frozen controller residual resume hparams are required")
     saved = resumed_hparams.get("actor_frozen_controller_residual", False)
@@ -1100,14 +1108,29 @@ def resolve_frozen_controller_residual_resume_setting(
     saved_hidden = resumed_hparams.get(
         "actor_frozen_controller_residual_hidden", requested_hidden
     )
-    upgrade = bool(requested and not saved)
+    saved_depth = resumed_hparams.get(
+        "actor_frozen_controller_residual_depth", 1 if saved else 0
+    )
+    if (
+        isinstance(saved_depth, bool)
+        or not isinstance(saved_depth, int)
+        or saved_depth < 0
+    ):
+        raise ValueError("saved frozen controller residual depth is invalid")
+    upgrade = bool(requested and requested_depth == saved_depth + 1)
     if upgrade and not allow_start:
         raise ValueError("frozen controller residual requires explicit authority")
+    if requested and requested_depth > saved_depth + 1:
+        raise ValueError("frozen controller residual can add only one layer")
     if saved != requested and not upgrade:
         raise ValueError("frozen controller residual must match the checkpoint")
+    if requested and requested_depth < saved_depth:
+        raise ValueError("frozen controller residual depth cannot decrease")
+    if requested and requested_depth == saved_depth and not saved:
+        raise ValueError("frozen controller residual checkpoint is invalid")
     if saved and saved_hidden != requested_hidden:
         raise ValueError("frozen controller residual width must match the checkpoint")
-    return requested, requested_hidden, upgrade
+    return requested, requested_hidden, requested_depth, upgrade
 
 
 def requires_plain_residual_preview_resume_validation(
@@ -2307,6 +2330,7 @@ def train(
     allow_resume_actor_residual_preview_adapter_start: bool = False,
     actor_frozen_controller_residual: bool = False,
     actor_frozen_controller_residual_hidden: int = 256,
+    actor_frozen_controller_residual_depth: int = 1,
     allow_resume_actor_frozen_controller_residual_start: bool = False,
     actor_counterfactual_wrench_distillation: bool = False,
     actor_counterfactual_wrench_teacher_path: str | None = None,
@@ -3014,11 +3038,13 @@ def train(
         (
             actor_frozen_controller_residual,
             actor_frozen_controller_residual_hidden,
+            actor_frozen_controller_residual_depth,
             frozen_controller_residual_upgrade,
         ) = resolve_frozen_controller_residual_resume_setting(
             resumed_hparams,
             requested=actor_frozen_controller_residual,
             requested_hidden=actor_frozen_controller_residual_hidden,
+            requested_depth=actor_frozen_controller_residual_depth,
             allow_start=allow_resume_actor_frozen_controller_residual_start,
             is_resume=True,
         )
@@ -4118,13 +4144,22 @@ def train(
             residual_logits = None
             if actor_frozen_controller_residual:
                 def frozen_parent_apply(parent_params, observations):
-                    return apply_frozen_preview_residual(
-                        actor,
-                        residual_preview_actor,
+                    if isinstance(parent_params, FrozenPreviewResidualParams):
+                        return apply_frozen_preview_residual(
+                            actor,
+                            residual_preview_actor,
+                            parent_params,
+                            observations,
+                            history_len=actor_history_len,
+                            treatment_frame_dim=env.actor_frame_obs_dim,
+                        )[0]
+                    return apply_frozen_controller_residual(
+                        frozen_parent_apply,
+                        frozen_controller_residual_actor,
                         parent_params,
                         observations,
                         history_len=actor_history_len,
-                        treatment_frame_dim=env.actor_frame_obs_dim,
+                        frame_dim=env.actor_frame_obs_dim,
                     )[0]
 
                 action, parent_action, _residual_action = (
@@ -6626,11 +6661,11 @@ def train(
                 )
         if actor_frozen_controller_residual:
             if frozen_controller_residual_upgrade:
-                if not isinstance(
-                    resumed_state.actor_params, FrozenPreviewResidualParams
-                ):
+                if frozen_controller_residual_depth(
+                    resumed_state.actor_params
+                ) != actor_frozen_controller_residual_depth - 1:
                     raise ValueError(
-                        "frozen controller residual requires complete E026"
+                        "frozen controller residual parent depth is invalid"
                     )
                 normalized_observations = env.normalize_actor_obs(
                     actor_norm,
@@ -6639,13 +6674,22 @@ def train(
                 ).astype(jp.float32)
 
                 def frozen_parent_apply(parent_params, observations):
-                    return apply_frozen_preview_residual(
-                        actor,
-                        residual_preview_actor,
+                    if isinstance(parent_params, FrozenPreviewResidualParams):
+                        return apply_frozen_preview_residual(
+                            actor,
+                            residual_preview_actor,
+                            parent_params,
+                            observations,
+                            history_len=actor_history_len,
+                            treatment_frame_dim=env.actor_frame_obs_dim,
+                        )[0]
+                    return apply_frozen_controller_residual(
+                        frozen_parent_apply,
+                        frozen_controller_residual_actor,
                         parent_params,
                         observations,
                         history_len=actor_history_len,
-                        treatment_frame_dim=env.actor_frame_obs_dim,
+                        frame_dim=env.actor_frame_obs_dim,
                     )[0]
 
                 (
@@ -6676,7 +6720,9 @@ def train(
                 resumed_state.actor_params, FrozenControllerResidualParams
             ) or not isinstance(
                 resumed_state.actor_opt, FrozenControllerResidualOptState
-            ):
+            ) or frozen_controller_residual_depth(
+                resumed_state.actor_params
+            ) != actor_frozen_controller_residual_depth:
                 raise ValueError(
                     "resumed frozen controller residual state is invalid"
                 )
@@ -7050,6 +7096,9 @@ def train(
         ),
         "actor_frozen_controller_residual_hidden": (
             actor_frozen_controller_residual_hidden
+        ),
+        "actor_frozen_controller_residual_depth": (
+            actor_frozen_controller_residual_depth
         ),
         "actor_counterfactual_wrench_distillation": (
             actor_counterfactual_wrench_distillation

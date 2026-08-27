@@ -21,21 +21,35 @@ from src.algorithms.shac.counterfactual_wrench_distillation import (
 
 
 PyTree = Any
-ParentApply = Callable[[FrozenPreviewResidualParams, jax.Array], jax.Array]
+ParentApply = Callable[[PyTree, jax.Array], jax.Array]
 
 
 class FrozenControllerResidualParams(NamedTuple):
-    """Complete immutable E026 controller plus one new trainable adapter."""
+    """One immutable complete controller plus one new trainable adapter."""
 
-    parent: FrozenPreviewResidualParams
+    parent: PyTree
     adapter: PyTree
 
 
 class FrozenControllerResidualOptState(NamedTuple):
-    """Immutable E026 optimizer snapshot plus the new adapter optimizer."""
+    """Immutable parent optimizer snapshot plus the new adapter optimizer."""
 
     parent_optimizer_state: PyTree
     adapter_optimizer_state: optax.OptState
+
+
+def frozen_controller_residual_depth(params: PyTree) -> int:
+    """Return the number of recursively stacked frozen-controller adapters."""
+    depth = 0
+    current = params
+    while isinstance(current, FrozenControllerResidualParams):
+        depth += 1
+        current = current.parent
+    if not isinstance(current, FrozenPreviewResidualParams):
+        raise ValueError(
+            "frozen controller residual requires a frozen-preview base"
+        )
+    return depth
 
 
 def apply_frozen_controller_residual(
@@ -48,11 +62,10 @@ def apply_frozen_controller_residual(
     frame_dim: int,
     residual_action_indices: tuple[int, ...] | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Return complete-E026 action plus the new zero-head joint correction."""
-    if not isinstance(params, FrozenControllerResidualParams) or not isinstance(
-        params.parent, FrozenPreviewResidualParams
-    ):
-        raise ValueError("frozen controller residual requires an E026 parent")
+    """Return a frozen complete-parent action plus one joint correction."""
+    if not isinstance(params, FrozenControllerResidualParams):
+        raise ValueError("frozen controller residual parameters are invalid")
+    frozen_controller_residual_depth(params)
     frozen_parent = jax.tree.map(lax.stop_gradient, params.parent)
     parent_action = parent_apply(frozen_parent, normalized_observations)
     frame = current_treatment_frame(
@@ -77,7 +90,7 @@ def apply_frozen_controller_residual(
 
 def migrate_frozen_controller_residual(
     *,
-    parent_params: FrozenPreviewResidualParams,
+    parent_params: PyTree,
     parent_optimizer_state: PyTree,
     parent_apply: ParentApply,
     adapter_actor: PreviewResidualAdapter,
@@ -92,9 +105,8 @@ def migrate_frozen_controller_residual(
     FrozenControllerResidualOptState,
     dict[str, bool],
 ]:
-    """Attach a zero-effect adapter while retaining all E026 state."""
-    if not isinstance(parent_params, FrozenPreviewResidualParams):
-        raise ValueError("frozen controller residual migration requires E026")
+    """Attach a zero-effect adapter while retaining all parent state."""
+    frozen_controller_residual_depth(parent_params)
     frame = current_treatment_frame(
         normalized_observations,
         history_len=history_len,
