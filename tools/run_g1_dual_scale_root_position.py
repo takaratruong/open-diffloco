@@ -289,6 +289,10 @@ def validate_arm_training_artifacts(
         source_checkpoint.with_name("hparams.json").read_text(encoding="utf-8")
     )
     permitted_hparam_deltas = {
+        # Older E002 hparams predate this serialized schema field.  The resumed
+        # residual keeps the existing one-layer adapter, so materializing the
+        # default is provenance metadata rather than a scientific treatment.
+        "actor_frozen_controller_residual_depth",
         "allow_resume_tracking_anchor_position_kernel_change",
         "allow_resume_tracking_root_velocity_change",
         "best_reward",

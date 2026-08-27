@@ -210,6 +210,7 @@ def test_arm_training_validation_rejects_wrong_checkpoint_step(tmp_path) -> None
     run.mkdir()
     hparams = {
         **source_hparams,
+        "actor_frozen_controller_residual_depth": 1,
         "tracking_anchor_position_kernel": "quadratic",
         "allow_resume_tracking_anchor_position_kernel_change": True,
         "allow_resume_tracking_root_velocity_change": False,
