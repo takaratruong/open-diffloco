@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import signal
 import statistics
 import subprocess
 import sys
@@ -19,6 +20,21 @@ from tools.run_g1_dual_scale_root_position import (
 )
 from tools.run_g1_root_velocity_continuation import _render_command
 from tools.run_g1_zero_assistance_consolidation import _write_json_atomically
+
+
+def build_quadratic_render_command(
+    *, checkpoint: Path, reference: Path, output: Path
+) -> list[str]:
+    """Render a clean rollout with the treatment kernel explicitly restored."""
+    return [
+        *_render_command(
+            checkpoint=checkpoint,
+            reference=reference,
+            output=output,
+        ),
+        "--tracking-anchor-position-kernel",
+        "quadratic",
+    ]
 
 
 def build_arm_command(
@@ -98,6 +114,15 @@ def _available_gpu_indices() -> set[str]:
     return {line.strip() for line in output.splitlines() if line.strip()}
 
 
+def _signal_process_group(
+    process: subprocess.Popen[bytes], signal_number: int
+) -> None:
+    try:
+        os.killpg(process.pid, signal_number)
+    except ProcessLookupError:
+        pass
+
+
 def _run_arms(
     commands: dict[str, list[str]],
     devices: dict[str, str],
@@ -124,6 +149,7 @@ def _run_arms(
                 env=environment,
                 stdout=logs[label],
                 stderr=subprocess.STDOUT,
+                start_new_session=True,
             )
         pending = set(processes)
         while pending:
@@ -134,9 +160,13 @@ def _run_arms(
                 pending.remove(label)
                 if return_code != 0:
                     for peer in pending:
-                        processes[peer].terminate()
+                        _signal_process_group(processes[peer], signal.SIGTERM)
                     for peer in pending:
-                        processes[peer].wait(timeout=30)
+                        try:
+                            processes[peer].wait(timeout=30)
+                        except subprocess.TimeoutExpired:
+                            _signal_process_group(processes[peer], signal.SIGKILL)
+                            processes[peer].wait()
                     raise RuntimeError(
                         f"{label} arm failed with return code {return_code}"
                     )
@@ -145,11 +175,11 @@ def _run_arms(
     finally:
         for process in processes.values():
             if process.poll() is None:
-                process.terminate()
+                _signal_process_group(process, signal.SIGTERM)
                 try:
                     process.wait(timeout=30)
                 except subprocess.TimeoutExpired:
-                    process.kill()
+                    _signal_process_group(process, signal.SIGKILL)
                     process.wait()
         for stream in logs.values():
             stream.close()
@@ -242,7 +272,7 @@ def _publish_selection(
         "MUJOCO_GL": "egl",
     }
     subprocess.run(
-        _render_command(
+        build_quadratic_render_command(
             checkpoint=checkpoint,
             reference=reference,
             output=preview,

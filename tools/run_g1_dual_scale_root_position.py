@@ -5,15 +5,29 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
+import pickle
 import statistics
 import subprocess
 import sys
 from typing import Any
 
+import jax
+import numpy as np
+
 from src.algorithms.shac.algorithm import train
+from src.algorithms.shac.frozen_controller_residual import (
+    FrozenControllerResidualOptState,
+    FrozenControllerResidualParams,
+)
+from src.envs.g1_tracking.environment import (
+    DEFAULT_CONTROLLER_PATH,
+    DEFAULT_MODEL_PATH,
+)
 from src.envs.g1_tracking.solver_profiles import get_solver_profile, solver_context
+from tools.evaluate_g1_e038_recovery_transfer import parameter_tree_sha256
 from tools.run_g1_root_velocity_continuation import build_root_velocity_kwargs
 from tools.run_g1_tracking_shac import configure_jax
 from tools.run_g1_zero_assistance_consolidation import _write_json_atomically
@@ -34,6 +48,10 @@ SOURCE_HPARAMS_SHA256 = (
 )
 REFERENCE_SHA256 = (
     "5bf1c08990818b39d62b8e3977e2368abf74d71a0d9dbf2de7d8f2ea5c3ae934"
+)
+MODEL_SHA256 = "5d76cf92f00dd49d6eb9fae38d7d38e46886848b602ac691051e886c3bcccfb1"
+CONTROLLER_SHA256 = (
+    "f832285356d8fc10b226b6bbf557520d5323c7c9022ae6dbd00c683b06e5b7ee"
 )
 
 
@@ -196,6 +214,15 @@ def validate_preflight(
         raise ValueError("source hparams SHA-256 mismatch")
     if sha256_file(reference) != REFERENCE_SHA256:
         raise ValueError("reference SHA-256 mismatch")
+    model = Path(DEFAULT_MODEL_PATH)
+    controller = Path(DEFAULT_CONTROLLER_PATH)
+    if not model.is_file() or sha256_file(model) != MODEL_SHA256:
+        raise ValueError("model SHA-256 mismatch")
+    if (
+        not controller.is_file()
+        or sha256_file(controller) != CONTROLLER_SHA256
+    ):
+        raise ValueError("controller SHA-256 mismatch")
     actual_commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=repository,
@@ -218,6 +245,165 @@ def validate_preflight(
         "checkpoint_sha256": SOURCE_CHECKPOINT_SHA256,
         "hparams_sha256": SOURCE_HPARAMS_SHA256,
         "reference_sha256": REFERENCE_SHA256,
+        "model_path": str(model.resolve()),
+        "model_sha256": MODEL_SHA256,
+        "controller_path": str(controller.resolve()),
+        "controller_sha256": CONTROLLER_SHA256,
+    }
+
+
+def _finite_tree(tree: object) -> bool:
+    return all(
+        bool(np.all(np.isfinite(np.asarray(leaf))))
+        for leaf in jax.tree.leaves(tree)
+    )
+
+
+def _finite_array(
+    value: object, shape: tuple[int, ...], *, positive: bool = False
+) -> bool:
+    try:
+        array = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        array.shape == shape
+        and np.isfinite(array).all()
+        and (not positive or (array > 0.0).all())
+    )
+
+
+def validate_arm_training_artifacts(
+    run_directory: Path,
+    *,
+    source_checkpoint: Path,
+    kernel: str,
+) -> dict[str, object]:
+    """Require exact lineage, finite checkpoints, and complete CAGrad telemetry."""
+    if kernel not in {"exponential", "dual_scale", "quadratic"}:
+        raise ValueError("arm training kernel is invalid")
+    root = run_directory.resolve()
+    hparams = json.loads((root / "hparams.json").read_text(encoding="utf-8"))
+    source_hparams = json.loads(
+        source_checkpoint.with_name("hparams.json").read_text(encoding="utf-8")
+    )
+    permitted_hparam_deltas = {
+        "allow_resume_tracking_anchor_position_kernel_change",
+        "allow_resume_tracking_root_velocity_change",
+        "checkpoint_steps",
+        "reference_path_migration_artifact",
+        "total_steps",
+        "tracking_anchor_position_kernel",
+    }
+    if any(
+        hparams.get(key) != source_hparams.get(key)
+        for key in set(hparams) | set(source_hparams)
+        if key not in permitted_hparam_deltas
+    ):
+        raise ValueError("arm hparams contain an unregistered scientific delta")
+    required_hparams = {
+        "actor_frozen_controller_residual": True,
+        "tracking_anchor_position_kernel": kernel,
+        "allow_resume_tracking_anchor_position_kernel_change": (
+            kernel != "exponential"
+        ),
+        "tracking_root_velocity_weight": 1.0,
+        "allow_resume_tracking_root_velocity_change": False,
+        "checkpoint_steps": list(expected_checkpoint_steps()),
+        "total_steps": END_STEP,
+    }
+    if any(hparams.get(key) != value for key, value in required_hparams.items()):
+        raise ValueError("arm hparams do not match the registered treatment")
+    with source_checkpoint.open("rb") as stream:
+        source = pickle.load(stream)
+    if not isinstance(
+        source.actor_params, FrozenControllerResidualParams
+    ) or not isinstance(source.actor_opt, FrozenControllerResidualOptState):
+        raise ValueError("source E002 checkpoint structure is invalid")
+    source_parent_hash = parameter_tree_sha256(source.actor_params.parent)
+    source_parent_opt_hash = parameter_tree_sha256(
+        source.actor_opt.parent_optimizer_state
+    )
+    source_normalizer_hash = parameter_tree_sha256(source.normalizer)
+    checkpoint_hashes: dict[str, str] = {}
+    for step in expected_checkpoint_steps():
+        checkpoint = root / f"checkpoint_step_{step}.pkl"
+        with checkpoint.open("rb") as stream:
+            state = pickle.load(stream)
+        if (
+            int(state.step) != step
+            or not isinstance(state.actor_params, FrozenControllerResidualParams)
+            or not isinstance(state.actor_opt, FrozenControllerResidualOptState)
+            or not _finite_tree(state)
+            or parameter_tree_sha256(state.actor_params.parent)
+            != source_parent_hash
+            or parameter_tree_sha256(state.actor_opt.parent_optimizer_state)
+            != source_parent_opt_hash
+            or parameter_tree_sha256(state.normalizer) != source_normalizer_hash
+        ):
+            raise ValueError("arm checkpoint structure or frozen lineage is invalid")
+        checkpoint_hashes[str(step)] = sha256_file(checkpoint)
+    rows = json.loads(
+        (root / "checkpoint_phase_metrics.json").read_text(encoding="utf-8")
+    )
+    if [row.get("step") for row in rows] != list(expected_checkpoint_steps()):
+        raise ValueError("arm checkpoint telemetry grid is invalid")
+    scalar_keys = (
+        "actor_preview_gradient_norm",
+        "actor_preview_update_norm",
+        "actor_cagrad_combined_norm",
+        "actor_cagrad_dual_gap",
+        "actor_cagrad_objective",
+        "actor_cagrad_uniform_combined_cosine",
+    )
+    for row in rows:
+        if (
+            row.get("actor_preview_valid") is not True
+            or row.get("actor_cagrad_valid") is not True
+            or row.get("actor_preview_frozen_parameter_drift_max_abs") != 0.0
+            or row.get("actor_preview_frozen_moment_drift_max_abs") != 0.0
+            or row.get("actor_preview_normalizer_drift_max_abs") != 0.0
+            or row.get("actor_bootstrap_scale_current") != 0.0
+            or any(
+                not isinstance(row.get(key), (int, float))
+                or isinstance(row.get(key), bool)
+                or not math.isfinite(float(row[key]))
+                for key in scalar_keys
+            )
+            or float(row["actor_preview_gradient_norm"]) <= 0.0
+            or float(row["actor_preview_update_norm"]) <= 0.0
+            or not _finite_array(
+                row.get("actor_cagrad_bin_counts"), (5,), positive=True
+            )
+            or not _finite_array(row.get("actor_cagrad_bin_losses"), (5,))
+            or not _finite_array(
+                row.get("actor_cagrad_bin_gradient_norms"), (5,)
+            )
+            or np.max(
+                np.asarray(row["actor_cagrad_bin_gradient_norms"], dtype=np.float64)
+            )
+            > 1.0 + 1e-6
+            or not _finite_array(row.get("actor_cagrad_weights"), (5,))
+            or not np.isclose(
+                np.sum(np.asarray(row["actor_cagrad_weights"], dtype=np.float64)),
+                1.0,
+                atol=1e-6,
+            )
+            or not _finite_array(row.get("actor_cagrad_gram_matrix"), (5, 5))
+            or not _finite_array(row.get("actor_cagrad_cosine_matrix"), (5, 5))
+            or not _finite_array(row.get("action_noise_current"), (29,))
+        ):
+            raise ValueError("arm checkpoint telemetry is invalid")
+    return {
+        "protocol": "g1-root-position-kernel-training-v1",
+        "valid": True,
+        "kernel": kernel,
+        "checkpoint_steps": list(expected_checkpoint_steps()),
+        "checkpoint_sha256": checkpoint_hashes,
+        "source_checkpoint_sha256": sha256_file(source_checkpoint),
+        "source_parent_tree_sha256": source_parent_hash,
+        "source_parent_optimizer_tree_sha256": source_parent_opt_hash,
+        "source_normalizer_tree_sha256": source_normalizer_hash,
     }
 
 
@@ -374,28 +560,15 @@ def main() -> None:
     finally:
         os.chdir(previous)
     run_directory = (output_root / relative_save_dir).resolve()
-    hparams = json.loads(
-        (run_directory / "hparams.json").read_text(encoding="utf-8")
+    training_validation = validate_arm_training_artifacts(
+        run_directory,
+        source_checkpoint=args.resume_from.resolve(),
+        kernel=args.kernel,
     )
-    if (
-        hparams.get("tracking_anchor_position_kernel") != args.kernel
-        or hparams.get("tracking_root_velocity_weight") != 1.0
-        or hparams.get("total_steps") != END_STEP
-        or any(
-            not (run_directory / f"checkpoint_step_{step}.pkl").is_file()
-            for step in expected_checkpoint_steps()
-        )
-    ):
-        raise ValueError("arm training artifacts are invalid")
+    training_validation["run_directory"] = str(run_directory)
     _write_json_atomically(
         output_root / "training_validation.json",
-        {
-            "protocol": "g1-dual-scale-root-position-training-v1",
-            "valid": True,
-            "kernel": args.kernel,
-            "run_directory": str(run_directory),
-            "checkpoint_steps": list(expected_checkpoint_steps()),
-        },
+        training_validation,
     )
     if not args.skip_evaluation:
         evaluate_arm(

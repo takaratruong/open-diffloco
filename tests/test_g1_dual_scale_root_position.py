@@ -1,4 +1,6 @@
 from pathlib import Path
+import json
+import pickle
 
 import jax
 import numpy as np
@@ -153,3 +155,106 @@ def test_selector_labels_quadratic_treatment_without_changing_gates() -> None:
 
     assert result["protocol"] == "g1-quadratic-root-position-pair-v1"
     assert result["outcome"] == "quadratic-advances"
+
+
+def test_arm_training_validation_rejects_wrong_checkpoint_step(tmp_path) -> None:
+    from src.algorithms.shac.frozen_controller_residual import (
+        FrozenControllerResidualOptState,
+        FrozenControllerResidualParams,
+    )
+    from src.core.data_structures import NormState, TrainState
+    from tools.run_g1_dual_scale_root_position import (
+        END_STEP,
+        expected_checkpoint_steps,
+        validate_arm_training_artifacts,
+    )
+
+    source = tmp_path / "checkpoint_step_1867776.pkl"
+    source_hparams = {
+        "actor_frozen_controller_residual": True,
+        "tracking_root_velocity_weight": 1.0,
+        "action_noise_std_start": [0.1] * 29,
+        "total_steps": 2_162_688,
+    }
+    source.with_name("hparams.json").write_text(json.dumps(source_hparams))
+    normalizer = NormState(
+        mean=np.zeros(2), var=np.ones(2), count=np.array(1.0)
+    )
+    actor_params = FrozenControllerResidualParams(
+        parent={"p": np.array([1.0])}, adapter={"a": np.array([0.0])}
+    )
+    actor_opt = FrozenControllerResidualOptState(
+        parent_optimizer_state={"m": np.array([0.0])},
+        adapter_optimizer_state={"m": np.array([0.0])},
+    )
+
+    def state(step: int) -> TrainState:
+        return TrainState(
+            key=np.array([0, 1], dtype=np.uint32),
+            env_state=None,
+            actor_params=actor_params,
+            critic_params={},
+            target_critic_params={},
+            normalizer=normalizer,
+            actor_opt=actor_opt,
+            critic_opt={},
+            step=step,
+        )
+
+    with source.open("wb") as stream:
+        pickle.dump(state(1_867_776), stream)
+    run = tmp_path / "run"
+    run.mkdir()
+    hparams = {
+        **source_hparams,
+        "tracking_anchor_position_kernel": "quadratic",
+        "allow_resume_tracking_anchor_position_kernel_change": True,
+        "allow_resume_tracking_root_velocity_change": False,
+        "checkpoint_steps": list(expected_checkpoint_steps()),
+        "reference_path_migration_artifact": None,
+        "total_steps": END_STEP,
+    }
+    (run / "hparams.json").write_text(json.dumps(hparams))
+    for step in expected_checkpoint_steps():
+        with (run / f"checkpoint_step_{step}.pkl").open("wb") as stream:
+            pickle.dump(state(step), stream)
+    metrics = []
+    for step in expected_checkpoint_steps():
+        metrics.append(
+            {
+                "step": step,
+                "actor_preview_valid": True,
+                "actor_preview_gradient_norm": 0.1,
+                "actor_preview_update_norm": 0.1,
+                "actor_preview_frozen_parameter_drift_max_abs": 0.0,
+                "actor_preview_frozen_moment_drift_max_abs": 0.0,
+                "actor_preview_normalizer_drift_max_abs": 0.0,
+                "actor_cagrad_valid": True,
+                "actor_cagrad_bin_counts": [1] * 5,
+                "actor_cagrad_bin_gradient_norms": [0.5] * 5,
+                "actor_cagrad_bin_losses": [0.1] * 5,
+                "actor_cagrad_weights": [0.2] * 5,
+                "actor_cagrad_gram_matrix": [[0.1] * 5 for _ in range(5)],
+                "actor_cagrad_cosine_matrix": [[0.1] * 5 for _ in range(5)],
+                "actor_cagrad_combined_norm": 0.1,
+                "actor_cagrad_dual_gap": 0.0,
+                "actor_cagrad_objective": 0.1,
+                "actor_cagrad_uniform_combined_cosine": 0.5,
+                "actor_bootstrap_scale_current": 0.0,
+                "action_noise_current": [0.1] * 29,
+            }
+        )
+    (run / "checkpoint_phase_metrics.json").write_text(json.dumps(metrics))
+
+    valid = validate_arm_training_artifacts(
+        run, source_checkpoint=source, kernel="quadratic"
+    )
+    assert valid["valid"] is True
+
+    with (run / f"checkpoint_step_{END_STEP}.pkl").open("wb") as stream:
+        pickle.dump(state(END_STEP + 1), stream)
+
+    with pytest.raises(ValueError, match="checkpoint structure"):
+        validate_arm_training_artifacts(
+            run, source_checkpoint=source, kernel="quadratic"
+        )

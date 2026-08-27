@@ -59,3 +59,50 @@ def test_pair_aggregation_uses_quadratic_componentwise_gate() -> None:
     assert result["outcome"] == "quadratic-advances"
     assert result["policy_retained"] is True
     assert result["selected_treatment_survival"] == [137, 145, 85, 91, 80]
+
+
+def test_quadratic_render_uses_explicit_quadratic_kernel() -> None:
+    from tools.run_g1_quadratic_root_position_pair import (
+        build_quadratic_render_command,
+    )
+
+    command = build_quadratic_render_command(
+        checkpoint=Path("/tmp/checkpoint.pkl"),
+        reference=Path("/tmp/reference.npz"),
+        output=Path("/tmp/preview"),
+    )
+
+    index = command.index("--tracking-anchor-position-kernel")
+    assert command[index + 1] == "quadratic"
+    assert "--training-distribution-rollout" not in command
+
+
+def test_pair_workers_start_in_isolated_process_groups(
+    tmp_path, monkeypatch
+) -> None:
+    from tools import run_g1_quadratic_root_position_pair as pair
+
+    calls = []
+
+    class FinishedProcess:
+        pid = 12345
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(*args, **kwargs):
+        calls.append(kwargs)
+        return FinishedProcess()
+
+    monkeypatch.setattr(pair.subprocess, "Popen", fake_popen)
+    pair._run_arms(
+        {"control": ["control"], "treatment": ["treatment"]},
+        {"control": "2", "treatment": "3"},
+        tmp_path,
+    )
+
+    assert len(calls) == 2
+    assert all(call["start_new_session"] is True for call in calls)
