@@ -61,6 +61,21 @@ def test_pair_aggregation_uses_quadratic_componentwise_gate() -> None:
     assert result["selected_treatment_survival"] == [137, 145, 85, 91, 80]
 
 
+def test_pair_aggregation_labels_cross_phase_redistribution() -> None:
+    from tools.run_g1_quadratic_root_position_pair import classify_arm_payloads
+
+    treatment = _arm_payload("quadratic")
+    treatment["candidates"]["1916928"]["survival"] = [121, 106, 84, 97, 79]
+
+    result = classify_arm_payloads(
+        _arm_payload("exponential"),
+        treatment,
+    )
+
+    assert result["outcome"] == "quadratic-redistributes"
+    assert result["policy_retained"] is False
+
+
 def test_quadratic_render_uses_explicit_quadratic_kernel() -> None:
     from tools.run_g1_quadratic_root_position_pair import (
         build_quadratic_render_command,

@@ -175,6 +175,15 @@ def classify_pair(
     best_treatment = (
         max(eligible_treatment, key=_rank) if eligible_treatment else None
     )
+    treatment_improves_any_phase = any(
+        any(
+            value > baseline
+            for value, baseline in zip(
+                record["survival"], E002_SURVIVAL, strict=True
+            )
+        )
+        for record in treatment_records
+    )
     advances = bool(
         best_treatment is not None
         and (best_control is None or _rank(best_treatment) > _rank(best_control))
@@ -189,6 +198,8 @@ def classify_pair(
             if advances
             else f"{treatment_label}-matched-control"
             if best_treatment is not None
+            else f"{treatment_label}-redistributes"
+            if treatment_improves_any_phase
             else f"{treatment_label}-insufficient"
         ),
         "selected_treatment_step": (
