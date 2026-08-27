@@ -19,6 +19,25 @@ from src.algorithms.shac.residual_preview_adapter import (
 )
 
 
+def test_nested_residual_resume_skips_plain_preview_validator() -> None:
+    from src.algorithms.shac.algorithm import (
+        requires_plain_residual_preview_resume_validation,
+    )
+
+    assert requires_plain_residual_preview_resume_validation(
+        actor_residual_preview_adapter=True,
+        actor_frozen_controller_residual=False,
+        actor_learned_torso_wrench=False,
+        learned_wrench_state=False,
+    )
+    assert not requires_plain_residual_preview_resume_validation(
+        actor_residual_preview_adapter=True,
+        actor_frozen_controller_residual=True,
+        actor_learned_torso_wrench=False,
+        learned_wrench_state=False,
+    )
+
+
 def _parent() -> FrozenPreviewResidualParams:
     return FrozenPreviewResidualParams(
         parent={"weights": jnp.arange(8 * 29, dtype=jnp.float32).reshape(8, 29) / 1000},

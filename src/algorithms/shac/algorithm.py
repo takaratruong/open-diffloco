@@ -1110,6 +1110,21 @@ def resolve_frozen_controller_residual_resume_setting(
     return requested, requested_hidden, upgrade
 
 
+def requires_plain_residual_preview_resume_validation(
+    *,
+    actor_residual_preview_adapter: bool,
+    actor_frozen_controller_residual: bool,
+    actor_learned_torso_wrench: bool,
+    learned_wrench_state: bool,
+) -> bool:
+    """Identify resumes whose top-level actor is the plain preview residual."""
+    return bool(
+        actor_residual_preview_adapter
+        and not actor_frozen_controller_residual
+        and not (actor_learned_torso_wrench and learned_wrench_state)
+    )
+
+
 def resolve_centroidal_propulsion_resume_settings(
     resumed_hparams: dict[str, object] | None,
     *,
@@ -6367,11 +6382,15 @@ def train(
             persist_future_reference_migration_report(
                 save_dir, migration_report
             )
-        if actor_residual_preview_adapter and not (
-            actor_learned_torso_wrench
-            and isinstance(
+        if requires_plain_residual_preview_resume_validation(
+            actor_residual_preview_adapter=actor_residual_preview_adapter,
+            actor_frozen_controller_residual=(
+                actor_frozen_controller_residual
+            ),
+            actor_learned_torso_wrench=actor_learned_torso_wrench,
+            learned_wrench_state=isinstance(
                 resumed_state.actor_params, FrozenControllerWrenchParams
-            )
+            ),
         ):
             if residual_adapter_upgrade or future_reference_upgrade:
                 parent_params = resumed_state.actor_params
