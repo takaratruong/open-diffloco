@@ -28,6 +28,7 @@ from src.envs.g1_tracking.environment import (
 )
 from src.envs.g1_tracking.solver_profiles import get_solver_profile, solver_context
 from tools.evaluate_g1_e038_recovery_transfer import parameter_tree_sha256
+from tools.evaluate_g1_tracking import training_action_noise_at_step
 from tools.run_g1_root_velocity_continuation import build_root_velocity_kwargs
 from tools.run_g1_tracking_shac import configure_jax
 from tools.run_g1_zero_assistance_consolidation import _write_json_atomically
@@ -290,6 +291,7 @@ def validate_arm_training_artifacts(
     permitted_hparam_deltas = {
         "allow_resume_tracking_anchor_position_kernel_change",
         "allow_resume_tracking_root_velocity_change",
+        "best_reward",
         "checkpoint_steps",
         "reference_path_migration_artifact",
         "total_steps",
@@ -314,6 +316,13 @@ def validate_arm_training_artifacts(
     }
     if any(hparams.get(key) != value for key, value in required_hparams.items()):
         raise ValueError("arm hparams do not match the registered treatment")
+    best_reward = hparams.get("best_reward")
+    if (
+        isinstance(best_reward, bool)
+        or not isinstance(best_reward, (int, float))
+        or not math.isfinite(float(best_reward))
+    ):
+        raise ValueError("arm best reward is invalid")
     with source_checkpoint.open("rb") as stream:
         source = pickle.load(stream)
     if not isinstance(
@@ -357,6 +366,12 @@ def validate_arm_training_artifacts(
         "actor_cagrad_uniform_combined_cosine",
     )
     for row in rows:
+        expected_action_noise = training_action_noise_at_step(
+            hparams, int(row["step"]), action_dim=29
+        )
+        actual_action_noise = np.asarray(
+            row.get("action_noise_current"), dtype=np.float64
+        )
         if (
             row.get("actor_preview_valid") is not True
             or row.get("actor_cagrad_valid") is not True
@@ -391,7 +406,14 @@ def validate_arm_training_artifacts(
             )
             or not _finite_array(row.get("actor_cagrad_gram_matrix"), (5, 5))
             or not _finite_array(row.get("actor_cagrad_cosine_matrix"), (5, 5))
-            or not _finite_array(row.get("action_noise_current"), (29,))
+            or actual_action_noise.shape != (29,)
+            or not np.isfinite(actual_action_noise).all()
+            or not np.allclose(
+                actual_action_noise,
+                expected_action_noise,
+                rtol=0.0,
+                atol=1e-7,
+            )
         ):
             raise ValueError("arm checkpoint telemetry is invalid")
     return {

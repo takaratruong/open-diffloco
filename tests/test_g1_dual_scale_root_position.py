@@ -174,6 +174,9 @@ def test_arm_training_validation_rejects_wrong_checkpoint_step(tmp_path) -> None
         "actor_frozen_controller_residual": True,
         "tracking_root_velocity_weight": 1.0,
         "action_noise_std_start": [0.1] * 29,
+        "action_noise_std_end": [0.1] * 29,
+        "action_noise_schedule_steps": 800_000,
+        "best_reward": 0.0,
         "total_steps": 2_162_688,
     }
     source.with_name("hparams.json").write_text(json.dumps(source_hparams))
@@ -212,6 +215,7 @@ def test_arm_training_validation_rejects_wrong_checkpoint_step(tmp_path) -> None
         "allow_resume_tracking_root_velocity_change": False,
         "checkpoint_steps": list(expected_checkpoint_steps()),
         "reference_path_migration_artifact": None,
+        "best_reward": 1.0,
         "total_steps": END_STEP,
     }
     (run / "hparams.json").write_text(json.dumps(hparams))
@@ -250,6 +254,17 @@ def test_arm_training_validation_rejects_wrong_checkpoint_step(tmp_path) -> None
         run, source_checkpoint=source, kernel="quadratic"
     )
     assert valid["valid"] is True
+
+    wrong_noise = json.loads(
+        (run / "checkpoint_phase_metrics.json").read_text()
+    )
+    wrong_noise[0]["action_noise_current"] = [999.0] * 29
+    (run / "checkpoint_phase_metrics.json").write_text(json.dumps(wrong_noise))
+    with pytest.raises(ValueError, match="telemetry"):
+        validate_arm_training_artifacts(
+            run, source_checkpoint=source, kernel="quadratic"
+        )
+    (run / "checkpoint_phase_metrics.json").write_text(json.dumps(metrics))
 
     with (run / f"checkpoint_step_{END_STEP}.pkl").open("wb") as stream:
         pickle.dump(state(END_STEP + 1), stream)
