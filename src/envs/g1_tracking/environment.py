@@ -279,10 +279,11 @@ class G1TrackingEnv:
         if tracking_anchor_position_kernel not in {
             "exponential",
             "dual_scale",
+            "quadratic",
         }:
             raise ValueError(
-                "tracking_anchor_position_kernel must be 'exponential' or "
-                "'dual_scale'"
+                "tracking_anchor_position_kernel must be 'exponential', "
+                "'dual_scale', or 'quadratic'"
             )
         self.tracking_anchor_position_kernel = (
             tracking_anchor_position_kernel

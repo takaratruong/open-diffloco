@@ -292,7 +292,7 @@ def resolve_training_anchor_position_kernel(
 ) -> str:
     """Restore the checkpoint anchor-position kernel without coercion."""
     value = hparams.get("tracking_anchor_position_kernel", "exponential")
-    if value not in {"exponential", "dual_scale"}:
+    if value not in {"exponential", "dual_scale", "quadratic"}:
         raise ValueError("training anchor position kernel is invalid")
     return value
 
@@ -870,7 +870,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--tracking-anchor-position-kernel",
-        choices=("exponential", "dual_scale"),
+        choices=("exponential", "dual_scale", "quadratic"),
         default="exponential",
     )
     parser.add_argument(

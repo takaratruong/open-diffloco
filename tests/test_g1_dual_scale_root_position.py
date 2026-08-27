@@ -58,6 +58,38 @@ def test_pair_arms_differ_only_in_registered_kernel_authority() -> None:
             np.testing.assert_array_equal(actual, expected, err_msg=key)
 
 
+def test_quadratic_arm_is_an_explicit_single_kernel_delta() -> None:
+    from tools.run_g1_dual_scale_root_position import build_arm_kwargs
+
+    checkpoint = Path("/tmp/checkpoint_step_1867776.pkl")
+    control = build_arm_kwargs(
+        "g1-4x5", "/tmp/reference.npz", 0, checkpoint, kernel="exponential"
+    )
+    treatment = build_arm_kwargs(
+        "g1-4x5", "/tmp/reference.npz", 0, checkpoint, kernel="quadratic"
+    )
+
+    assert treatment["tracking_anchor_position_kernel"] == "quadratic"
+    assert treatment["allow_resume_tracking_anchor_position_kernel_change"] is True
+    for key in (
+        "tracking_anchor_position_kernel",
+        "allow_resume_tracking_anchor_position_kernel_change",
+    ):
+        control.pop(key)
+        treatment.pop(key)
+    assert control.keys() == treatment.keys()
+    for key in control:
+        control_leaves, control_tree = jax.tree_util.tree_flatten(control[key])
+        treatment_leaves, treatment_tree = jax.tree_util.tree_flatten(
+            treatment[key]
+        )
+        assert control_tree == treatment_tree, key
+        for actual, expected in zip(
+            control_leaves, treatment_leaves, strict=True
+        ):
+            np.testing.assert_array_equal(actual, expected, err_msg=key)
+
+
 def _records(*survivals):
     from tools.run_g1_dual_scale_root_position import expected_checkpoint_steps
 
@@ -102,3 +134,22 @@ def test_selector_rejects_uncorroborated_source() -> None:
             treatment=_records(*([(137, 145, 85, 91, 80)] * 4)),
             source_survival=[136, 144, 84, 90, 78],
         )
+
+
+def test_selector_labels_quadratic_treatment_without_changing_gates() -> None:
+    from tools.run_g1_dual_scale_root_position import classify_pair
+
+    result = classify_pair(
+        control=_records(*([(136, 144, 84, 90, 79)] * 4)),
+        treatment=_records(
+            (137, 145, 85, 91, 80),
+            (136, 144, 84, 90, 79),
+            (135, 200, 200, 200, 200),
+            (130, 210, 210, 210, 210),
+        ),
+        source_survival=[136, 144, 84, 90, 79],
+        treatment_label="quadratic",
+    )
+
+    assert result["protocol"] == "g1-quadratic-root-position-pair-v1"
+    assert result["outcome"] == "quadratic-advances"

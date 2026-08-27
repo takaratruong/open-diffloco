@@ -57,8 +57,10 @@ def build_arm_kwargs(
     kernel: str,
 ) -> dict[str, Any]:
     """Continue exact E002 while changing only the registered reward kernel."""
-    if kernel not in {"exponential", "dual_scale"}:
-        raise ValueError("arm kernel must be exponential or dual_scale")
+    if kernel not in {"exponential", "dual_scale", "quadratic"}:
+        raise ValueError(
+            "arm kernel must be exponential, dual_scale, or quadratic"
+        )
     kwargs = build_root_velocity_kwargs(
         profile_name,
         reference_path,
@@ -71,7 +73,7 @@ def build_arm_kwargs(
         allow_resume_tracking_root_velocity_change=False,
         tracking_anchor_position_kernel=kernel,
         allow_resume_tracking_anchor_position_kernel_change=(
-            kernel == "dual_scale"
+            kernel != "exponential"
         ),
         total_steps=END_STEP,
         checkpoint_steps=expected_checkpoint_steps(),
@@ -137,8 +139,11 @@ def classify_pair(
     control: dict[int, dict[str, object]],
     treatment: dict[int, dict[str, object]],
     source_survival: list[int],
+    treatment_label: str = "dual-scale",
 ) -> dict[str, object]:
     """Select a safe treatment only when it also exceeds matched continuation."""
+    if treatment_label not in {"dual-scale", "quadratic"}:
+        raise ValueError("unknown root-position treatment label")
     if tuple(source_survival) != E002_SURVIVAL:
         raise ValueError("source E002 survival does not match the registered baseline")
     control_records = _validated_records(control)
@@ -156,16 +161,16 @@ def classify_pair(
         and (best_control is None or _rank(best_treatment) > _rank(best_control))
     )
     return {
-        "protocol": "g1-dual-scale-root-position-pair-v1",
+        "protocol": f"g1-{treatment_label}-root-position-pair-v1",
         "source_survival": source_survival,
         "control": control_records,
         "treatment": treatment_records,
         "outcome": (
-            "dual-scale-advances"
+            f"{treatment_label}-advances"
             if advances
-            else "dual-scale-matched-control"
+            else f"{treatment_label}-matched-control"
             if best_treatment is not None
-            else "dual-scale-insufficient"
+            else f"{treatment_label}-insufficient"
         ),
         "selected_treatment_step": (
             best_treatment["checkpoint_step"] if advances else None
@@ -303,7 +308,9 @@ def evaluate_arm(
             "survival": survival,
         }
     result = {
-        "protocol": "g1-dual-scale-root-position-arm-v1",
+        "protocol": (
+            f"g1-{kernel.replace('_', '-')}-root-position-arm-v1"
+        ),
         "kernel": kernel,
         "source_survival": source_survival,
         "source_phase_grid_sha256": sha256_file(source_output),
@@ -320,7 +327,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume-from", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--code-commit", required=True)
-    parser.add_argument("--kernel", choices=("exponential", "dual_scale"), required=True)
+    parser.add_argument(
+        "--kernel",
+        choices=("exponential", "dual_scale", "quadratic"),
+        required=True,
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--skip-evaluation", action="store_true")
     return parser

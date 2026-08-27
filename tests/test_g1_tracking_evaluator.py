@@ -1039,6 +1039,13 @@ class G1TrackingEvaluatorTest(unittest.TestCase):
         self.assertEqual(
             candidate.tracking_anchor_position_kernel, "dual_scale"
         )
+        quadratic = make_evaluation_env(
+            "g1_tracking_rmr_50hz_source_step",
+            tracking_anchor_position_kernel="quadratic",
+        )
+        self.assertEqual(
+            quadratic.tracking_anchor_position_kernel, "quadratic"
+        )
 
     def test_evaluator_forwards_torso_orientation_weight(self):
         candidate = make_evaluation_env(

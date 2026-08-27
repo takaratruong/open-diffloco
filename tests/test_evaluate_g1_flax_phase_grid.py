@@ -172,6 +172,11 @@ def test_phase_grid_loads_environment_contract_from_checkpoint_hparams(
     contract = load_checkpoint_environment_contract(checkpoint)
     assert contract["tracking_velocity_kernel"] == "pseudo_huber"
 
+    candidate["tracking_anchor_position_kernel"] = "quadratic"
+    (tmp_path / "hparams.json").write_text(json.dumps(candidate))
+    contract = load_checkpoint_environment_contract(checkpoint)
+    assert contract["tracking_anchor_position_kernel"] == "quadratic"
+
     candidate["tracking_torso_orientation_weight"] = 1.0
     (tmp_path / "hparams.json").write_text(json.dumps(candidate))
     contract = load_checkpoint_environment_contract(checkpoint)

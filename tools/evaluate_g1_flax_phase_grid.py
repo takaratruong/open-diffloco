@@ -211,7 +211,7 @@ def load_checkpoint_environment_contract(checkpoint_path: Path) -> dict:
         or contract["tracking_velocity_kernel"]
         not in {"exponential", "pseudo_huber"}
         or contract["tracking_anchor_position_kernel"]
-        not in {"exponential", "dual_scale"}
+        not in {"exponential", "dual_scale", "quadratic"}
         or isinstance(contract["tracking_torso_orientation_weight"], bool)
         or not isinstance(
             contract["tracking_torso_orientation_weight"], (int, float)

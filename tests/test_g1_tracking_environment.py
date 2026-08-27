@@ -215,12 +215,18 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         treatment = G1TrackingEnv(
             tracking_anchor_position_kernel="dual_scale"
         )
+        quadratic = G1TrackingEnv(
+            tracking_anchor_position_kernel="quadratic"
+        )
 
         self.assertEqual(
             self.env.tracking_anchor_position_kernel, "exponential"
         )
         self.assertEqual(
             treatment.tracking_anchor_position_kernel, "dual_scale"
+        )
+        self.assertEqual(
+            quadratic.tracking_anchor_position_kernel, "quadratic"
         )
         with self.assertRaisesRegex(
             ValueError, "tracking_anchor_position_kernel"

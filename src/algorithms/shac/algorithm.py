@@ -889,7 +889,7 @@ def resolve_anchor_position_kernel_resume_setting(
     is_resume: bool,
 ) -> str:
     """Restore the exact anchor-position objective unless authorized."""
-    valid = {"exponential", "dual_scale"}
+    valid = {"exponential", "dual_scale", "quadratic"}
     if requested not in valid:
         raise ValueError("requested anchor position kernel is invalid")
     if not isinstance(allow_change, bool):
@@ -2780,7 +2780,11 @@ def train(
         raise ValueError(
             "allow_resume_tracking_velocity_kernel_change must be boolean"
         )
-    if tracking_anchor_position_kernel not in {"exponential", "dual_scale"}:
+    if tracking_anchor_position_kernel not in {
+        "exponential",
+        "dual_scale",
+        "quadratic",
+    }:
         raise ValueError("tracking anchor position kernel is invalid")
     if not isinstance(
         allow_resume_tracking_anchor_position_kernel_change, bool

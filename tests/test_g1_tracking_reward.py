@@ -132,6 +132,26 @@ class RMRTrackingRewardTest(unittest.TestCase):
         self.assertLess(float(treatment), 0.0)
         self.assertGreater(abs(float(treatment)), 7.0 * abs(float(legacy)))
 
+    def test_quadratic_anchor_position_matches_exponential_locally_without_far_saturation(self):
+        def component(error, kernel):
+            _, components = self.reward(
+                actual_anchor_pos=jnp.array([error, 0.0, 0.0]),
+                anchor_position_kernel=kernel,
+            )
+            return components["anchor_position"]
+
+        at_reference = component(jnp.array(0.0), "quadratic")
+        at_scale = component(jnp.array(0.3), "quadratic")
+        far_gradient = jax.grad(
+            lambda error: component(error, "quadratic")
+        )(jnp.array(0.74))
+
+        self.assertAlmostEqual(float(at_reference), 1.0)
+        self.assertAlmostEqual(float(at_scale), 0.0, places=6)
+        self.assertAlmostEqual(
+            float(far_gradient), -2.0 * 0.74 / 0.3**2, places=4
+        )
+
     def test_tracking_reward_rejects_unknown_anchor_position_kernel(self):
         with self.assertRaisesRegex(ValueError, "anchor position kernel"):
             self.reward(anchor_position_kernel="not-a-kernel")

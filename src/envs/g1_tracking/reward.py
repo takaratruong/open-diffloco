@@ -43,6 +43,10 @@ def _anchor_position_tracking_kernel(
         return 0.75 * jp.exp(-squared_error / 0.3**2) + 0.25 * jp.exp(
             -squared_error / 0.8**2
         )
+    if kernel == "quadratic":
+        # Matches exp(-x) through first order in normalized squared error,
+        # while retaining corrective gradient far from the reference.
+        return 1.0 - squared_error / 0.3**2
     raise ValueError(f"unknown anchor position kernel: {kernel}")
 
 

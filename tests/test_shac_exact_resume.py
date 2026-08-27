@@ -247,6 +247,15 @@ class ShacExactResumeTest(unittest.TestCase):
             ),
             "dual_scale",
         )
+        self.assertEqual(
+            resolve_anchor_position_kernel_resume_setting(
+                {"tracking_anchor_position_kernel": "exponential"},
+                requested="quadratic",
+                allow_change=True,
+                is_resume=True,
+            ),
+            "quadratic",
+        )
         with self.assertRaisesRegex(ValueError, "must match"):
             resolve_anchor_position_kernel_resume_setting(
                 {"tracking_anchor_position_kernel": "exponential"},
