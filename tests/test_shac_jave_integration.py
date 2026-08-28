@@ -27,5 +27,6 @@ def test_shac_jave_uses_the_g1_reward_sufficient_pre_reset_transition():
     assert '"bootstrap_jave_obs"' in source
     assert "gradient_bellman_targets(" in source
     assert "gradient_bellman_loss(" in source
+    assert "state.jave_vg_weight" in source
     assert "jave_start_step + jave_vg_warmup_steps" in source
     assert "allow_resume_jave_start=True" in source

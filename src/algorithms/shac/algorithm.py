@@ -6018,7 +6018,8 @@ def train(
                     operand=None,
                 )
                 effective_jave_weight = (
-                    jave_vg_weight * jave_vg_active.astype(jp.float32)
+                    state.jave_vg_weight
+                    * jave_vg_active.astype(jp.float32)
                 )
                 c_grads = jax.tree.map(
                     lambda td_gradient, jave_gradient: (
@@ -6308,7 +6309,7 @@ def train(
                     ][-1],
                     "jave_vg_active": (
                         jave_vg_active.astype(jp.float32)
-                        * jp.asarray(jave_vg_weight > 0.0, dtype=jp.float32)
+                        * (state.jave_vg_weight > 0.0).astype(jp.float32)
                     ),
                     "jave_vg_target_norm": jp.mean(
                         jp.linalg.norm(jave_vg_targets, axis=-1)
@@ -6817,6 +6818,11 @@ def train(
         ldm_params=ldm_params,
         ldm_opt=ldm_opt_state,
         replay_buffer=replay_buffer,
+        jave_vg_weight=(
+            jp.asarray(jave_vg_weight, dtype=jp.float32)
+            if jave_enabled
+            else None
+        ),
         step=canonicalize_step_dtype(0),
         ahac_horizon=(
             jp.asarray(ahac_horizon_min, dtype=jp.float32)
@@ -7318,6 +7324,11 @@ def train(
                     ldm_opt=ldm_opt_state,
                     replay_buffer=replay_buffer,
                 )
+            resumed_state = resumed_state.replace(
+                jave_vg_weight=jp.asarray(
+                    jave_vg_weight, dtype=jp.float32
+                )
+            )
     resumed_state, resume_randomness_report = (
         apply_resume_randomness_setting(
             resumed_state,

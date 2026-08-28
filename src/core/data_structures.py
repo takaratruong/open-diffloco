@@ -140,3 +140,4 @@ class TrainState:
     replay_buffer: Any = None
     ahac_horizon: Any = None
     ahac_dual: Any = None
+    jave_vg_weight: Any = None
