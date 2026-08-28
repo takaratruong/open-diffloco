@@ -15,9 +15,22 @@ import jax.numpy as jp
 import optax
 import numpy as np
 
-from src.core.data_structures import Normalizer, TrainState
+from src.core.data_structures import (
+    Normalizer,
+    TrainState,
+    add_to_replay_buffer,
+    init_replay_buffer,
+    sample_replay_buffer,
+)
 from src.core.actor_input_contract import validate_actor_input_contract
-from src.core.networks import Actor, Critic, DoubleCritic
+from src.core.networks import Actor, Critic, DoubleCritic, LearnedDynamicsModel
+from src.algorithms.jave.gradient_bellman import (
+    denormalize_jave_observation,
+    gradient_bellman_loss,
+    gradient_bellman_targets,
+    learned_dynamics_loss,
+    normalize_jave_observation,
+)
 from src.core.rmr_policy import (
     RmrPolicy,
     apply_trainable_rmr_policy,
@@ -578,6 +591,7 @@ def should_persist_checkpoint_metrics(
     ahac: bool = False,
     actor_contact_topology_gradient_truncation: bool = False,
     demonstration_replay: bool = False,
+    jave: bool = False,
 ) -> bool:
     """Persist validity evidence for every checkpointed CAGrad treatment."""
     return checkpoint_path is not None and (
@@ -586,6 +600,7 @@ def should_persist_checkpoint_metrics(
         or ahac
         or actor_contact_topology_gradient_truncation
         or demonstration_replay
+        or jave
     )
 
 
@@ -2405,6 +2420,16 @@ def train(
     allow_resume_tracking_torso_orientation_change: bool = False,
     tracking_root_velocity_weight: float = 0.0,
     allow_resume_tracking_root_velocity_change: bool = False,
+    jave_vg_weight: float = 0.0,
+    jave_vg_warmup_steps: int = 5_000,
+    jave_ldm_hidden: tuple[int, ...] = (256, 256),
+    jave_ldm_lr: float = 3e-4,
+    jave_ldm_iterations: int = 4,
+    jave_ldm_batch_size: int = 256,
+    jave_vg_batch_size: int = 256,
+    jave_ldm_buffer_capacity: int = 100_000,
+    jave_reward_feature_scale: float = 8.0,
+    allow_resume_jave_start: bool = False,
     reference_reset_noise_scale: float = 0.0,
     reference_root_reset_noise_multiplier: float = 1.0,
     reference_root_reset_noise_probability: float = 0.0,
@@ -2915,6 +2940,62 @@ def train(
             or value < 1
         ):
             raise ValueError(f"{name} must be a positive integer")
+    if (
+        isinstance(jave_vg_weight, bool)
+        or not np.isfinite(jave_vg_weight)
+        or jave_vg_weight < 0.0
+    ):
+        raise ValueError("jave_vg_weight must be non-negative and finite")
+    if (
+        isinstance(jave_vg_warmup_steps, bool)
+        or not isinstance(jave_vg_warmup_steps, int)
+        or jave_vg_warmup_steps < 0
+    ):
+        raise ValueError("jave_vg_warmup_steps must be a non-negative integer")
+    if (
+        not isinstance(jave_ldm_hidden, tuple)
+        or not jave_ldm_hidden
+        or any(
+            isinstance(width, bool)
+            or not isinstance(width, int)
+            or width < 1
+            for width in jave_ldm_hidden
+        )
+    ):
+        raise ValueError("jave_ldm_hidden must contain positive integers")
+    if (
+        isinstance(jave_ldm_lr, bool)
+        or not np.isfinite(jave_ldm_lr)
+        or jave_ldm_lr <= 0.0
+    ):
+        raise ValueError("jave_ldm_lr must be positive and finite")
+    for name, value in (
+        ("jave_ldm_iterations", jave_ldm_iterations),
+        ("jave_ldm_batch_size", jave_ldm_batch_size),
+        ("jave_vg_batch_size", jave_vg_batch_size),
+        ("jave_ldm_buffer_capacity", jave_ldm_buffer_capacity),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 1
+        ):
+            raise ValueError(f"{name} must be a positive integer")
+    if jave_ldm_buffer_capacity < max(
+        jave_ldm_batch_size, jave_vg_batch_size
+    ):
+        raise ValueError("JAVE replay capacity must cover both batch sizes")
+    if (
+        isinstance(jave_reward_feature_scale, bool)
+        or not np.isfinite(jave_reward_feature_scale)
+        or jave_reward_feature_scale <= 0.0
+    ):
+        raise ValueError(
+            "jave_reward_feature_scale must be positive and finite"
+        )
+    if not isinstance(allow_resume_jave_start, bool):
+        raise ValueError("allow_resume_jave_start must be boolean")
+    jave_enabled = jave_vg_weight > 0.0
     effective_num_envs = num_envs * gradient_accumulation_steps
     steps_per_actor_update = effective_num_envs * unroll_length
     if checkpoint_steps is not None:
@@ -3315,6 +3396,74 @@ def train(
         raise ValueError(
             "demonstration replay requires a G1 tracking environment"
         )
+    saved_jave_vg_weight = float(
+        resumed_hparams.get("jave_vg_weight", 0.0)
+        if resumed_hparams
+        else 0.0
+    )
+    saved_jave_enabled = saved_jave_vg_weight > 0.0
+    if resume_from is not None:
+        if jave_enabled and not saved_jave_enabled:
+            if not allow_resume_jave_start:
+                raise ValueError(
+                    "starting JAVE from a non-JAVE checkpoint requires "
+                    "allow_resume_jave_start=True"
+                )
+        elif jave_enabled != saved_jave_enabled:
+            raise ValueError(
+                "JAVE cannot be disabled when resuming a JAVE checkpoint"
+            )
+        elif jave_enabled:
+            saved_jave_settings = (
+                saved_jave_vg_weight,
+                int(resumed_hparams.get("jave_vg_warmup_steps", 5_000)),
+                tuple(resumed_hparams.get("jave_ldm_hidden", (256, 256))),
+                float(resumed_hparams.get("jave_ldm_lr", 3e-4)),
+                int(resumed_hparams.get("jave_ldm_iterations", 4)),
+                int(resumed_hparams.get("jave_ldm_batch_size", 256)),
+                int(resumed_hparams.get("jave_vg_batch_size", 256)),
+                int(
+                    resumed_hparams.get(
+                        "jave_ldm_buffer_capacity", 100_000
+                    )
+                ),
+                float(
+                    resumed_hparams.get("jave_reward_feature_scale", 8.0)
+                ),
+            )
+            requested_jave_settings = (
+                float(jave_vg_weight),
+                jave_vg_warmup_steps,
+                jave_ldm_hidden,
+                float(jave_ldm_lr),
+                jave_ldm_iterations,
+                jave_ldm_batch_size,
+                jave_vg_batch_size,
+                jave_ldm_buffer_capacity,
+                float(jave_reward_feature_scale),
+            )
+            if requested_jave_settings != saved_jave_settings:
+                raise ValueError(
+                    "JAVE continuation settings must match the checkpoint"
+                )
+    if jave_enabled:
+        if not env_variant.startswith("g1_tracking"):
+            raise ValueError("JAVE augmentation requires a G1 tracking task")
+        if ahac:
+            raise ValueError("JAVE augmentation does not support AHAC")
+        if demonstration_replay_threshold is not None:
+            raise ValueError(
+                "JAVE augmentation does not support demonstration replay"
+            )
+        if torso_wrench_assistance or actor_learned_torso_wrench:
+            raise ValueError(
+                "JAVE augmentation requires the unmodified environment reward"
+            )
+    jave_start_step = (
+        int(resumed_hparams.get("jave_start_step", 0))
+        if saved_jave_enabled and resumed_hparams
+        else (resumed_step if jave_enabled and resume_from is not None else 0)
+    )
     if resume_from:
         validate_actor_cagrad_configuration(
             actor_cagrad=actor_cagrad,
@@ -3481,6 +3630,7 @@ def train(
                     tracking_torso_orientation_weight
                 ),
                 "tracking_root_velocity_weight": tracking_root_velocity_weight,
+                "jave_enabled": jave_enabled,
                 "reference_reset_noise_scale": reference_reset_noise_scale,
                 "reference_root_reset_noise_multiplier": (
                     reference_root_reset_noise_multiplier
@@ -3974,6 +4124,28 @@ def train(
 
     actor_normalizer = actor_norm.init()
     critic_normalizer = critic_norm.init()
+    learned_dynamics_model = None
+    ldm_params = None
+    replay_buffer = None
+    if jave_enabled:
+        learned_dynamics_model = LearnedDynamicsModel(
+            obs_dim=env.jave_obs_dim,
+            hidden=jave_ldm_hidden,
+        )
+        jave_dummy = jp.zeros(
+            (1, env.jave_obs_dim), dtype=jp.float32
+        )
+        action_dummy = jp.zeros((1, env.action_dim), dtype=jp.float32)
+        ldm_params = learned_dynamics_model.init(
+            jax.random.fold_in(k3, 0x4A415645),
+            jave_dummy,
+            action_dummy,
+        )
+        replay_buffer = init_replay_buffer(
+            jave_ldm_buffer_capacity,
+            env.jave_obs_dim,
+            env.action_dim,
+        )
 
     # Linear LR decay
     if use_lr_decay:
@@ -4010,9 +4182,20 @@ def train(
     critic_opt = optax.chain(
         optax.clip_by_global_norm(1.0), optax.adam(critic_schedule)
     )
+    ldm_optimizer = (
+        optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.adam(jave_ldm_lr),
+        )
+        if jave_enabled
+        else None
+    )
 
     actor_opt_state = actor_opt.init(actor_params)
     critic_opt_state = critic_opt.init(critic_params)
+    ldm_opt_state = (
+        ldm_optimizer.init(ldm_params) if jave_enabled else None
+    )
 
     # Initialize environments at difficulty=0 (flat ground)
     env_keys = jax.random.split(k3, effective_num_envs)
@@ -4576,6 +4759,20 @@ def train(
                     active, contact_topology_event, False
                 ),
             }
+            if jave_enabled:
+                transition.update(
+                    {
+                        "jave_obs": env._get_jave_obs(
+                            state.data, state.info
+                        ),
+                        "bootstrap_jave_obs": (
+                            candidate_unreplayed_state.info[
+                                "bootstrap_jave_obs"
+                            ]
+                        ),
+                        "jave_action": noisy_action,
+                    }
+                )
             if adaptive_phase_sampling:
                 transition["transition_phase"] = transition_phase
             if frozen_preview_treatment:
@@ -5015,6 +5212,13 @@ def train(
             diff_mask_key,
             assistance_mask_key,
         ) = jax.random.split(state.key, 6)
+        # Keep every rollout random stream paired with a JAVE-off control.
+        # JAVE-only sampling is deterministically namespaced from the input key.
+        jave_key = (
+            jax.random.fold_in(state.key, 0x4A415645)
+            if jave_enabled
+            else None
+        )
 
         # Curriculum: difficulty=0 during grace, then ramp to 1
         difficulty = jp.clip(
@@ -5447,6 +5651,174 @@ def train(
         actor_update_norm = compute_grad_norm(updates)
         new_actor_params = optax.apply_updates(state.actor_params, updates)
 
+        new_ldm_params = state.ldm_params
+        new_ldm_opt = state.ldm_opt
+        new_replay_buffer = state.replay_buffer
+        jave_ldm_loss = jp.asarray(0.0, dtype=jp.float32)
+        jave_vg_active = jp.asarray(False)
+        jave_vg_targets = None
+        jave_vg_observations = None
+        if jave_enabled:
+            ldm_train_key, vg_sample_key = jax.random.split(jave_key)
+            flat_jave_obs = trajs["jave_obs"].reshape(
+                -1, env.jave_obs_dim
+            )
+            flat_next_jave_obs = trajs["bootstrap_jave_obs"].reshape(
+                -1, env.jave_obs_dim
+            )
+            flat_jave_actions = trajs["jave_action"].reshape(
+                -1, env.action_dim
+            )
+            flat_jave_dones = trajs["done"].reshape(-1)
+            normalized_jave_obs = normalize_jave_observation(
+                flat_jave_obs,
+                state.critic_normalizer,
+                critic_dim=env.critic_obs_dim,
+                reward_feature_scale=jave_reward_feature_scale,
+                eps=critic_norm.eps,
+            ).astype(jp.float32)
+            normalized_next_jave_obs = normalize_jave_observation(
+                flat_next_jave_obs,
+                state.critic_normalizer,
+                critic_dim=env.critic_obs_dim,
+                reward_feature_scale=jave_reward_feature_scale,
+                eps=critic_norm.eps,
+            ).astype(jp.float32)
+            new_replay_buffer = add_to_replay_buffer(
+                state.replay_buffer,
+                jax.lax.stop_gradient(normalized_jave_obs),
+                jax.lax.stop_gradient(flat_jave_actions),
+                jax.lax.stop_gradient(normalized_next_jave_obs),
+                jax.lax.stop_gradient(flat_jave_dones),
+                jave_ldm_buffer_capacity,
+            )
+
+            def ldm_update_step(carry, update_key):
+                params, opt_state = carry
+                batch = sample_replay_buffer(
+                    new_replay_buffer,
+                    update_key,
+                    jave_ldm_batch_size,
+                )
+                loss, gradients = jax.value_and_grad(
+                    lambda candidate: learned_dynamics_loss(
+                        learned_dynamics_model, candidate, batch
+                    )
+                )(params)
+                gradients = jax.tree.map(
+                    lambda gradient: jp.where(
+                        jp.isfinite(gradient), gradient, 0.0
+                    ),
+                    gradients,
+                )
+                updates, next_opt_state = ldm_optimizer.update(
+                    gradients, opt_state
+                )
+                next_params = optax.apply_updates(params, updates)
+                return (next_params, next_opt_state), loss
+
+            ldm_update_keys = jax.random.split(
+                ldm_train_key, jave_ldm_iterations
+            )
+            (
+                (candidate_ldm_params, candidate_ldm_opt),
+                jave_ldm_losses,
+            ) = jax.lax.scan(
+                ldm_update_step,
+                (state.ldm_params, state.ldm_opt),
+                ldm_update_keys,
+            )
+            jave_buffer_ready = (
+                new_replay_buffer.size >= jave_ldm_batch_size
+            )
+            new_ldm_params = jax.tree.map(
+                lambda candidate, current: jp.where(
+                    jave_buffer_ready, candidate, current
+                ),
+                candidate_ldm_params,
+                state.ldm_params,
+            )
+            new_ldm_opt = jax.tree.map(
+                lambda candidate, current: jp.where(
+                    jave_buffer_ready, candidate, current
+                ),
+                candidate_ldm_opt,
+                state.ldm_opt,
+            )
+            jave_ldm_loss = jp.where(
+                jave_buffer_ready,
+                jave_ldm_losses[-1],
+                jp.asarray(0.0, dtype=jp.float32),
+            )
+            (
+                jave_vg_observations,
+                jave_vg_actions,
+                _,
+                _,
+            ) = sample_replay_buffer(
+                new_replay_buffer,
+                vg_sample_key,
+                jave_vg_batch_size,
+            )
+            frozen_normalizer = jax.tree.map(
+                jax.lax.stop_gradient, state.critic_normalizer
+            )
+
+            def analytical_reward(
+                normalized_observation,
+                normalized_next_observation,
+                action,
+            ):
+                observation = denormalize_jave_observation(
+                    normalized_observation,
+                    frozen_normalizer,
+                    critic_dim=env.critic_obs_dim,
+                    reward_feature_scale=jave_reward_feature_scale,
+                    eps=critic_norm.eps,
+                )
+                next_observation = denormalize_jave_observation(
+                    normalized_next_observation,
+                    frozen_normalizer,
+                    critic_dim=env.critic_obs_dim,
+                    reward_feature_scale=jave_reward_feature_scale,
+                    eps=critic_norm.eps,
+                )
+                return env.compute_reward_from_jave_obs(
+                    observation, next_observation, action
+                )
+
+            jave_vg_active = (
+                jave_buffer_ready
+                & (
+                    state.step
+                    >= jave_start_step + jave_vg_warmup_steps
+                )
+            )
+
+            def compute_jave_targets(_):
+                targets = gradient_bellman_targets(
+                    dynamics_model=learned_dynamics_model,
+                    dynamics_params=new_ldm_params,
+                    critic=critic,
+                    target_critic_params=state.target_critic_params,
+                    normalized_observations=jave_vg_observations,
+                    actions=jave_vg_actions,
+                    critic_dim=env.critic_obs_dim,
+                    gamma=gamma,
+                    analytical_reward=analytical_reward,
+                )
+                return jp.where(jp.isfinite(targets), targets, 0.0)
+
+            jave_vg_targets = jax.lax.cond(
+                jave_vg_active,
+                compute_jave_targets,
+                lambda _: jp.zeros(
+                    (jave_vg_batch_size, env.jave_obs_dim),
+                    dtype=jp.float32,
+                ),
+                operand=None,
+            )
+
         if ahac:
             ahac_active_mask = active_horizon_mask(
                 state.ahac_horizon, ahac_horizon_max
@@ -5607,6 +5979,52 @@ def train(
                     shard_critic_grad_stats
                 )
 
+            if jave_enabled:
+                def active_jave_gradient(_):
+                    return jax.value_and_grad(
+                        lambda candidate: gradient_bellman_loss(
+                            critic=critic,
+                            critic_params=candidate,
+                            normalized_critic_observations=(
+                                jave_vg_observations[
+                                    ..., : env.critic_obs_dim
+                                ]
+                            ),
+                            targets=jave_vg_targets,
+                            critic_dim=env.critic_obs_dim,
+                        )
+                    )(c_params)
+
+                jave_vg_loss_value, jave_vg_gradients = jax.lax.cond(
+                    jave_vg_active,
+                    active_jave_gradient,
+                    lambda _: (
+                        jp.asarray(0.0, dtype=jp.float32),
+                        jax.tree.map(jp.zeros_like, c_params),
+                    ),
+                    operand=None,
+                )
+                effective_jave_weight = (
+                    jave_vg_weight * jave_vg_active.astype(jp.float32)
+                )
+                c_grads = jax.tree.map(
+                    lambda td_gradient, jave_gradient: (
+                        td_gradient
+                        + effective_jave_weight * jave_gradient
+                    ),
+                    c_grads,
+                    jave_vg_gradients,
+                )
+            else:
+                jave_vg_loss_value = jp.asarray(0.0, dtype=jp.float32)
+
+            c_grads = jax.tree.map(
+                lambda gradient: jp.where(
+                    jp.isfinite(gradient), gradient, 0.0
+                ),
+                c_grads,
+            )
+
             c_updates, new_c_opt = critic_opt.update(c_grads, c_opt_state)
             new_c_params = optax.apply_updates(c_params, c_updates)
 
@@ -5615,6 +6033,7 @@ def train(
                 "finite_fraction": critic_grad_stats["finite_fraction"],
                 "raw_norm_median": critic_grad_stats["raw_norm_median"],
                 "raw_norm_max": critic_grad_stats["raw_norm_max"],
+                "jave_vg_loss": jave_vg_loss_value,
             }
 
         if ahac:
@@ -5800,6 +6219,12 @@ def train(
             ),
             ahac_dual=(ahac_update.dual if ahac else state.ahac_dual),
         )
+        if jave_enabled:
+            new_state = new_state.replace(
+                ldm_params=new_ldm_params,
+                ldm_opt=new_ldm_opt,
+                replay_buffer=new_replay_buffer,
+            )
 
         # Collect metrics
         metrics = {
@@ -5861,6 +6286,20 @@ def train(
                 trajs["demonstration_replay"]
             ),
         }
+        if jave_enabled:
+            metrics.update(
+                {
+                    "jave_ldm_loss": jave_ldm_loss,
+                    "jave_vg_loss": critic_update_metrics[
+                        "jave_vg_loss"
+                    ][-1],
+                    "jave_vg_active": jave_vg_active.astype(jp.float32),
+                    "jave_vg_target_norm": jp.mean(
+                        jp.linalg.norm(jave_vg_targets, axis=-1)
+                    ),
+                    "jave_replay_size": new_replay_buffer.size,
+                }
+            )
         if ahac:
             active_contact = jp.where(
                 ahac_active_mask,
@@ -6359,6 +6798,9 @@ def train(
         critic_normalizer=critic_normalizer,
         actor_opt=actor_opt_state,
         critic_opt=critic_opt_state,
+        ldm_params=ldm_params,
+        ldm_opt=ldm_opt_state,
+        replay_buffer=replay_buffer,
         step=canonicalize_step_dtype(0),
         ahac_horizon=(
             jp.asarray(ahac_horizon_min, dtype=jp.float32)
@@ -6832,6 +7274,34 @@ def train(
                     reference_length=env.reference_length,
                 )
             )
+        if jave_enabled:
+            if "bootstrap_jave_obs" not in resumed_state.env_state.info:
+                resumed_jave_obs = jax.vmap(env._get_jave_obs)(
+                    resumed_state.env_state.data,
+                    resumed_state.env_state.info,
+                )
+                resumed_state = resumed_state.replace(
+                    env_state=resumed_state.env_state.replace(
+                        info={
+                            **resumed_state.env_state.info,
+                            "bootstrap_jave_obs": resumed_jave_obs,
+                        }
+                    )
+                )
+            resumed_has_jave_state = all(
+                getattr(resumed_state, name, None) is not None
+                for name in ("ldm_params", "ldm_opt", "replay_buffer")
+            )
+            if saved_jave_enabled and not resumed_has_jave_state:
+                raise ValueError(
+                    "JAVE checkpoint is missing learned-dynamics state"
+                )
+            if not resumed_has_jave_state:
+                resumed_state = resumed_state.replace(
+                    ldm_params=ldm_params,
+                    ldm_opt=ldm_opt_state,
+                    replay_buffer=replay_buffer,
+                )
     resumed_state, resume_randomness_report = (
         apply_resume_randomness_setting(
             resumed_state,
@@ -6960,6 +7430,17 @@ def train(
         "allow_resume_tracking_root_velocity_change": (
             allow_resume_tracking_root_velocity_change
         ),
+        "jave_vg_weight": jave_vg_weight,
+        "jave_vg_warmup_steps": jave_vg_warmup_steps,
+        "jave_ldm_hidden": list(jave_ldm_hidden),
+        "jave_ldm_lr": jave_ldm_lr,
+        "jave_ldm_iterations": jave_ldm_iterations,
+        "jave_ldm_batch_size": jave_ldm_batch_size,
+        "jave_vg_batch_size": jave_vg_batch_size,
+        "jave_ldm_buffer_capacity": jave_ldm_buffer_capacity,
+        "jave_reward_feature_scale": jave_reward_feature_scale,
+        "jave_start_step": jave_start_step,
+        "allow_resume_jave_start": allow_resume_jave_start,
         "reference_reset_noise_scale": reference_reset_noise_scale,
         "reference_root_reset_noise_multiplier": (
             reference_root_reset_noise_multiplier
@@ -7357,6 +7838,30 @@ def train(
             float(metrics["actor_policy_anchor_squared_error"])
         ):
             raise RuntimeError("actor policy anchor telemetry is invalid")
+        if jave_enabled:
+            jave_telemetry = {
+                "jave_ldm_loss": float(metrics["jave_ldm_loss"]),
+                "jave_vg_loss": float(metrics["jave_vg_loss"]),
+                "jave_vg_active": bool(metrics["jave_vg_active"]),
+                "jave_vg_target_norm": float(
+                    metrics["jave_vg_target_norm"]
+                ),
+                "jave_replay_size": int(metrics["jave_replay_size"]),
+            }
+            if (
+                not all(
+                    np.isfinite(jave_telemetry[name])
+                    for name in (
+                        "jave_ldm_loss",
+                        "jave_vg_loss",
+                        "jave_vg_target_norm",
+                    )
+                )
+                or jave_telemetry["jave_replay_size"] < 1
+            ):
+                raise RuntimeError(
+                    f"JAVE telemetry is invalid: {jave_telemetry}"
+                )
 
         if should_log_training_iteration(i, start_iteration=start_iter):
             jax.block_until_ready(state.step)
@@ -7466,6 +7971,8 @@ def train(
                         metrics["contact_topology_event_fraction"]
                     ),
                 }
+                if jave_enabled:
+                    diag_entry.update(jave_telemetry)
                 if ahac:
                     diag_entry.update(build_checkpoint_ahac_telemetry(metrics))
                 if actor_policy_anchor_weight > 0.0:
@@ -7754,6 +8261,15 @@ def train(
                     f"{metrics['actor_grad']:7.2f} | {metrics['critic_loss']:7.4f} | "
                     f"{diff:5.2f} | {status}"
                 )
+            if jave_enabled:
+                print(
+                    "         JAVE "
+                    f"ldm={jave_telemetry['jave_ldm_loss']:.4f} "
+                    f"vg={jave_telemetry['jave_vg_loss']:.4f} "
+                    f"target={jave_telemetry['jave_vg_target_norm']:.4f} "
+                    f"active={int(jave_telemetry['jave_vg_active'])} "
+                    f"replay={jave_telemetry['jave_replay_size']}"
+                )
 
             if DEBUG_FOOT_CONTACTS:
                 print(
@@ -7833,6 +8349,7 @@ def train(
             demonstration_replay=(
                 demonstration_replay_threshold is not None
             ),
+            jave=jave_enabled,
         ):
             checkpoint_metrics = {
                 "step": int(current_step),
@@ -7844,6 +8361,8 @@ def train(
                 checkpoint_metrics.update(
                     build_checkpoint_cagrad_telemetry(metrics)
                 )
+            if jave_enabled:
+                checkpoint_metrics.update(jave_telemetry)
             if ahac:
                 checkpoint_metrics.update(
                     build_checkpoint_ahac_telemetry(metrics)

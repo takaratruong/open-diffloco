@@ -168,6 +168,7 @@ class G1TrackingEnv:
         tracking_anchor_position_kernel: str = "exponential",
         tracking_torso_orientation_weight: float = 0.0,
         tracking_root_velocity_weight: float = 0.0,
+        jave_enabled: bool = False,
         reference_reset_noise_scale: float = 0.0,
         reference_root_reset_noise_multiplier: float = 1.0,
         reference_root_reset_noise_probability: float = 0.0,
@@ -310,6 +311,9 @@ class G1TrackingEnv:
         self.tracking_root_velocity_weight = float(
             tracking_root_velocity_weight
         )
+        if not isinstance(jave_enabled, bool):
+            raise ValueError("jave_enabled must be boolean")
+        self.jave_enabled = jave_enabled
         if (
             isinstance(termination_margin_weight, bool)
             or not np.isfinite(termination_margin_weight)
@@ -782,6 +786,11 @@ class G1TrackingEnv:
             )
         )
         self.critic_obs_dim = 286
+        # JAVE learns dynamics over the unchanged critic state plus one
+        # reward-sufficient scalar.  The critic itself remains 286-dimensional,
+        # so existing actors, critics, and checkpoints retain their exact
+        # schema.
+        self.jave_obs_dim = self.critic_obs_dim + 1
 
         # Compatibility fields consumed by the unchanged Open-DiffLoco SHAC
         # rollout. Terrain/disturbance amplitudes remain zero in the registered
@@ -1037,6 +1046,71 @@ class G1TrackingEnv:
             )
         )
 
+    def _state_tracking_reward_feature(
+        self, data: mjx.Data, info: dict
+    ) -> jax.Array:
+        """Return the action-independent, unscaled reward at one state."""
+
+        body_pos, body_quat, body_lin_vel, body_ang_vel = self._body_state(data)
+        reward, _ = self._tracking_reward_from_body_state(
+            info,
+            body_pos,
+            body_quat,
+            body_lin_vel,
+            body_ang_vel,
+        )
+        if self.termination_margin_weight > 0.0:
+            reward = reward + (
+                self.termination_margin_weight
+                * termination_margin_penalty(
+                    **self.termination_errors(
+                        phase=info["phase"],
+                        body_pos=body_pos,
+                        body_quat=body_quat,
+                    )
+                )
+            )
+        return reward
+
+    def _get_jave_obs(self, data: mjx.Data, info: dict) -> jax.Array:
+        """Return a reward-sufficient state without changing critic inputs."""
+
+        critic_obs = self._get_critic_obs(data, info)
+        state_reward = self._state_tracking_reward_feature(data, info)
+        return jp.concatenate((critic_obs, state_reward[..., None]), axis=-1)
+
+    def compute_reward_from_jave_obs(
+        self,
+        current_obs: jax.Array,
+        next_obs: jax.Array,
+        action: jax.Array,
+    ) -> jax.Array:
+        """Reconstruct the exact G1 transition reward from JAVE inputs."""
+
+        action = action.astype(jp.float64)
+        if self.clip_actions:
+            action = jp.clip(action, -1.0, 1.0)
+        model_action = action[..., self.actor_to_model_permutation]
+        previous_action_actor = current_obs[..., 257:286]
+        previous_action = previous_action_actor[
+            ..., self.actor_to_model_permutation
+        ]
+        next_joint_offset_actor = next_obs[..., 199:228]
+        next_joint_pos = self.default_joints + next_joint_offset_actor[
+            ..., self.actor_to_model_permutation
+        ]
+        regularization_reward, _ = rmr_regularization_reward(
+            action=model_action,
+            previous_action=previous_action,
+            joint_pos=next_joint_pos,
+            soft_joint_lower=self.soft_joint_lower,
+            soft_joint_upper=self.soft_joint_upper,
+            action_magnitude_weight=self.action_magnitude_weight,
+        )
+        return self.reward_scale * (
+            next_obs[..., self.critic_obs_dim] + regularization_reward
+        )
+
     def _base_info(
         self,
         *,
@@ -1208,6 +1282,11 @@ class G1TrackingEnv:
             "actor_obs_history": actor_history,
             "bootstrap_obs": actor_history.reshape(-1),
             "bootstrap_critic_obs": critic_obs,
+            **(
+                {"bootstrap_jave_obs": self._get_jave_obs(data, info)}
+                if self.jave_enabled
+                else {}
+            ),
         }
         return EnvState(
             data=data,
@@ -1716,6 +1795,11 @@ class G1TrackingEnv:
             axis=0,
         )
         bootstrap_critic_obs = self._get_critic_obs(data, pre_reset_info)
+        bootstrap_jave_obs = (
+            self._get_jave_obs(data, pre_reset_info)
+            if self.jave_enabled
+            else None
+        )
 
         rng, reset_key = jax.random.split(state.info["rng"])
         if self.adaptive_phase_sampling:
@@ -1755,6 +1839,11 @@ class G1TrackingEnv:
             "terminal": terminal,
             "bootstrap_obs": bootstrap_history.reshape(-1),
             "bootstrap_critic_obs": bootstrap_critic_obs,
+            **(
+                {"bootstrap_jave_obs": bootstrap_jave_obs}
+                if self.jave_enabled
+                else {}
+            ),
             "transition_contact_stiffness": transition_contact_stiffness,
             "transition_contact_topology_event": (
                 transition_contact_topology_event

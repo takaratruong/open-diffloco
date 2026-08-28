@@ -46,6 +46,41 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         self.assertEqual(
             state.info["bootstrap_critic_obs"].shape, (286,)
         )
+        self.assertNotIn("bootstrap_jave_obs", state.info)
+
+    def test_jave_observation_reconstructs_the_transition_reward(self):
+        env = self.env
+        self.assertFalse(env.jave_enabled)
+        env.jave_enabled = True
+        self.addCleanup(setattr, env, "jave_enabled", False)
+        state = env.reset_at_phase(
+            jax.random.PRNGKey(211),
+            jnp.array(0.0),
+            jnp.array(10, dtype=jnp.int32),
+        )
+        action = jnp.linspace(-0.15, 0.15, env.action_dim)
+
+        current_jave_obs = env._get_jave_obs(state.data, state.info)
+        next_state = env.step(state, action)
+        bootstrap_jave_obs = next_state.info["bootstrap_jave_obs"]
+        reconstructed_reward = env.compute_reward_from_jave_obs(
+            current_jave_obs,
+            bootstrap_jave_obs,
+            action,
+        )
+
+        self.assertEqual(env.jave_obs_dim, env.critic_obs_dim + 1)
+        self.assertEqual(current_jave_obs.shape, (env.jave_obs_dim,))
+        np.testing.assert_array_equal(
+            np.asarray(current_jave_obs[: env.critic_obs_dim]),
+            np.asarray(env._get_critic_obs(state.data, state.info)),
+        )
+        np.testing.assert_allclose(
+            np.asarray(reconstructed_reward),
+            np.asarray(next_state.reward),
+            rtol=1e-10,
+            atol=1e-10,
+        )
 
     def test_canonical_actor_noise_leaves_reference_and_actions_clean(self):
         from src.envs.g1_tracking.environment import G1TrackingEnv
