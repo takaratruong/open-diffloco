@@ -2429,6 +2429,7 @@ def train(
     jave_vg_batch_size: int = 256,
     jave_ldm_buffer_capacity: int = 100_000,
     jave_reward_feature_scale: float = 8.0,
+    jave_collect_transitions: bool = False,
     allow_resume_jave_start: bool = False,
     reference_reset_noise_scale: float = 0.0,
     reference_root_reset_noise_multiplier: float = 1.0,
@@ -2995,7 +2996,13 @@ def train(
         )
     if not isinstance(allow_resume_jave_start, bool):
         raise ValueError("allow_resume_jave_start must be boolean")
-    jave_enabled = jave_vg_weight > 0.0
+    if not isinstance(jave_collect_transitions, bool):
+        raise ValueError("jave_collect_transitions must be boolean")
+    if jave_vg_weight > 0.0 and not jave_collect_transitions:
+        raise ValueError(
+            "positive jave_vg_weight requires jave_collect_transitions=True"
+        )
+    jave_enabled = jave_collect_transitions
     effective_num_envs = num_envs * gradient_accumulation_steps
     steps_per_actor_update = effective_num_envs * unroll_length
     if checkpoint_steps is not None:
@@ -3401,7 +3408,13 @@ def train(
         if resumed_hparams
         else 0.0
     )
-    saved_jave_enabled = saved_jave_vg_weight > 0.0
+    saved_jave_enabled = bool(
+        resumed_hparams.get(
+            "jave_collect_transitions", saved_jave_vg_weight > 0.0
+        )
+        if resumed_hparams
+        else False
+    )
     if resume_from is not None:
         if jave_enabled and not saved_jave_enabled:
             if not allow_resume_jave_start:
@@ -6293,7 +6306,10 @@ def train(
                     "jave_vg_loss": critic_update_metrics[
                         "jave_vg_loss"
                     ][-1],
-                    "jave_vg_active": jave_vg_active.astype(jp.float32),
+                    "jave_vg_active": (
+                        jave_vg_active.astype(jp.float32)
+                        * jp.asarray(jave_vg_weight > 0.0, dtype=jp.float32)
+                    ),
                     "jave_vg_target_norm": jp.mean(
                         jp.linalg.norm(jave_vg_targets, axis=-1)
                     ),
@@ -7439,6 +7455,7 @@ def train(
         "jave_vg_batch_size": jave_vg_batch_size,
         "jave_ldm_buffer_capacity": jave_ldm_buffer_capacity,
         "jave_reward_feature_scale": jave_reward_feature_scale,
+        "jave_collect_transitions": jave_collect_transitions,
         "jave_start_step": jave_start_step,
         "allow_resume_jave_start": allow_resume_jave_start,
         "reference_reset_noise_scale": reference_reset_noise_scale,

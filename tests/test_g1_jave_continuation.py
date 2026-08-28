@@ -43,12 +43,14 @@ def test_jave_kwargs_are_matched_except_for_jave_authority():
     assert treatment["allow_resume_actor_bootstrap_scale_change"] is True
     assert control["jave_vg_weight"] == 0.0
     assert treatment["jave_vg_weight"] == JAVE_VG_WEIGHT
-    assert control["allow_resume_jave_start"] is False
+    assert control["jave_collect_transitions"] is True
+    assert treatment["jave_collect_transitions"] is True
+    assert control["allow_resume_jave_start"] is True
     assert treatment["allow_resume_jave_start"] is True
     assert treatment["jave_vg_warmup_steps"] == TRANSITIONS_PER_UPDATE
     assert treatment["total_steps"] == SOURCE_STEP + 2 * TRANSITIONS_PER_UPDATE
 
-    for key in ("jave_vg_weight", "allow_resume_jave_start"):
+    for key in ("jave_vg_weight",):
         control.pop(key)
         treatment.pop(key)
     assert control.keys() == treatment.keys()

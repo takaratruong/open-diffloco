@@ -106,7 +106,8 @@ def build_jave_kwargs(
         jave_vg_batch_size=256,
         jave_ldm_buffer_capacity=100_000,
         jave_reward_feature_scale=8.0,
-        allow_resume_jave_start=enabled,
+        jave_collect_transitions=True,
+        allow_resume_jave_start=True,
         total_steps=SOURCE_STEP + updates * TRANSITIONS_PER_UPDATE,
         checkpoint_steps=expected_checkpoint_steps(updates),
     )
@@ -218,8 +219,9 @@ def validate_training_artifacts(
         "actor_bootstrap_scale": 1.0,
         "jave_vg_weight": JAVE_VG_WEIGHT if enabled else 0.0,
         "jave_vg_warmup_steps": warmup_updates * TRANSITIONS_PER_UPDATE,
-        "jave_start_step": SOURCE_STEP if enabled else 0,
-        "allow_resume_jave_start": enabled,
+        "jave_start_step": SOURCE_STEP,
+        "jave_collect_transitions": True,
+        "allow_resume_jave_start": True,
         "total_steps": expected_steps[-1],
     }
     if any(
@@ -251,7 +253,7 @@ def validate_training_artifacts(
             getattr(state, name, None) is not None
             for name in ("ldm_params", "ldm_opt", "replay_buffer")
         )
-        if has_jave_state != enabled:
+        if not has_jave_state:
             raise ValueError("JAVE learned-dynamics state presence is invalid")
         checkpoint_hashes.append(sha256_file(checkpoint))
     rows = json.loads(
@@ -261,26 +263,25 @@ def validate_training_artifacts(
     )
     if [row.get("step") for row in rows] != list(expected_steps):
         raise ValueError("JAVE checkpoint telemetry grid is invalid")
-    if enabled:
-        for index, row in enumerate(rows):
-            scalars = (
-                row.get("jave_ldm_loss"),
-                row.get("jave_vg_loss"),
-                row.get("jave_vg_target_norm"),
+    for index, row in enumerate(rows):
+        scalars = (
+            row.get("jave_ldm_loss"),
+            row.get("jave_vg_loss"),
+            row.get("jave_vg_target_norm"),
+        )
+        if (
+            any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                for value in scalars
             )
-            if (
-                any(
-                    isinstance(value, bool)
-                    or not isinstance(value, (int, float))
-                    or not math.isfinite(float(value))
-                    for value in scalars
-                )
-                or not isinstance(row.get("jave_replay_size"), int)
-                or row["jave_replay_size"] < TRANSITIONS_PER_UPDATE
-                or bool(row.get("jave_vg_active"))
-                != (index >= warmup_updates)
-            ):
-                raise ValueError("JAVE checkpoint telemetry is invalid")
+            or not isinstance(row.get("jave_replay_size"), int)
+            or row["jave_replay_size"] < TRANSITIONS_PER_UPDATE
+            or bool(row.get("jave_vg_active"))
+            != (enabled and index >= warmup_updates)
+        ):
+            raise ValueError("JAVE checkpoint telemetry is invalid")
     return {
         "valid": True,
         "protocol": "g1-jave-continuation-training-v1",

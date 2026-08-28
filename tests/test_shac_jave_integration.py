@@ -14,6 +14,7 @@ def test_shac_jave_is_default_off_and_resume_start_requires_authority():
     assert parameters["jave_vg_batch_size"].default == 256
     assert parameters["jave_ldm_buffer_capacity"].default == 100_000
     assert parameters["jave_reward_feature_scale"].default == 8.0
+    assert parameters["jave_collect_transitions"].default is False
     assert parameters["allow_resume_jave_start"].default is False
 
 
