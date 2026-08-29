@@ -1,3 +1,4 @@
+import inspect
 from pathlib import Path
 
 import jax
@@ -92,6 +93,62 @@ def test_control_repeatability_requires_exact_state_hashes_and_telemetry():
     report = compare_control_repeats(control_a, control_b)
     assert report["valid"] is False
     assert report["first_mismatch_step"] == 2
+
+
+def test_repeatability_only_mode_stops_after_two_controls():
+    from tools.run_g1_jave_inprocess_pair import (
+        _run_parent,
+        _run_worker,
+        build_parser,
+        classify_control_repeatability,
+    )
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--solver-profile",
+            "g1-4x5",
+            "--reference-path",
+            "/tmp/reference.npz",
+            "--resume-from",
+            "/tmp/checkpoint.pkl",
+            "--output-root",
+            "/tmp/output",
+            "--code-commit",
+            "a" * 40,
+            "--repeatability-only",
+        ]
+    )
+    assert args.repeatability_only is True
+
+    exact = classify_control_repeatability(
+        {
+            "valid": True,
+            "state_hashes_match": True,
+            "telemetry_matches": True,
+            "first_mismatch_step": None,
+        }
+    )
+    assert exact["outcome"] == "control-repeatability-exact"
+    assert exact["scientific_valid"] is True
+    assert exact["policy_retained"] is False
+
+    divergent = classify_control_repeatability(
+        {
+            "valid": False,
+            "state_hashes_match": False,
+            "telemetry_matches": False,
+            "first_mismatch_step": 1_892_352,
+        }
+    )
+    assert divergent["outcome"] == "control-repeatability-diverges"
+    assert divergent["scientific_valid"] is True
+
+    worker_source = inspect.getsource(_run_worker)
+    parent_source = inspect.getsource(_run_parent)
+    assert 'and not args.repeatability_only' in worker_source
+    assert '"--repeatability-only"' in parent_source
+    assert 'classify_control_repeatability(' in parent_source
 
 
 def test_numeric_state_hash_ignores_unstable_pytree_aux_repr():

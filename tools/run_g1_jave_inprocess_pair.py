@@ -149,6 +149,27 @@ def compare_control_repeats(
     }
 
 
+def classify_control_repeatability(
+    repeatability: dict[str, object],
+) -> dict[str, object]:
+    """Classify the two ordinary controls without authorizing JAVE."""
+
+    valid = repeatability.get("valid")
+    if not isinstance(valid, bool):
+        raise ValueError("control repeatability validity is missing")
+    return {
+        "protocol": "g1-control-repeatability-only-selection-v1",
+        "outcome": (
+            "control-repeatability-exact"
+            if valid
+            else "control-repeatability-diverges"
+        ),
+        "scientific_valid": True,
+        "repeatability": repeatability,
+        "policy_retained": False,
+    }
+
+
 def _validate_survival(vector: object) -> list[int]:
     if (
         not isinstance(vector, (list, tuple))
@@ -438,11 +459,16 @@ def _run_worker(args: argparse.Namespace) -> int:
             "python -m tools.run_g1_jave_inprocess_pair"
         ),
         active_updates=args.active_updates,
+        repeatability_only=args.repeatability_only,
         warmup_step=WARMUP_STEP,
         branch_checkpoint_steps=list(
             expected_branch_checkpoint_steps(args.active_updates)
         ),
-        execution_shape="one-worker-one-gpu-common-warmup-cloned-branches",
+        execution_shape=(
+            "one-worker-one-gpu-common-warmup-two-control-branches"
+            if args.repeatability_only
+            else "one-worker-one-gpu-common-warmup-cloned-branches"
+        ),
     )
     _write_json_atomically(output_root / "preflight.json", preflight)
     configure_jax()
@@ -521,7 +547,7 @@ def _run_worker(args: argparse.Namespace) -> int:
     )
     _write_json_atomically(output_root / "repeatability.json", repeatability)
 
-    if repeatability["valid"]:
+    if repeatability["valid"] and not args.repeatability_only:
         kwargs = build_branch_kwargs(
             args.solver_profile,
             args.reference_path.resolve(),
@@ -549,8 +575,16 @@ def _run_worker(args: argparse.Namespace) -> int:
         )
 
     worker_result = {
-        "protocol": "g1-jave-inprocess-training-pair-v1",
-        "valid": bool(repeatability["valid"] and "jave" in validations),
+        "protocol": (
+            "g1-control-repeatability-only-training-v1"
+            if args.repeatability_only
+            else "g1-jave-inprocess-training-pair-v1"
+        ),
+        "valid": bool(
+            repeatability["valid"]
+            if args.repeatability_only
+            else repeatability["valid"] and "jave" in validations
+        ),
         "branch_point": branch_report,
         "repeatability": repeatability,
         "arms": {
@@ -721,6 +755,8 @@ def _run_parent(args: argparse.Namespace) -> int:
         "--seed",
         str(args.seed),
     ]
+    if args.repeatability_only:
+        worker_command.append("--repeatability-only")
     worker = subprocess.run(worker_command, check=False)
     _write_json_atomically(
         output_root / "worker_process.json",
@@ -742,6 +778,18 @@ def _run_parent(args: argparse.Namespace) -> int:
         )
         return 1
     training_pair = json.loads(training_pair_path.read_text(encoding="utf-8"))
+    if args.repeatability_only:
+        selection = classify_control_repeatability(
+            training_pair.get("repeatability", {})
+        )
+        selection.update(
+            code_commit=args.code_commit,
+            training_pair_sha256=sha256_file(training_pair_path),
+            control_arms=training_pair.get("arms"),
+        )
+        _write_json_atomically(output_root / "selection.json", selection)
+        print(json.dumps(selection, indent=2, sort_keys=True))
+        return 0
     if training_pair.get("valid") is not True:
         _write_json_atomically(
             output_root / "selection.json",
@@ -875,6 +923,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--code-commit", required=True)
     parser.add_argument("--active-updates", type=int, default=2)
+    parser.add_argument("--repeatability-only", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     return parser
 
