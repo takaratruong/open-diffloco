@@ -6,6 +6,8 @@ import jax.numpy as jnp
 BOUNDARIES = (
     "random_inputs",
     "first_actor_action",
+    "first_mjx_substep",
+    "first_mjx_control_step",
     "first_env_step",
     "rollout",
     "actor_cagrad",
@@ -95,3 +97,21 @@ def test_train_probe_runs_after_compile_and_before_the_training_loop():
 
     for name in BOUNDARIES:
         assert f'"determinism_{name}_fingerprint"' in source
+
+
+def test_g1_step_exposes_raw_mjx_probe_boundaries():
+    from src.envs.g1_tracking.environment import G1TrackingEnv
+
+    source = inspect.getsource(G1TrackingEnv.step)
+
+    first_mjx_step = source.index("mjx.step(")
+    first_substep = source.index(
+        '"determinism_mjx_substep_fingerprint"'
+    )
+    control_step = source.index(
+        '"determinism_mjx_control_step_fingerprint"'
+    )
+    returned_state = source.index("return EnvState(")
+
+    assert first_mjx_step < first_substep < returned_state
+    assert first_mjx_step < control_step < returned_state

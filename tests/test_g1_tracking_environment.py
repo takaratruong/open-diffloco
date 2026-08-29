@@ -1,3 +1,4 @@
+import copy
 import math
 import tempfile
 import unittest
@@ -1350,6 +1351,27 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         self.assertEqual(int(next_state.info["phase"]), expected_phase)
         self.assertTrue(np.isfinite(np.asarray(next_state.data.qpos)).all())
         self.assertTrue(np.isfinite(float(next_state.reward)))
+        self.assertNotIn(
+            "determinism_mjx_substep_fingerprint", next_state.info
+        )
+        self.assertNotIn(
+            "determinism_mjx_control_step_fingerprint", next_state.info
+        )
+
+    def test_probe_step_exposes_raw_mjx_fingerprints(self):
+        env = copy.copy(self.env)
+        env.determinism_probe = True
+        state = env.reset(jax.random.PRNGKey(301), jnp.array(0.0))
+
+        next_state = env.step(state, jnp.zeros(env.action_dim))
+
+        for name in (
+            "determinism_mjx_substep_fingerprint",
+            "determinism_mjx_control_step_fingerprint",
+        ):
+            fingerprint = next_state.info[name]
+            self.assertEqual(fingerprint.shape, (4,))
+            self.assertEqual(fingerprint.dtype, jnp.uint32)
 
     def test_environment_exposes_grouped_left_right_support(self):
         env = self.env

@@ -12,6 +12,7 @@ from mujoco import mjx
 
 from src.core.contact import contact_stiffness
 from src.core.data_structures import EnvState
+from src.core.utils import tree_bit_fingerprint
 from src.envs.g1_tracking.contact_topology import (
     contact_topology_event,
     grouped_body_pair_contacts,
@@ -169,6 +170,7 @@ class G1TrackingEnv:
         tracking_torso_orientation_weight: float = 0.0,
         tracking_root_velocity_weight: float = 0.0,
         jave_enabled: bool = False,
+        determinism_probe: bool = False,
         reference_reset_noise_scale: float = 0.0,
         reference_root_reset_noise_multiplier: float = 1.0,
         reference_root_reset_noise_probability: float = 0.0,
@@ -314,6 +316,9 @@ class G1TrackingEnv:
         if not isinstance(jave_enabled, bool):
             raise ValueError("jave_enabled must be boolean")
         self.jave_enabled = jave_enabled
+        if not isinstance(determinism_probe, bool):
+            raise ValueError("determinism_probe must be boolean")
+        self.determinism_probe = determinism_probe
         if (
             isinstance(termination_margin_weight, bool)
             or not np.isfinite(termination_margin_weight)
@@ -1710,6 +1715,20 @@ class G1TrackingEnv:
         kp = self.kp * state.info["kp_scale"]
         kd = self.kd * state.info["kd_scale"]
 
+        def mjx_probe_values(data):
+            return (
+                data.time,
+                data.qpos,
+                data.qvel,
+                data.qacc,
+                data.qacc_smooth,
+                data.qacc_warmstart,
+                data.qfrc_applied,
+                data.qfrc_constraint,
+                data._impl.efc_force,
+                data._impl.contact,
+            )
+
         def physics_step(data, _):
             torque = jp.clip(
                 kp * (position_target - data.qpos[7:])
@@ -1718,17 +1737,25 @@ class G1TrackingEnv:
                 self.effort_limit,
             )
             applied = jp.zeros(self.mj_model.nv).at[6:].set(torque)
-            return (
-                mjx.step(
-                    model,
-                    data.replace(qfrc_applied=applied),
-                ),
-                None,
+            next_data = mjx.step(
+                model,
+                data.replace(qfrc_applied=applied),
             )
+            fingerprint = (
+                tree_bit_fingerprint(mjx_probe_values(next_data))
+                if self.determinism_probe
+                else None
+            )
+            return next_data, fingerprint
 
-        data, _ = jax.lax.scan(
+        data, mjx_substep_fingerprints = jax.lax.scan(
             physics_step, state.data, None, length=self.n_frames
         )
+        if self.determinism_probe:
+            first_mjx_substep_fingerprint = mjx_substep_fingerprints[0]
+            mjx_control_step_fingerprint = tree_bit_fingerprint(
+                mjx_probe_values(data)
+            )
         transition_contact_stiffness = contact_stiffness(
             data.qfrc_constraint,
             data.qacc,
@@ -1960,6 +1987,16 @@ class G1TrackingEnv:
         metrics = jax.tree_util.tree_map(
             lambda value: value.astype(jp.float32), metrics
         )
+        if self.determinism_probe:
+            next_info = {
+                **next_info,
+                "determinism_mjx_substep_fingerprint": (
+                    first_mjx_substep_fingerprint
+                ),
+                "determinism_mjx_control_step_fingerprint": (
+                    mjx_control_step_fingerprint
+                ),
+            }
         return EnvState(
             data=next_data,
             obs=next_history.reshape(-1),

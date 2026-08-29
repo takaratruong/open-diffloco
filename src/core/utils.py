@@ -32,6 +32,60 @@ def compute_grad_norm(grads):
     return jp.sqrt(sum(jp.sum(jp.square(x)) for x in leaves))
 
 
+def _mix_uint32(values):
+    values = jp.asarray(values, dtype=jp.uint32)
+    values = values ^ (values >> jp.uint32(16))
+    values = values * jp.uint32(0x7FEB352D)
+    values = values ^ (values >> jp.uint32(15))
+    values = values * jp.uint32(0x846CA68B)
+    return values ^ (values >> jp.uint32(16))
+
+
+def tree_bit_fingerprint(tree) -> jax.Array:
+    """Return a compact deterministic fingerprint of exact pytree leaf bits."""
+
+    fingerprint = jp.zeros((4,), dtype=jp.uint32)
+    for leaf_index, leaf in enumerate(jax.tree.leaves(tree)):
+        array = jp.asarray(leaf)
+        raw_bytes = (
+            array.astype(jp.uint8)
+            if array.dtype == jp.bool_
+            else jax.lax.bitcast_convert_type(array, jp.uint8)
+        )
+        values = raw_bytes.reshape(-1).astype(jp.uint32)
+        indices = jp.arange(values.size, dtype=jp.uint32)
+        leaf_seed = jp.uint32(
+            ((leaf_index + 1) * 0x9E3779B1) & 0xFFFFFFFF
+        )
+        mixed = _mix_uint32(
+            values ^ (indices * jp.uint32(0x85EBCA77)) ^ leaf_seed
+        )
+        xor_lane = jax.lax.reduce(
+            mixed,
+            jp.uint32(0),
+            jax.lax.bitwise_xor,
+            dimensions=(0,),
+        )
+        remixed = _mix_uint32(mixed ^ jp.uint32(0xC2B2AE3D))
+        leaf_fingerprint = jp.stack(
+            (
+                xor_lane,
+                jp.sum(mixed, dtype=jp.uint32),
+                jax.lax.reduce(
+                    remixed,
+                    jp.uint32(0),
+                    jax.lax.bitwise_xor,
+                    dimensions=(0,),
+                ),
+                jp.sum(remixed, dtype=jp.uint32),
+            )
+        )
+        fingerprint = fingerprint ^ _mix_uint32(
+            leaf_fingerprint + leaf_seed
+        )
+    return fingerprint
+
+
 def cos_wave(t, step_period, scale):
     """Cosine swing profile from 0 to scale and back to 0."""
     wave = -jp.cos(((2 * jp.pi) / step_period) * t)

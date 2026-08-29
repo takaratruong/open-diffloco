@@ -12,6 +12,8 @@ def _report(*, first_mismatch=None, state_exact=True, metrics_exact=True):
         for name in (
             "random_inputs",
             "first_actor_action",
+            "first_mjx_substep",
+            "first_mjx_control_step",
             "first_env_step",
             "rollout",
             "actor_cagrad",
@@ -20,7 +22,7 @@ def _report(*, first_mismatch=None, state_exact=True, metrics_exact=True):
         )
     }
     return {
-        "protocol": "shac-compiled-update-determinism-v2",
+        "protocol": "shac-compiled-update-determinism-v3",
         "valid": first_mismatch is None and state_exact and metrics_exact,
         "boundaries": boundaries,
         "first_mismatch_boundary": first_mismatch,
@@ -60,6 +62,20 @@ def test_probe_classification_localizes_the_first_boundary():
 
     first_step = classify_probe(_report(first_mismatch="first_env_step"))
     assert first_step["outcome"] == "compiled-update-diverges-first-env-step"
+
+    mjx_substep = classify_probe(
+        _report(first_mismatch="first_mjx_substep")
+    )
+    assert mjx_substep["outcome"] == (
+        "compiled-update-diverges-first-mjx-substep"
+    )
+
+    mjx_control_step = classify_probe(
+        _report(first_mismatch="first_mjx_control_step")
+    )
+    assert mjx_control_step["outcome"] == (
+        "compiled-update-diverges-first-mjx-control-step"
+    )
 
 
 def test_probe_classification_preserves_an_unlocalized_failure():

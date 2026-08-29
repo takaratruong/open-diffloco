@@ -46,7 +46,7 @@ from src.envs.g1_tracking.demonstration_replay import (
     apply_demonstration_replay,
     resolve_demonstration_replay_resume_setting,
 )
-from src.core.utils import compute_grad_norm
+from src.core.utils import compute_grad_norm, tree_bit_fingerprint
 from src.algorithms.shac.gradients import (
     aggregate_per_env_gradients,
     per_env_gradient_statistics,
@@ -197,64 +197,14 @@ DEBUG_FOOT_CONTACTS = False
 DETERMINISM_BOUNDARIES = (
     "random_inputs",
     "first_actor_action",
+    "first_mjx_substep",
+    "first_mjx_control_step",
     "first_env_step",
     "rollout",
     "actor_cagrad",
     "learned_dynamics",
     "critic",
 )
-
-
-def _mix_uint32(values):
-    values = jp.asarray(values, dtype=jp.uint32)
-    values = values ^ (values >> jp.uint32(16))
-    values = values * jp.uint32(0x7FEB352D)
-    values = values ^ (values >> jp.uint32(15))
-    values = values * jp.uint32(0x846CA68B)
-    return values ^ (values >> jp.uint32(16))
-
-
-def tree_bit_fingerprint(tree) -> jax.Array:
-    """Return a compact deterministic fingerprint of exact pytree leaf bits."""
-
-    fingerprint = jp.zeros((4,), dtype=jp.uint32)
-    for leaf_index, leaf in enumerate(jax.tree.leaves(tree)):
-        array = jp.asarray(leaf)
-        raw_bytes = (
-            array.astype(jp.uint8)
-            if array.dtype == jp.bool_
-            else jax.lax.bitcast_convert_type(array, jp.uint8)
-        )
-        values = raw_bytes.reshape(-1).astype(jp.uint32)
-        indices = jp.arange(values.size, dtype=jp.uint32)
-        leaf_seed = jp.uint32(
-            ((leaf_index + 1) * 0x9E3779B1) & 0xFFFFFFFF
-        )
-        mixed = _mix_uint32(values ^ (indices * jp.uint32(0x85EBCA77)) ^ leaf_seed)
-        xor_lane = jax.lax.reduce(
-            mixed,
-            jp.uint32(0),
-            jax.lax.bitwise_xor,
-            dimensions=(0,),
-        )
-        remixed = _mix_uint32(mixed ^ jp.uint32(0xC2B2AE3D))
-        leaf_fingerprint = jp.stack(
-            (
-                xor_lane,
-                jp.sum(mixed, dtype=jp.uint32),
-                jax.lax.reduce(
-                    remixed,
-                    jp.uint32(0),
-                    jax.lax.bitwise_xor,
-                    dimensions=(0,),
-                ),
-                jp.sum(remixed, dtype=jp.uint32),
-            )
-        )
-        fingerprint = fingerprint ^ _mix_uint32(
-            leaf_fingerprint + leaf_seed
-        )
-    return fingerprint
 
 
 def numeric_tree_sha256(tree: object) -> str:
@@ -307,7 +257,7 @@ def run_determinism_probe(compiled_step, state) -> dict[str, object]:
         and metrics_exact
     )
     return {
-        "protocol": "shac-compiled-update-determinism-v2",
+        "protocol": "shac-compiled-update-determinism-v3",
         "valid": valid,
         "boundaries": boundaries,
         "first_mismatch_boundary": first_mismatch,
@@ -3818,6 +3768,7 @@ def train(
                 ),
                 "tracking_root_velocity_weight": tracking_root_velocity_weight,
                 "jave_enabled": jave_enabled,
+                "determinism_probe": determinism_probe_output is not None,
                 "reference_reset_noise_scale": reference_reset_noise_scale,
                 "reference_root_reset_noise_multiplier": (
                     reference_root_reset_noise_multiplier
@@ -4786,6 +4737,31 @@ def train(
                 )
             candidate_unreplayed_state = env.step(state, noisy_action)
             if determinism_probe_output is not None:
+                determinism_mjx_substep_fingerprint = (
+                    candidate_unreplayed_state.info[
+                        "determinism_mjx_substep_fingerprint"
+                    ]
+                )
+                determinism_mjx_control_step_fingerprint = (
+                    candidate_unreplayed_state.info[
+                        "determinism_mjx_control_step_fingerprint"
+                    ]
+                )
+                candidate_unreplayed_state = (
+                    candidate_unreplayed_state.replace(
+                        info={
+                            key: value
+                            for key, value in (
+                                candidate_unreplayed_state.info.items()
+                            )
+                            if key
+                            not in {
+                                "determinism_mjx_substep_fingerprint",
+                                "determinism_mjx_control_step_fingerprint",
+                            }
+                        }
+                    )
+                )
                 prepared_action = env._prepare_action(noisy_action)
                 position_target = env.position_target(
                     state, prepared_action, prepared=True
@@ -4997,6 +4973,12 @@ def train(
                     {
                         "determinism_actor_step_fingerprint": (
                             determinism_actor_step_fingerprint
+                        ),
+                        "determinism_mjx_substep_fingerprint": (
+                            determinism_mjx_substep_fingerprint
+                        ),
+                        "determinism_mjx_control_step_fingerprint": (
+                            determinism_mjx_control_step_fingerprint
                         ),
                         "determinism_env_step_fingerprint": (
                             determinism_env_step_fingerprint
@@ -5915,6 +5897,12 @@ def train(
             first_actor_action_fingerprint = tree_bit_fingerprint(
                 trajs["determinism_actor_step_fingerprint"][:, 0]
             )
+            first_mjx_substep_fingerprint = tree_bit_fingerprint(
+                trajs["determinism_mjx_substep_fingerprint"][:, 0]
+            )
+            first_mjx_control_step_fingerprint = tree_bit_fingerprint(
+                trajs["determinism_mjx_control_step_fingerprint"][:, 0]
+            )
             first_env_step_fingerprint = tree_bit_fingerprint(
                 trajs["determinism_env_step_fingerprint"][:, 0]
             )
@@ -6604,6 +6592,12 @@ def train(
                     ),
                     "determinism_first_actor_action_fingerprint": (
                         first_actor_action_fingerprint
+                    ),
+                    "determinism_first_mjx_substep_fingerprint": (
+                        first_mjx_substep_fingerprint
+                    ),
+                    "determinism_first_mjx_control_step_fingerprint": (
+                        first_mjx_control_step_fingerprint
                     ),
                     "determinism_first_env_step_fingerprint": (
                         first_env_step_fingerprint
