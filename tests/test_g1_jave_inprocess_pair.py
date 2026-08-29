@@ -164,6 +164,15 @@ def test_numeric_state_hash_ignores_unstable_pytree_aux_repr():
     )
 
 
+def test_dynamic_weight_validation_uses_saved_scalar_dtype():
+    from tools.run_g1_jave_inprocess_pair import _scalar_matches_dtype
+
+    assert _scalar_matches_dtype(np.float32(0.1), 0.1)
+    assert _scalar_matches_dtype(np.float64(0.1), 0.1)
+    assert not _scalar_matches_dtype(np.float32(0.1001), 0.1)
+    assert not _scalar_matches_dtype(np.asarray([0.1], dtype=np.float32), 0.1)
+
+
 def test_jave_pair_selection_requires_control_and_retained_preservation():
     from tools.run_g1_jave_inprocess_pair import classify_pair
 

@@ -297,6 +297,17 @@ def _finite_tree(tree: object) -> bool:
     return True
 
 
+def _scalar_matches_dtype(actual: object, expected: float) -> bool:
+    """Compare a persisted floating scalar in its own storage dtype."""
+
+    import numpy as np
+
+    array = np.asarray(actual)
+    if array.shape != () or not np.issubdtype(array.dtype, np.floating):
+        return False
+    return bool(np.array_equal(array, np.asarray(expected, dtype=array.dtype)))
+
+
 def _load_state(path: Path):
     import pickle
 
@@ -385,8 +396,10 @@ def _validate_branch_training(
             or not isinstance(state.actor_params, FrozenControllerResidualParams)
             or parameter_tree_sha256(state.actor_params.parent) != parent_sha256
             or parameter_tree_sha256(state.normalizer) != normalizer_sha256
-            or float(state.jave_vg_weight)
-            != (JAVE_VG_WEIGHT if enabled else 0.0)
+            or not _scalar_matches_dtype(
+                state.jave_vg_weight,
+                JAVE_VG_WEIGHT if enabled else 0.0,
+            )
             or any(
                 getattr(state, name, None) is None
                 for name in ("ldm_params", "ldm_opt", "replay_buffer")
