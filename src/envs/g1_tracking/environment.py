@@ -9,6 +9,7 @@ import jax.numpy as jp
 import mujoco
 import numpy as np
 from mujoco import mjx
+from mujoco.mjx._src import scan as mjx_scan
 from mujoco.mjx._src import support as mjx_support
 
 from src.core.contact import contact_stiffness
@@ -130,6 +131,47 @@ def _rotation_6d(q: jax.Array) -> jax.Array:
         axis=-1,
     ).reshape(q.shape[:-1] + (3, 3))
     return matrix[..., :, :2].reshape(q.shape[:-1] + (6,))
+
+
+def _subtree_com_probe_values(
+    model: mjx.Model, data: mjx.Data
+) -> dict[str, jax.Array]:
+    """Expose the exact upstream subtree-CoM block without changing Data."""
+
+    local_position = data.xipos * model.body_mass[:, None]
+    local_mass = model.body_mass
+
+    def subtree_sum(carry, xipos, body_mass):
+        position, mass = xipos * body_mass, body_mass
+        if carry is not None:
+            subtree_position, subtree_mass = carry
+            position = position + subtree_position
+            mass = mass + subtree_mass
+        return position, mass
+
+    scan_position, scan_mass = mjx_scan.body_tree(
+        model,
+        subtree_sum,
+        "bb",
+        "bb",
+        data.xipos,
+        model.body_mass,
+        reverse=True,
+    )
+    condition = jp.tile(scan_mass < mujoco.mjMINVAL, (3, 1)).T
+    divided = jax.vmap(jp.divide)(
+        scan_position,
+        jp.maximum(scan_mass, mujoco.mjMINVAL),
+    )
+    selected = jp.where(condition, data.xipos, divided)
+    return {
+        "subtree_local_position": local_position,
+        "subtree_local_mass": local_mass,
+        "subtree_scan_position": scan_position,
+        "subtree_scan_mass": scan_mass,
+        "subtree_divided": divided,
+        "subtree_selected": selected,
+    }
 
 
 class G1TrackingEnv:
@@ -1717,7 +1759,10 @@ class G1TrackingEnv:
         kd = self.kd * state.info["kd_scale"]
 
         def mjx_probe_values(
-            data, position_input_qpos, rne_input_qvel
+            data,
+            position_input_qpos,
+            rne_input_qvel,
+            subtree_probe_values,
         ):
             return (
                 data.time,
@@ -1737,6 +1782,12 @@ class G1TrackingEnv:
                 data.xanchor,
                 data.xaxis,
                 data.subtree_com,
+                subtree_probe_values["subtree_local_position"],
+                subtree_probe_values["subtree_local_mass"],
+                subtree_probe_values["subtree_scan_position"],
+                subtree_probe_values["subtree_scan_mass"],
+                subtree_probe_values["subtree_divided"],
+                subtree_probe_values["subtree_selected"],
                 rne_input_qvel,
                 data.cdof,
                 data.cdof_dot,
@@ -1770,7 +1821,10 @@ class G1TrackingEnv:
             }
 
         def mjx_probe_field_values(
-            data, position_input_qpos, rne_input_qvel
+            data,
+            position_input_qpos,
+            rne_input_qvel,
+            subtree_probe_values,
         ):
             return {
                 "time": data.time,
@@ -1790,6 +1844,7 @@ class G1TrackingEnv:
                 "xanchor": data.xanchor,
                 "xaxis": data.xaxis,
                 "subtree_com": data.subtree_com,
+                **subtree_probe_values,
                 "rne_input_qvel": rne_input_qvel,
                 "cdof": data.cdof,
                 "cdof_dot": data.cdof_dot,
@@ -1821,9 +1876,17 @@ class G1TrackingEnv:
                 data.replace(qfrc_applied=applied),
             )
             if self.determinism_probe:
+                subtree_probe_values = _subtree_com_probe_values(
+                    model, next_data
+                )
                 fingerprints = {
                     "combined": tree_bit_fingerprint(
-                        mjx_probe_values(next_data, data.qpos, data.qvel)
+                        mjx_probe_values(
+                            next_data,
+                            data.qpos,
+                            data.qvel,
+                            subtree_probe_values,
+                        )
                     ),
                     **{
                         name: tree_bit_fingerprint(values)
@@ -1835,7 +1898,10 @@ class G1TrackingEnv:
                         f"field_{name}": tree_bit_fingerprint(values)
                         for name, values in (
                             mjx_probe_field_values(
-                                next_data, data.qpos, data.qvel
+                                next_data,
+                                data.qpos,
+                                data.qvel,
+                                subtree_probe_values,
                             ).items()
                         )
                     },
@@ -1848,6 +1914,9 @@ class G1TrackingEnv:
             physics_step, state.data, None, length=self.n_frames
         )
         if self.determinism_probe:
+            final_subtree_probe_values = _subtree_com_probe_values(
+                model, data
+            )
             first_mjx_substep_fingerprint = mjx_substep_fingerprints[
                 "combined"
             ][0]
@@ -1858,11 +1927,19 @@ class G1TrackingEnv:
             first_mjx_substep_field_fingerprints = {
                 name: mjx_substep_fingerprints[f"field_{name}"][0]
                 for name in mjx_probe_field_values(
-                    data, data.qpos, data.qvel
+                    data,
+                    data.qpos,
+                    data.qvel,
+                    final_subtree_probe_values,
                 )
             }
             mjx_control_step_fingerprint = tree_bit_fingerprint(
-                mjx_probe_values(data, data.qpos, data.qvel)
+                mjx_probe_values(
+                    data,
+                    data.qpos,
+                    data.qvel,
+                    final_subtree_probe_values,
+                )
             )
         transition_contact_stiffness = contact_stiffness(
             data.qfrc_constraint,

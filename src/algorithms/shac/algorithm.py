@@ -231,6 +231,12 @@ FIRST_MJX_SUBSTEP_FIELDS = (
     "xanchor",
     "xaxis",
     "subtree_com",
+    "subtree_local_position",
+    "subtree_local_mass",
+    "subtree_scan_position",
+    "subtree_scan_mass",
+    "subtree_divided",
+    "subtree_selected",
     "rne_input_qvel",
     "cdof",
     "cdof_dot",
@@ -316,6 +322,30 @@ def run_determinism_probe(compiled_step, state) -> dict[str, object]:
         if not exact:
             mismatching_first_mjx_substep_fields.append(name)
 
+    production_key = (
+        "determinism_first_mjx_substep_field_subtree_com_fingerprint"
+    )
+    reconstructed_key = (
+        "determinism_first_mjx_substep_field_subtree_selected_fingerprint"
+    )
+    first_subtree_consistent = bool(
+        np.array_equal(
+            np.asarray(first_metrics[production_key], dtype=np.uint32),
+            np.asarray(first_metrics[reconstructed_key], dtype=np.uint32),
+        )
+    )
+    second_subtree_consistent = bool(
+        np.array_equal(
+            np.asarray(second_metrics[production_key], dtype=np.uint32),
+            np.asarray(second_metrics[reconstructed_key], dtype=np.uint32),
+        )
+    )
+    subtree_com_probe_consistency = {
+        "first": first_subtree_consistent,
+        "second": second_subtree_consistent,
+        "valid": first_subtree_consistent and second_subtree_consistent,
+    }
+
     first_state_sha256 = numeric_tree_sha256(first_state)
     second_state_sha256 = numeric_tree_sha256(second_state)
     first_metrics_sha256 = numeric_tree_sha256(first_metrics)
@@ -331,11 +361,12 @@ def run_determinism_probe(compiled_step, state) -> dict[str, object]:
         and all(
             item["exact"] for item in first_mjx_substep_fields.values()
         )
+        and subtree_com_probe_consistency["valid"]
         and full_state_exact
         and metrics_exact
     )
     return {
-        "protocol": "shac-compiled-update-determinism-v8",
+        "protocol": "shac-compiled-update-determinism-v9",
         "valid": valid,
         "boundaries": boundaries,
         "first_mismatch_boundary": first_mismatch,
@@ -347,6 +378,7 @@ def run_determinism_probe(compiled_step, state) -> dict[str, object]:
         "mismatching_first_mjx_substep_fields": (
             mismatching_first_mjx_substep_fields
         ),
+        "subtree_com_probe_consistency": subtree_com_probe_consistency,
         "full_state_exact": full_state_exact,
         "metrics_exact": metrics_exact,
         "first_state_sha256": first_state_sha256,

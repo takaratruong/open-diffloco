@@ -40,6 +40,12 @@ FIRST_MJX_SUBSTEP_FIELDS = (
     "xanchor",
     "xaxis",
     "subtree_com",
+    "subtree_local_position",
+    "subtree_local_mass",
+    "subtree_scan_position",
+    "subtree_scan_mass",
+    "subtree_divided",
+    "subtree_selected",
     "rne_input_qvel",
     "cdof",
     "cdof_dot",
@@ -80,6 +86,11 @@ def _metrics(value):
             for index, name in enumerate(FIRST_MJX_SUBSTEP_FIELDS)
         }
     )
+    metrics[
+        "determinism_first_mjx_substep_field_subtree_selected_fingerprint"
+    ] = metrics[
+        "determinism_first_mjx_substep_field_subtree_com_fingerprint"
+    ]
     return metrics
 
 
@@ -101,6 +112,12 @@ def test_probe_reuses_one_jitted_callable_and_accepts_exact_replay():
     assert report["first_mismatch_boundary"] is None
     assert report["full_state_exact"] is True
     assert report["metrics_exact"] is True
+    assert report["protocol"] == "shac-compiled-update-determinism-v9"
+    assert report["subtree_com_probe_consistency"] == {
+        "first": True,
+        "second": True,
+        "valid": True,
+    }
     assert all(
         component["exact"]
         for component in report["first_mjx_substep_components"].values()
@@ -200,6 +217,28 @@ def test_probe_reports_individual_first_mjx_substep_fields():
     ] is False
 
 
+def test_probe_rejects_subtree_reconstruction_that_misses_production():
+    from src.algorithms.shac.algorithm import run_determinism_probe
+
+    def step(state):
+        metrics = _metrics(jnp.asarray(7, dtype=jnp.uint32))
+        metrics[
+            "determinism_first_mjx_substep_field_"
+            "subtree_selected_fingerprint"
+        ] += 1
+        return state, metrics
+
+    report = run_determinism_probe(step, jnp.asarray(0.0))
+
+    assert report["first_mismatch_boundary"] is None
+    assert report["subtree_com_probe_consistency"] == {
+        "first": False,
+        "second": False,
+        "valid": False,
+    }
+    assert report["valid"] is False
+
+
 def test_boundary_fingerprint_is_stable_and_change_sensitive():
     from src.algorithms.shac.algorithm import tree_bit_fingerprint
 
@@ -245,7 +284,10 @@ def test_train_probe_runs_after_compile_and_before_the_training_loop():
 
 
 def test_g1_step_exposes_raw_mjx_probe_boundaries():
-    from src.envs.g1_tracking.environment import G1TrackingEnv
+    from src.envs.g1_tracking.environment import (
+        G1TrackingEnv,
+        _subtree_com_probe_values,
+    )
 
     source = inspect.getsource(G1TrackingEnv.step)
 
@@ -265,7 +307,17 @@ def test_g1_step_exposes_raw_mjx_probe_boundaries():
     field = source.index("field_{name}_fingerprint")
     assert '"position_input_qpos": position_input_qpos' in source
     assert '"rne_input_qvel": rne_input_qvel' in source
-    assert "next_data, data.qpos, data.qvel" in source
+    assert "next_data," in source
+    assert "data.qpos," in source
+    assert "data.qvel," in source
+    assert "subtree_probe_values," in source
     assert first_mjx_step < field < returned_state
     for name in FIRST_MJX_SUBSTEP_COMPONENTS:
         assert f'"{name}"' in source
+
+    subtree_source = inspect.getsource(_subtree_com_probe_values)
+    assert "mjx_scan.body_tree(" in subtree_source
+    assert "reverse=True" in subtree_source
+    assert '"subtree_scan_position"' in subtree_source
+    assert '"subtree_scan_mass"' in subtree_source
+    assert '"subtree_selected"' in subtree_source

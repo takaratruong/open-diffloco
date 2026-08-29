@@ -26,6 +26,12 @@ FIRST_MJX_SUBSTEP_FIELDS = (
     "xanchor",
     "xaxis",
     "subtree_com",
+    "subtree_local_position",
+    "subtree_local_mass",
+    "subtree_scan_position",
+    "subtree_scan_mass",
+    "subtree_divided",
+    "subtree_selected",
     "rne_input_qvel",
     "cdof",
     "cdof_dot",
@@ -50,6 +56,7 @@ def _report(
     field_mismatches=(),
     state_exact=True,
     metrics_exact=True,
+    subtree_probe_consistent=True,
 ):
     boundaries = {
         name: {
@@ -86,13 +93,14 @@ def _report(
         for name in FIRST_MJX_SUBSTEP_FIELDS
     }
     return {
-        "protocol": "shac-compiled-update-determinism-v8",
+        "protocol": "shac-compiled-update-determinism-v9",
         "valid": (
             first_mismatch is None
             and not component_mismatches
             and not field_mismatches
             and state_exact
             and metrics_exact
+            and subtree_probe_consistent
         ),
         "boundaries": boundaries,
         "first_mismatch_boundary": first_mismatch,
@@ -102,6 +110,11 @@ def _report(
         ),
         "first_mjx_substep_fields": fields,
         "mismatching_first_mjx_substep_fields": list(field_mismatches),
+        "subtree_com_probe_consistency": {
+            "first": subtree_probe_consistent,
+            "second": subtree_probe_consistent,
+            "valid": subtree_probe_consistent,
+        },
         "full_state_exact": state_exact,
         "metrics_exact": metrics_exact,
     }

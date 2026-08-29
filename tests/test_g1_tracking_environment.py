@@ -1389,6 +1389,12 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
             "determinism_mjx_substep_field_xanchor_fingerprint",
             "determinism_mjx_substep_field_xaxis_fingerprint",
             "determinism_mjx_substep_field_subtree_com_fingerprint",
+            "determinism_mjx_substep_field_subtree_local_position_fingerprint",
+            "determinism_mjx_substep_field_subtree_local_mass_fingerprint",
+            "determinism_mjx_substep_field_subtree_scan_position_fingerprint",
+            "determinism_mjx_substep_field_subtree_scan_mass_fingerprint",
+            "determinism_mjx_substep_field_subtree_divided_fingerprint",
+            "determinism_mjx_substep_field_subtree_selected_fingerprint",
             "determinism_mjx_substep_field_rne_input_qvel_fingerprint",
             "determinism_mjx_substep_field_cdof_fingerprint",
             "determinism_mjx_substep_field_cdof_dot_fingerprint",
@@ -1407,6 +1413,15 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
             fingerprint = next_state.info[name]
             self.assertEqual(fingerprint.shape, (4,))
             self.assertEqual(fingerprint.dtype, jnp.uint32)
+
+        np.testing.assert_array_equal(
+            next_state.info[
+                "determinism_mjx_substep_field_subtree_com_fingerprint"
+            ],
+            next_state.info[
+                "determinism_mjx_substep_field_subtree_selected_fingerprint"
+            ],
+        )
 
     def test_environment_exposes_grouped_left_right_support(self):
         env = self.env

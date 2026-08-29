@@ -75,6 +75,12 @@ FIRST_MJX_SUBSTEP_FIELDS = (
     "xanchor",
     "xaxis",
     "subtree_com",
+    "subtree_local_position",
+    "subtree_local_mass",
+    "subtree_scan_position",
+    "subtree_scan_mass",
+    "subtree_divided",
+    "subtree_selected",
     "rne_input_qvel",
     "cdof",
     "cdof_dot",
@@ -149,7 +155,7 @@ def classify_probe(report: dict[str, object]) -> dict[str, object]:
     else:
         raise ValueError("probe report has no classifiable exactness result")
     return {
-        "protocol": "g1-compiled-update-determinism-selection-v8",
+        "protocol": "g1-compiled-update-determinism-selection-v9",
         "outcome": outcome,
         "scientific_valid": True,
         "first_mismatch_boundary": first_mismatch,
@@ -158,6 +164,9 @@ def classify_probe(report: dict[str, object]) -> dict[str, object]:
         ),
         "mismatching_first_mjx_substep_fields": report.get(
             "mismatching_first_mjx_substep_fields", []
+        ),
+        "subtree_com_probe_consistency": report.get(
+            "subtree_com_probe_consistency"
         ),
         "full_state_exact": report.get("full_state_exact"),
         "metrics_exact": report.get("metrics_exact"),
@@ -235,7 +244,7 @@ def validate_preflight(
         raise ValueError("; ".join(errors))
     return {
         "valid": True,
-        "protocol": "g1-compiled-update-determinism-preflight-v8",
+        "protocol": "g1-compiled-update-determinism-preflight-v9",
         "authoritative_entrypoint": (
             "python -m tools.run_g1_compiled_update_determinism"
         ),
@@ -272,7 +281,7 @@ def validate_probe_artifacts(
     hparams_path = run_directory / "hparams.json"
     hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
     errors = []
-    if report.get("protocol") != "shac-compiled-update-determinism-v8":
+    if report.get("protocol") != "shac-compiled-update-determinism-v9":
         errors.append("probe protocol mismatch")
     if report.get("input_step") != SOURCE_STEP:
         errors.append("probe input step mismatch")
@@ -368,6 +377,23 @@ def validate_probe_artifacts(
         expected_field_mismatches
     ):
         errors.append("first MJX substep field mismatch list is inconsistent")
+    subtree_consistency = report.get("subtree_com_probe_consistency")
+    if (
+        not isinstance(subtree_consistency, dict)
+        or not isinstance(subtree_consistency.get("first"), bool)
+        or not isinstance(subtree_consistency.get("second"), bool)
+        or subtree_consistency.get("valid")
+        is not (
+            subtree_consistency.get("first") is True
+            and subtree_consistency.get("second") is True
+        )
+    ):
+        errors.append("subtree-CoM probe consistency report is invalid")
+        subtree_consistent = False
+    else:
+        subtree_consistent = subtree_consistency["valid"]
+    if subtree_consistent is not True:
+        errors.append("subtree-CoM reconstruction does not match production")
     if not isinstance(report.get("full_state_exact"), bool):
         errors.append("full state exactness is missing")
     if not isinstance(report.get("metrics_exact"), bool):
@@ -379,6 +405,7 @@ def validate_probe_artifacts(
         and all(component_exactness)
         and len(field_exactness) == len(FIRST_MJX_SUBSTEP_FIELDS)
         and all(field_exactness)
+        and subtree_consistent
         and report.get("full_state_exact") is True
         and report.get("metrics_exact") is True
     )
@@ -414,7 +441,7 @@ def validate_probe_artifacts(
         raise ValueError("; ".join(errors))
     return {
         "valid": True,
-        "protocol": "g1-compiled-update-determinism-validation-v8",
+        "protocol": "g1-compiled-update-determinism-validation-v9",
         "report": str(report_path),
         "report_sha256": sha256_file(report_path),
         "run_directory": str(run_directory),
@@ -477,7 +504,7 @@ def run(args: argparse.Namespace) -> int:
         _write_json_atomically(
             output_root / "selection.json",
             {
-                "protocol": "g1-compiled-update-determinism-selection-v8",
+                "protocol": "g1-compiled-update-determinism-selection-v9",
                 "outcome": "invalid-execution",
                 "scientific_valid": False,
                 "reason": f"{type(error).__name__}: {error}",
