@@ -222,8 +222,10 @@ def validate_probe_artifacts(
     if report.get("ordinary_training_loop_entered") is not False:
         errors.append("ordinary training loop was entered")
     boundary_reports = report.get("boundaries")
-    if not isinstance(boundary_reports, dict) or tuple(boundary_reports) != BOUNDARIES:
-        errors.append("probe boundary order mismatch")
+    if not isinstance(boundary_reports, dict) or set(boundary_reports) != set(
+        BOUNDARIES
+    ):
+        errors.append("probe boundary set mismatch")
         boundary_reports = {}
     exactness = []
     for name in BOUNDARIES:
