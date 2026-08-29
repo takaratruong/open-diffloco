@@ -194,6 +194,128 @@ from src.algorithms.shac.capture_point_objective import (
 # Set to True to enable per-foot normal force logging.
 DEBUG_FOOT_CONTACTS = False
 
+DETERMINISM_BOUNDARIES = (
+    "rollout",
+    "actor_cagrad",
+    "learned_dynamics",
+    "critic",
+)
+
+
+def _mix_uint32(values):
+    values = jp.asarray(values, dtype=jp.uint32)
+    values = values ^ (values >> jp.uint32(16))
+    values = values * jp.uint32(0x7FEB352D)
+    values = values ^ (values >> jp.uint32(15))
+    values = values * jp.uint32(0x846CA68B)
+    return values ^ (values >> jp.uint32(16))
+
+
+def tree_bit_fingerprint(tree) -> jax.Array:
+    """Return a compact deterministic fingerprint of exact pytree leaf bits."""
+
+    fingerprint = jp.zeros((4,), dtype=jp.uint32)
+    for leaf_index, leaf in enumerate(jax.tree.leaves(tree)):
+        array = jp.asarray(leaf)
+        raw_bytes = (
+            array.astype(jp.uint8)
+            if array.dtype == jp.bool_
+            else jax.lax.bitcast_convert_type(array, jp.uint8)
+        )
+        values = raw_bytes.reshape(-1).astype(jp.uint32)
+        indices = jp.arange(values.size, dtype=jp.uint32)
+        leaf_seed = jp.uint32(
+            ((leaf_index + 1) * 0x9E3779B1) & 0xFFFFFFFF
+        )
+        mixed = _mix_uint32(values ^ (indices * jp.uint32(0x85EBCA77)) ^ leaf_seed)
+        xor_lane = jax.lax.reduce(
+            mixed,
+            jp.uint32(0),
+            jax.lax.bitwise_xor,
+            dimensions=(0,),
+        )
+        remixed = _mix_uint32(mixed ^ jp.uint32(0xC2B2AE3D))
+        leaf_fingerprint = jp.stack(
+            (
+                xor_lane,
+                jp.sum(mixed, dtype=jp.uint32),
+                jax.lax.reduce(
+                    remixed,
+                    jp.uint32(0),
+                    jax.lax.bitwise_xor,
+                    dimensions=(0,),
+                ),
+                jp.sum(remixed, dtype=jp.uint32),
+            )
+        )
+        fingerprint = fingerprint ^ _mix_uint32(
+            leaf_fingerprint + leaf_seed
+        )
+    return fingerprint
+
+
+def numeric_tree_sha256(tree: object) -> str:
+    """Hash stable leaf paths, dtypes, shapes, and exact numeric bytes."""
+
+    digest = hashlib.sha256()
+    paths_and_leaves, _ = jax.tree_util.tree_flatten_with_path(tree)
+    digest.update(str(len(paths_and_leaves)).encode("ascii"))
+    for path, value in paths_and_leaves:
+        digest.update(repr(path).encode("utf-8"))
+        array = np.ascontiguousarray(np.asarray(value))
+        digest.update(str(array.dtype).encode("ascii"))
+        digest.update(repr(array.shape).encode("ascii"))
+        digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+def run_determinism_probe(compiled_step, state) -> dict[str, object]:
+    """Invoke one compiled update twice from one state and compare exactly."""
+
+    first_state, first_metrics = compiled_step(state)
+    jax.block_until_ready((first_state, first_metrics))
+    second_state, second_metrics = compiled_step(state)
+    jax.block_until_ready((second_state, second_metrics))
+
+    boundaries: dict[str, dict[str, object]] = {}
+    first_mismatch = None
+    for name in DETERMINISM_BOUNDARIES:
+        key = f"determinism_{name}_fingerprint"
+        first = np.asarray(first_metrics[key], dtype=np.uint32)
+        second = np.asarray(second_metrics[key], dtype=np.uint32)
+        exact = bool(np.array_equal(first, second))
+        boundaries[name] = {
+            "first": first.tolist(),
+            "second": second.tolist(),
+            "exact": exact,
+        }
+        if not exact and first_mismatch is None:
+            first_mismatch = name
+
+    first_state_sha256 = numeric_tree_sha256(first_state)
+    second_state_sha256 = numeric_tree_sha256(second_state)
+    first_metrics_sha256 = numeric_tree_sha256(first_metrics)
+    second_metrics_sha256 = numeric_tree_sha256(second_metrics)
+    full_state_exact = first_state_sha256 == second_state_sha256
+    metrics_exact = first_metrics_sha256 == second_metrics_sha256
+    valid = (
+        all(item["exact"] for item in boundaries.values())
+        and full_state_exact
+        and metrics_exact
+    )
+    return {
+        "protocol": "shac-compiled-update-determinism-v1",
+        "valid": valid,
+        "boundaries": boundaries,
+        "first_mismatch_boundary": first_mismatch,
+        "full_state_exact": full_state_exact,
+        "metrics_exact": metrics_exact,
+        "first_state_sha256": first_state_sha256,
+        "second_state_sha256": second_state_sha256,
+        "first_metrics_sha256": first_metrics_sha256,
+        "second_metrics_sha256": second_metrics_sha256,
+    }
+
 
 def load_checkpoint(path: str):
     """
@@ -257,6 +379,23 @@ def persist_run_hparams(
     temp_path = path.with_name(f".{path.name}.tmp")
     with temp_path.open("w") as stream:
         json.dump(hparams, stream, indent=2)
+    os.replace(temp_path, path)
+    return path
+
+
+def persist_determinism_probe_report(
+    output_path: str | Path, report: dict[str, object]
+) -> Path:
+    """Atomically publish one create-only compiled-update probe report."""
+
+    path = Path(output_path)
+    if path.exists():
+        raise FileExistsError(f"determinism probe output already exists: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    with temp_path.open("x", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2, sort_keys=True)
+        stream.write("\n")
     os.replace(temp_path, path)
     return path
 
@@ -2490,6 +2629,7 @@ def train(
     reference_path: str | None = None,
     allow_resume_reference_path_change: bool = False,
     reference_stride: int | None = None,
+    determinism_probe_output: str | None = None,
 ):
     """
     Train a quadruped locomotion policy using SHAC.
@@ -2592,6 +2732,10 @@ def train(
             actor terminal-value scale when resuming a checkpoint.
         actor_bootstrap_delay_steps: Environment steps before the actor uses
             target-critic terminal value estimates.
+        determinism_probe_output: Optional create-only JSON path. When set,
+            compile one update, invoke that same callable twice from the same
+            input state, publish exact boundary comparisons, and return without
+            entering the ordinary training loop.
 
     Returns:
         Tuple of (final_state, save_directory)
@@ -5690,6 +5834,11 @@ def train(
             )
         actor_update_norm = compute_grad_norm(updates)
         new_actor_params = optax.apply_updates(state.actor_params, updates)
+        if determinism_probe_output is not None:
+            rollout_fingerprint = tree_bit_fingerprint((trajs, final_states))
+            actor_cagrad_fingerprint = tree_bit_fingerprint(
+                (grads, updates, new_actor_params, new_actor_opt)
+            )
 
         new_ldm_params = state.ldm_params
         new_ldm_opt = state.ldm_opt
@@ -5857,6 +6006,17 @@ def train(
                     dtype=jp.float32,
                 ),
                 operand=None,
+            )
+
+        if determinism_probe_output is not None:
+            learned_dynamics_fingerprint = tree_bit_fingerprint(
+                (
+                    new_ldm_params,
+                    new_ldm_opt,
+                    new_replay_buffer,
+                    jave_vg_observations,
+                    jave_vg_targets,
+                )
             )
 
         if ahac:
@@ -6243,6 +6403,15 @@ def train(
             state.critic_normalizer.mean,
         )
         new_critic_norm = critic_norm.update(state.critic_normalizer, safe_critic_obs)
+        if determinism_probe_output is not None:
+            critic_fingerprint = tree_bit_fingerprint(
+                (
+                    new_critic_params,
+                    new_critic_opt,
+                    new_target,
+                    new_critic_norm,
+                )
+            )
 
         new_state = state.replace(
             key=key,
@@ -6342,6 +6511,19 @@ def train(
                         jp.linalg.norm(jave_vg_targets, axis=-1)
                     ),
                     "jave_replay_size": new_replay_buffer.size,
+                }
+            )
+        if determinism_probe_output is not None:
+            metrics.update(
+                {
+                    "determinism_rollout_fingerprint": rollout_fingerprint,
+                    "determinism_actor_cagrad_fingerprint": (
+                        actor_cagrad_fingerprint
+                    ),
+                    "determinism_learned_dynamics_fingerprint": (
+                        learned_dynamics_fingerprint
+                    ),
+                    "determinism_critic_fingerprint": critic_fingerprint,
                 }
             )
         if ahac:
@@ -7609,6 +7791,12 @@ def train(
         "curriculum_steps": curriculum_steps,
         "seed": seed,
         "resume_random_seed": resume_random_seed,
+        "determinism_probe": determinism_probe_output is not None,
+        "determinism_probe_output": (
+            str(Path(determinism_probe_output).resolve())
+            if determinism_probe_output is not None
+            else None
+        ),
         "best_reward": best_reward,
         "checkpoint_steps": (
             list(checkpoint_steps) if checkpoint_steps is not None else None
@@ -7839,6 +8027,22 @@ def train(
     steps_per_iter = steps_per_actor_update
     start_iter = resumed_step // steps_per_iter
     total_iters = total_steps // steps_per_iter
+
+    if determinism_probe_output is not None:
+        probe_report = run_determinism_probe(train_step, state)
+        probe_report.update(
+            {
+                "input_state_sha256": numeric_tree_sha256(state),
+                "input_step": int(np.asarray(state.step)),
+                "compiled_callable_reused": True,
+                "ordinary_training_loop_entered": False,
+            }
+        )
+        report_path = persist_determinism_probe_report(
+            determinism_probe_output, probe_report
+        )
+        print(f"Determinism probe written to {report_path}")
+        return state, save_dir
 
     for i in range(start_iter, total_iters):
         state, metrics = train_step(state)
