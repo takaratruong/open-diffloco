@@ -4,6 +4,9 @@ import jax
 import jax.numpy as jnp
 
 BOUNDARIES = (
+    "random_inputs",
+    "first_actor_action",
+    "first_env_step",
     "rollout",
     "actor_cagrad",
     "learned_dynamics",
@@ -55,7 +58,7 @@ def test_probe_reports_the_first_mismatching_boundary():
     report = run_determinism_probe(ChangingStep(), jnp.asarray(0.0))
 
     assert report["valid"] is False
-    assert report["first_mismatch_boundary"] == "rollout"
+    assert report["first_mismatch_boundary"] == "random_inputs"
     assert report["full_state_exact"] is False
     assert report["metrics_exact"] is False
 
@@ -89,3 +92,6 @@ def test_train_probe_runs_after_compile_and_before_the_training_loop():
     probe = source.index("run_determinism_probe(train_step, state)")
     training_loop = source.index("for i in range(start_iter, total_iters)")
     assert compile_complete < probe < training_loop
+
+    for name in BOUNDARIES:
+        assert f'"determinism_{name}_fingerprint"' in source

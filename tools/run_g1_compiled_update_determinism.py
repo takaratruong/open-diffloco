@@ -38,7 +38,15 @@ MODEL_PATH = Path(
     "/home/ubuntu/projects/rmr_tracking/source/whole_body_tracking/"
     "whole_body_tracking/assets/unitree_description/mjcf/g1.xml"
 )
-BOUNDARIES = ("rollout", "actor_cagrad", "learned_dynamics", "critic")
+BOUNDARIES = (
+    "random_inputs",
+    "first_actor_action",
+    "first_env_step",
+    "rollout",
+    "actor_cagrad",
+    "learned_dynamics",
+    "critic",
+)
 
 
 def _write_json_atomically(path: Path, payload: dict[str, object]) -> None:
@@ -98,7 +106,7 @@ def classify_probe(report: dict[str, object]) -> dict[str, object]:
     else:
         raise ValueError("probe report has no classifiable exactness result")
     return {
-        "protocol": "g1-compiled-update-determinism-selection-v1",
+        "protocol": "g1-compiled-update-determinism-selection-v2",
         "outcome": outcome,
         "scientific_valid": True,
         "first_mismatch_boundary": first_mismatch,
@@ -178,7 +186,7 @@ def validate_preflight(
         raise ValueError("; ".join(errors))
     return {
         "valid": True,
-        "protocol": "g1-compiled-update-determinism-preflight-v1",
+        "protocol": "g1-compiled-update-determinism-preflight-v2",
         "authoritative_entrypoint": (
             "python -m tools.run_g1_compiled_update_determinism"
         ),
@@ -211,7 +219,7 @@ def validate_probe_artifacts(
     hparams_path = run_directory / "hparams.json"
     hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
     errors = []
-    if report.get("protocol") != "shac-compiled-update-determinism-v1":
+    if report.get("protocol") != "shac-compiled-update-determinism-v2":
         errors.append("probe protocol mismatch")
     if report.get("input_step") != SOURCE_STEP:
         errors.append("probe input step mismatch")
@@ -289,7 +297,7 @@ def validate_probe_artifacts(
         raise ValueError("; ".join(errors))
     return {
         "valid": True,
-        "protocol": "g1-compiled-update-determinism-validation-v1",
+        "protocol": "g1-compiled-update-determinism-validation-v2",
         "report": str(report_path),
         "report_sha256": sha256_file(report_path),
         "run_directory": str(run_directory),
@@ -352,7 +360,7 @@ def run(args: argparse.Namespace) -> int:
         _write_json_atomically(
             output_root / "selection.json",
             {
-                "protocol": "g1-compiled-update-determinism-selection-v1",
+                "protocol": "g1-compiled-update-determinism-selection-v2",
                 "outcome": "invalid-execution",
                 "scientific_valid": False,
                 "reason": f"{type(error).__name__}: {error}",

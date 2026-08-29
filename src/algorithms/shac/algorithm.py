@@ -195,6 +195,9 @@ from src.algorithms.shac.capture_point_objective import (
 DEBUG_FOOT_CONTACTS = False
 
 DETERMINISM_BOUNDARIES = (
+    "random_inputs",
+    "first_actor_action",
+    "first_env_step",
     "rollout",
     "actor_cagrad",
     "learned_dynamics",
@@ -304,7 +307,7 @@ def run_determinism_probe(compiled_step, state) -> dict[str, object]:
         and metrics_exact
     )
     return {
-        "protocol": "shac-compiled-update-determinism-v1",
+        "protocol": "shac-compiled-update-determinism-v2",
         "valid": valid,
         "boundaries": boundaries,
         "first_mismatch_boundary": first_mismatch,
@@ -4782,6 +4785,52 @@ def train(
                     reference_length=env.reference_length,
                 )
             candidate_unreplayed_state = env.step(state, noisy_action)
+            if determinism_probe_output is not None:
+                prepared_action = env._prepare_action(noisy_action)
+                position_target = env.position_target(
+                    state, prepared_action, prepared=True
+                )
+                determinism_actor_step_fingerprint = tree_bit_fingerprint(
+                    (
+                        actor_obs,
+                        obs_norm,
+                        action,
+                        noisy_action,
+                        prepared_action,
+                        position_target,
+                    )
+                )
+                env_step_values = (
+                    candidate_unreplayed_state.data.qpos,
+                    candidate_unreplayed_state.data.qvel,
+                    candidate_unreplayed_state.data.qacc,
+                    candidate_unreplayed_state.data.qacc_warmstart,
+                    candidate_unreplayed_state.data.qfrc_constraint,
+                    candidate_unreplayed_state.data._impl.efc_force,
+                    candidate_unreplayed_state.data._impl.contact,
+                    candidate_unreplayed_state.done,
+                    candidate_unreplayed_state.reward,
+                    candidate_unreplayed_state.info["bootstrap_obs"],
+                    candidate_unreplayed_state.info[
+                        "bootstrap_critic_obs"
+                    ],
+                    candidate_unreplayed_state.info[
+                        "transition_contact_stiffness"
+                    ],
+                    candidate_unreplayed_state.info[
+                        "transition_contact_topology_event"
+                    ],
+                )
+                if jave_enabled:
+                    env_step_values = (
+                        *env_step_values,
+                        candidate_unreplayed_state.info[
+                            "bootstrap_jave_obs"
+                        ],
+                    )
+                determinism_env_step_fingerprint = tree_bit_fingerprint(
+                    env_step_values
+                )
             counterfactual_step_loss = jp.asarray(
                 0.0, dtype=candidate_unreplayed_state.reward.dtype
             )
@@ -4943,6 +4992,17 @@ def train(
                     active, contact_topology_event, False
                 ),
             }
+            if determinism_probe_output is not None:
+                transition.update(
+                    {
+                        "determinism_actor_step_fingerprint": (
+                            determinism_actor_step_fingerprint
+                        ),
+                        "determinism_env_step_fingerprint": (
+                            determinism_env_step_fingerprint
+                        ),
+                    }
+                )
             if jave_enabled:
                 transition.update(
                     {
@@ -5476,6 +5536,23 @@ def train(
             all_terrain_bump_innovations,
             all_torso_wrench_assistance_scales,
         )
+        if determinism_probe_output is not None:
+            random_inputs_fingerprint = tree_bit_fingerprint(
+                (
+                    state.key,
+                    key,
+                    noise_key,
+                    push_key,
+                    bump_key,
+                    diff_mask_key,
+                    assistance_mask_key,
+                    jave_key,
+                    updated_env_state.info["rng"],
+                    zero_diff_mask,
+                    per_env_difficulty,
+                    all_randomization,
+                )
+            )
 
         # Preserve the checkpoint's original schedule on exact continuation.
         progress = jp.clip(
@@ -5835,6 +5912,12 @@ def train(
         actor_update_norm = compute_grad_norm(updates)
         new_actor_params = optax.apply_updates(state.actor_params, updates)
         if determinism_probe_output is not None:
+            first_actor_action_fingerprint = tree_bit_fingerprint(
+                trajs["determinism_actor_step_fingerprint"][:, 0]
+            )
+            first_env_step_fingerprint = tree_bit_fingerprint(
+                trajs["determinism_env_step_fingerprint"][:, 0]
+            )
             rollout_fingerprint = tree_bit_fingerprint((trajs, final_states))
             actor_cagrad_fingerprint = tree_bit_fingerprint(
                 (grads, updates, new_actor_params, new_actor_opt)
@@ -6516,6 +6599,15 @@ def train(
         if determinism_probe_output is not None:
             metrics.update(
                 {
+                    "determinism_random_inputs_fingerprint": (
+                        random_inputs_fingerprint
+                    ),
+                    "determinism_first_actor_action_fingerprint": (
+                        first_actor_action_fingerprint
+                    ),
+                    "determinism_first_env_step_fingerprint": (
+                        first_env_step_fingerprint
+                    ),
                     "determinism_rollout_fingerprint": rollout_fingerprint,
                     "determinism_actor_cagrad_fingerprint": (
                         actor_cagrad_fingerprint

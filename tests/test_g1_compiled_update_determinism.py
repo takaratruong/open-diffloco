@@ -9,10 +9,18 @@ def _report(*, first_mismatch=None, state_exact=True, metrics_exact=True):
             "second": [1, 2, 3, 4],
             "exact": name != first_mismatch,
         }
-        for name in ("rollout", "actor_cagrad", "learned_dynamics", "critic")
+        for name in (
+            "random_inputs",
+            "first_actor_action",
+            "first_env_step",
+            "rollout",
+            "actor_cagrad",
+            "learned_dynamics",
+            "critic",
+        )
     }
     return {
-        "protocol": "shac-compiled-update-determinism-v1",
+        "protocol": "shac-compiled-update-determinism-v2",
         "valid": first_mismatch is None and state_exact and metrics_exact,
         "boundaries": boundaries,
         "first_mismatch_boundary": first_mismatch,
@@ -50,6 +58,9 @@ def test_probe_classification_localizes_the_first_boundary():
     )
     assert mismatch["first_mismatch_boundary"] == "learned_dynamics"
 
+    first_step = classify_probe(_report(first_mismatch="first_env_step"))
+    assert first_step["outcome"] == "compiled-update-diverges-first-env-step"
+
 
 def test_probe_classification_preserves_an_unlocalized_failure():
     from tools.run_g1_compiled_update_determinism import classify_probe
@@ -68,7 +79,7 @@ def test_probe_artifact_validation_accepts_sorted_json_boundary_keys(
     run_directory = tmp_path / "training_run"
     run_directory.mkdir()
     report = _report(
-        first_mismatch="rollout", state_exact=False, metrics_exact=False
+        first_mismatch="first_env_step", state_exact=False, metrics_exact=False
     )
     report["boundaries"] = {
         name: report["boundaries"][name]
@@ -114,4 +125,4 @@ def test_probe_artifact_validation_accepts_sorted_json_boundary_keys(
     )
 
     assert validation["valid"] is True
-    assert validation["probe"]["first_mismatch_boundary"] == "rollout"
+    assert validation["probe"]["first_mismatch_boundary"] == "first_env_step"
