@@ -66,6 +66,11 @@ FIRST_MJX_SUBSTEP_FIELDS = (
     "qacc_warmstart",
     "qfrc_applied",
     "qfrc_passive",
+    "rne_input_qvel",
+    "cdof",
+    "cdof_dot",
+    "cvel",
+    "cinert",
     "qfrc_bias",
     "qfrc_actuator",
     "actuator_force",
@@ -135,7 +140,7 @@ def classify_probe(report: dict[str, object]) -> dict[str, object]:
     else:
         raise ValueError("probe report has no classifiable exactness result")
     return {
-        "protocol": "g1-compiled-update-determinism-selection-v6",
+        "protocol": "g1-compiled-update-determinism-selection-v7",
         "outcome": outcome,
         "scientific_valid": True,
         "first_mismatch_boundary": first_mismatch,
@@ -221,7 +226,7 @@ def validate_preflight(
         raise ValueError("; ".join(errors))
     return {
         "valid": True,
-        "protocol": "g1-compiled-update-determinism-preflight-v6",
+        "protocol": "g1-compiled-update-determinism-preflight-v7",
         "authoritative_entrypoint": (
             "python -m tools.run_g1_compiled_update_determinism"
         ),
@@ -258,7 +263,7 @@ def validate_probe_artifacts(
     hparams_path = run_directory / "hparams.json"
     hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
     errors = []
-    if report.get("protocol") != "shac-compiled-update-determinism-v6":
+    if report.get("protocol") != "shac-compiled-update-determinism-v7":
         errors.append("probe protocol mismatch")
     if report.get("input_step") != SOURCE_STEP:
         errors.append("probe input step mismatch")
@@ -400,7 +405,7 @@ def validate_probe_artifacts(
         raise ValueError("; ".join(errors))
     return {
         "valid": True,
-        "protocol": "g1-compiled-update-determinism-validation-v6",
+        "protocol": "g1-compiled-update-determinism-validation-v7",
         "report": str(report_path),
         "report_sha256": sha256_file(report_path),
         "run_directory": str(run_directory),
@@ -463,7 +468,7 @@ def run(args: argparse.Namespace) -> int:
         _write_json_atomically(
             output_root / "selection.json",
             {
-                "protocol": "g1-compiled-update-determinism-selection-v6",
+                "protocol": "g1-compiled-update-determinism-selection-v7",
                 "outcome": "invalid-execution",
                 "scientific_valid": False,
                 "reason": f"{type(error).__name__}: {error}",

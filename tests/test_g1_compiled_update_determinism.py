@@ -17,6 +17,11 @@ FIRST_MJX_SUBSTEP_FIELDS = (
     "qacc_warmstart",
     "qfrc_applied",
     "qfrc_passive",
+    "rne_input_qvel",
+    "cdof",
+    "cdof_dot",
+    "cvel",
+    "cinert",
     "qfrc_bias",
     "qfrc_actuator",
     "actuator_force",
@@ -72,7 +77,7 @@ def _report(
         for name in FIRST_MJX_SUBSTEP_FIELDS
     }
     return {
-        "protocol": "shac-compiled-update-determinism-v6",
+        "protocol": "shac-compiled-update-determinism-v7",
         "valid": (
             first_mismatch is None
             and not component_mismatches
