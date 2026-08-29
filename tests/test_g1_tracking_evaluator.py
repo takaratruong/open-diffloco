@@ -13,6 +13,7 @@ import numpy as np
 from src.core.networks import Actor
 from tools.evaluate_g1_tracking import (
     _load_policy,
+    apply_learned_wrench_component_mask,
     build_parser,
     configure_jax,
     extract_joint_action_diagnostics,
@@ -40,6 +41,40 @@ RMR_ACTIONS = Path(
 
 
 class G1TrackingEvaluatorTest(unittest.TestCase):
+    def test_learned_wrench_component_masks_are_explicit_and_exact(self):
+        wrench = jnp.asarray([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+        expected = {
+            "full": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "force-only": [1.0, 2.0, 3.0, 0.0, 0.0, 0.0],
+            "vertical-force-only": [0.0, 0.0, 3.0, 0.0, 0.0, 0.0],
+            "vertical-force-and-torque": [0.0, 0.0, 3.0, 4.0, 5.0, 6.0],
+            "horizontal-force-and-torque": [1.0, 2.0, 0.0, 4.0, 5.0, 6.0],
+            "horizontal-force-only": [1.0, 2.0, 0.0, 0.0, 0.0, 0.0],
+            "torque-only": [0.0, 0.0, 0.0, 4.0, 5.0, 6.0],
+            "zero": [0.0] * 6,
+        }
+
+        for name, values in expected.items():
+            with self.subTest(name=name):
+                np.testing.assert_array_equal(
+                    apply_learned_wrench_component_mask(wrench, name),
+                    np.asarray(values),
+                )
+
+    def test_evaluator_cli_accepts_learned_wrench_component_mask(self):
+        args = build_parser().parse_args(
+            [
+                "--checkpoint",
+                "/tmp/policy.pkl",
+                "--output-dir",
+                "/tmp/output",
+                "--learned-wrench-components",
+                "vertical-force-only",
+            ]
+        )
+
+        self.assertEqual(args.learned_wrench_components, "vertical-force-only")
+
     def test_training_hparams_restore_root_velocity_weight_strictly(self):
         from tools.evaluate_g1_tracking import (
             resolve_training_root_velocity_weight,

@@ -80,6 +80,31 @@ EVALUATION_ENV_VARIANTS = (
     "g1_tracking_rmr_50hz_validated",
 )
 
+LEARNED_WRENCH_COMPONENT_MASKS = {
+    "full": (1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+    "force-only": (1.0, 1.0, 1.0, 0.0, 0.0, 0.0),
+    "vertical-force-only": (0.0, 0.0, 1.0, 0.0, 0.0, 0.0),
+    "vertical-force-and-torque": (0.0, 0.0, 1.0, 1.0, 1.0, 1.0),
+    "horizontal-force-and-torque": (1.0, 1.0, 0.0, 1.0, 1.0, 1.0),
+    "horizontal-force-only": (1.0, 1.0, 0.0, 0.0, 0.0, 0.0),
+    "torque-only": (0.0, 0.0, 0.0, 1.0, 1.0, 1.0),
+    "zero": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+}
+
+
+def apply_learned_wrench_component_mask(
+    world_wrench: jax.Array, components: str
+) -> jax.Array:
+    """Mask an evaluated learned wrench without changing the learned head."""
+    if components not in LEARNED_WRENCH_COMPONENT_MASKS:
+        raise ValueError(f"unknown learned wrench components: {components}")
+    if world_wrench.shape[-1] != 6:
+        raise ValueError("learned wrench must have six components")
+    return world_wrench * jnp.asarray(
+        LEARNED_WRENCH_COMPONENT_MASKS[components],
+        dtype=world_wrench.dtype,
+    )
+
 
 def training_action_noise_at_step(
     hparams: dict[str, object], step: int, *, action_dim: int
@@ -838,6 +863,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument(
+        "--learned-wrench-components",
+        choices=tuple(LEARNED_WRENCH_COMPONENT_MASKS),
+        default="full",
+        help=(
+            "evaluation-only world-frame component mask applied after the "
+            "learned torso-wrench head"
+        ),
+    )
+    parser.add_argument(
         "--actor-state-gated-recovery-support", type=Path
     )
     parser.add_argument("--rmr-action-tape", type=Path)
@@ -1240,6 +1274,10 @@ def main() -> None:
         learned_wrench_body_id, learned_wrench_parameters = (
             torso_wrench_parameters_from_environment(env)
         )
+    elif args.learned_wrench_components != "full":
+        parser.error(
+            "--learned-wrench-components requires a learned-wrench checkpoint"
+        )
     recovery_support = None
     recovery_support_report = None
     if args.actor_state_gated_recovery_support is not None:
@@ -1316,6 +1354,7 @@ def main() -> None:
     recovery_gates = []
     gated_residual_actions = []
     learned_wrenches = []
+    learned_unmasked_wrenches = []
     learned_normalized_wrenches = []
     constraint_forces_world = []
     constraint_forces_yaw = []
@@ -1463,12 +1502,16 @@ def main() -> None:
             normalized_wrench = actor.normalized_wrench(
                 actor_params, normalized, learned_wrench_scale
             ).astype(state.data.qpos.dtype)
-            world_wrench = normalized_yaw_wrench_to_world(
+            unmasked_world_wrench = normalized_yaw_wrench_to_world(
                 normalized_wrench,
                 root_quaternion=state.data.qpos[3:7],
                 force_cap=learned_wrench_parameters.force_cap,
                 torque_cap=learned_wrench_parameters.torque_cap,
                 scale=learned_wrench_scale,
+            )
+            world_wrench = apply_learned_wrench_component_mask(
+                unmasked_world_wrench,
+                args.learned_wrench_components,
             )
             state = state.replace(
                 data=state.data.replace(
@@ -1480,6 +1523,9 @@ def main() -> None:
                 )
             )
             learned_normalized_wrenches.append(np.asarray(normalized_wrench))
+            learned_unmasked_wrenches.append(
+                np.asarray(unmasked_world_wrench)
+            )
             learned_wrenches.append(np.asarray(world_wrench))
         action_mean = action
         action_means.append(np.asarray(action_mean))
@@ -1695,6 +1741,17 @@ def main() -> None:
         recovery_gate=np.asarray(recovery_gates),
         gated_residual_action=np.asarray(gated_residual_actions),
         learned_torso_wrench=np.asarray(learned_wrenches),
+        learned_torso_wrench_unmasked=np.asarray(
+            learned_unmasked_wrenches
+        ),
+        learned_torso_wrench_component_mask=np.asarray(
+            LEARNED_WRENCH_COMPONENT_MASKS[
+                args.learned_wrench_components
+            ]
+        ),
+        learned_torso_wrench_components=np.asarray(
+            args.learned_wrench_components
+        ),
         learned_torso_wrench_normalized=np.asarray(
             learned_normalized_wrenches
         ),
@@ -1892,6 +1949,12 @@ def main() -> None:
             actor_params, FrozenControllerWrenchParams
         ),
         "actor_learned_torso_wrench_scale": learned_wrench_scale,
+        "learned_torso_wrench_components": args.learned_wrench_components,
+        "learned_torso_wrench_component_mask": list(
+            LEARNED_WRENCH_COMPONENT_MASKS[
+                args.learned_wrench_components
+            ]
+        ),
         "learned_torso_wrench_rms_force": (
             float(
                 np.sqrt(
