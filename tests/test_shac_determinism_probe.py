@@ -31,6 +31,15 @@ FIRST_MJX_SUBSTEP_FIELDS = (
     "qacc_warmstart",
     "qfrc_applied",
     "qfrc_passive",
+    "position_input_qpos",
+    "xpos",
+    "xquat",
+    "xmat",
+    "xipos",
+    "ximat",
+    "xanchor",
+    "xaxis",
+    "subtree_com",
     "rne_input_qvel",
     "cdof",
     "cdof_dot",
@@ -254,8 +263,9 @@ def test_g1_step_exposes_raw_mjx_probe_boundaries():
     component = source.index("determinism_mjx_substep_{name}_fingerprint")
     assert first_mjx_step < component < returned_state
     field = source.index("field_{name}_fingerprint")
+    assert '"position_input_qpos": position_input_qpos' in source
     assert '"rne_input_qvel": rne_input_qvel' in source
-    assert "mjx_probe_field_values(next_data, data.qvel)" in source
+    assert "next_data, data.qpos, data.qvel" in source
     assert first_mjx_step < field < returned_state
     for name in FIRST_MJX_SUBSTEP_COMPONENTS:
         assert f'"{name}"' in source

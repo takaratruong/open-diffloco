@@ -1716,7 +1716,9 @@ class G1TrackingEnv:
         kp = self.kp * state.info["kp_scale"]
         kd = self.kd * state.info["kd_scale"]
 
-        def mjx_probe_values(data, rne_input_qvel):
+        def mjx_probe_values(
+            data, position_input_qpos, rne_input_qvel
+        ):
             return (
                 data.time,
                 data.qpos,
@@ -1726,6 +1728,15 @@ class G1TrackingEnv:
                 data.qacc_warmstart,
                 data.qfrc_applied,
                 data.qfrc_passive,
+                position_input_qpos,
+                data.xpos,
+                data.xquat,
+                data.xmat,
+                data.xipos,
+                data.ximat,
+                data.xanchor,
+                data.xaxis,
+                data.subtree_com,
                 rne_input_qvel,
                 data.cdof,
                 data.cdof_dot,
@@ -1758,7 +1769,9 @@ class G1TrackingEnv:
                 "contact_state": data._impl.contact,
             }
 
-        def mjx_probe_field_values(data, rne_input_qvel):
+        def mjx_probe_field_values(
+            data, position_input_qpos, rne_input_qvel
+        ):
             return {
                 "time": data.time,
                 "qpos": data.qpos,
@@ -1768,6 +1781,15 @@ class G1TrackingEnv:
                 "qacc_warmstart": data.qacc_warmstart,
                 "qfrc_applied": data.qfrc_applied,
                 "qfrc_passive": data.qfrc_passive,
+                "position_input_qpos": position_input_qpos,
+                "xpos": data.xpos,
+                "xquat": data.xquat,
+                "xmat": data.xmat,
+                "xipos": data.xipos,
+                "ximat": data.ximat,
+                "xanchor": data.xanchor,
+                "xaxis": data.xaxis,
+                "subtree_com": data.subtree_com,
                 "rne_input_qvel": rne_input_qvel,
                 "cdof": data.cdof,
                 "cdof_dot": data.cdof_dot,
@@ -1801,7 +1823,7 @@ class G1TrackingEnv:
             if self.determinism_probe:
                 fingerprints = {
                     "combined": tree_bit_fingerprint(
-                        mjx_probe_values(next_data, data.qvel)
+                        mjx_probe_values(next_data, data.qpos, data.qvel)
                     ),
                     **{
                         name: tree_bit_fingerprint(values)
@@ -1812,7 +1834,9 @@ class G1TrackingEnv:
                     **{
                         f"field_{name}": tree_bit_fingerprint(values)
                         for name, values in (
-                            mjx_probe_field_values(next_data, data.qvel).items()
+                            mjx_probe_field_values(
+                                next_data, data.qpos, data.qvel
+                            ).items()
                         )
                     },
                 }
@@ -1833,10 +1857,12 @@ class G1TrackingEnv:
             }
             first_mjx_substep_field_fingerprints = {
                 name: mjx_substep_fingerprints[f"field_{name}"][0]
-                for name in mjx_probe_field_values(data, data.qvel)
+                for name in mjx_probe_field_values(
+                    data, data.qpos, data.qvel
+                )
             }
             mjx_control_step_fingerprint = tree_bit_fingerprint(
-                mjx_probe_values(data, data.qvel)
+                mjx_probe_values(data, data.qpos, data.qvel)
             )
         transition_contact_stiffness = contact_stiffness(
             data.qfrc_constraint,
