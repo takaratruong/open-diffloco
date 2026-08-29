@@ -1,6 +1,8 @@
 import inspect
 from pathlib import Path
 
+import pytest
+
 from src.algorithms.shac.algorithm import train
 
 
@@ -16,6 +18,34 @@ def test_shac_jave_is_default_off_and_resume_start_requires_authority():
     assert parameters["jave_reward_feature_scale"].default == 8.0
     assert parameters["jave_collect_transitions"].default is False
     assert parameters["allow_resume_jave_start"].default is False
+    assert parameters["allow_resume_jave_weight_change"].default is False
+
+
+def test_shac_jave_resume_can_change_only_the_dynamic_weight_with_authority():
+    from src.algorithms.shac.algorithm import validate_jave_resume_settings
+
+    saved = (0.0, 0, (256, 256), 3e-4, 4, 256, 256, 100_000, 8.0)
+    requested = (0.1, *saved[1:])
+
+    with pytest.raises(ValueError, match="continuation settings"):
+        validate_jave_resume_settings(
+            saved,
+            requested,
+            allow_weight_change=False,
+        )
+    validate_jave_resume_settings(
+        saved,
+        requested,
+        allow_weight_change=True,
+    )
+
+    changed_model = (*requested[:3], 1e-3, *requested[4:])
+    with pytest.raises(ValueError, match="continuation settings"):
+        validate_jave_resume_settings(
+            saved,
+            changed_model,
+            allow_weight_change=True,
+        )
 
 
 def test_shac_jave_uses_the_g1_reward_sufficient_pre_reset_transition():

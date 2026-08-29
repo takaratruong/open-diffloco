@@ -1593,6 +1593,29 @@ def resolve_actor_bootstrap_resume_scale(
     return float(requested_scale if allow_change else resumed_scale)
 
 
+def validate_jave_resume_settings(
+    saved_settings: tuple[object, ...],
+    requested_settings: tuple[object, ...],
+    *,
+    allow_weight_change: bool,
+) -> None:
+    """Allow an authorized dynamic JAVE weight branch and nothing else."""
+
+    if not isinstance(allow_weight_change, bool):
+        raise ValueError("allow_weight_change must be boolean")
+    settings_match = (
+        saved_settings[1:] == requested_settings[1:]
+        if allow_weight_change
+        else saved_settings == requested_settings
+    )
+    if (
+        not saved_settings
+        or len(saved_settings) != len(requested_settings)
+        or not settings_match
+    ):
+        raise ValueError("JAVE continuation settings must match the checkpoint")
+
+
 def _sha256_file(path: Path, block_size: int = 1024 * 1024) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -2431,6 +2454,7 @@ def train(
     jave_reward_feature_scale: float = 8.0,
     jave_collect_transitions: bool = False,
     allow_resume_jave_start: bool = False,
+    allow_resume_jave_weight_change: bool = False,
     reference_reset_noise_scale: float = 0.0,
     reference_root_reset_noise_multiplier: float = 1.0,
     reference_root_reset_noise_probability: float = 0.0,
@@ -2996,6 +3020,8 @@ def train(
         )
     if not isinstance(allow_resume_jave_start, bool):
         raise ValueError("allow_resume_jave_start must be boolean")
+    if not isinstance(allow_resume_jave_weight_change, bool):
+        raise ValueError("allow_resume_jave_weight_change must be boolean")
     if not isinstance(jave_collect_transitions, bool):
         raise ValueError("jave_collect_transitions must be boolean")
     if jave_vg_weight > 0.0 and not jave_collect_transitions:
@@ -3455,10 +3481,11 @@ def train(
                 jave_ldm_buffer_capacity,
                 float(jave_reward_feature_scale),
             )
-            if requested_jave_settings != saved_jave_settings:
-                raise ValueError(
-                    "JAVE continuation settings must match the checkpoint"
-                )
+            validate_jave_resume_settings(
+                saved_jave_settings,
+                requested_jave_settings,
+                allow_weight_change=allow_resume_jave_weight_change,
+            )
     if jave_enabled:
         if not env_variant.startswith("g1_tracking"):
             raise ValueError("JAVE augmentation requires a G1 tracking task")
@@ -7469,6 +7496,9 @@ def train(
         "jave_collect_transitions": jave_collect_transitions,
         "jave_start_step": jave_start_step,
         "allow_resume_jave_start": allow_resume_jave_start,
+        "allow_resume_jave_weight_change": (
+            allow_resume_jave_weight_change
+        ),
         "reference_reset_noise_scale": reference_reset_noise_scale,
         "reference_root_reset_noise_multiplier": (
             reference_root_reset_noise_multiplier
