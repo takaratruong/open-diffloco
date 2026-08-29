@@ -4,6 +4,23 @@ import jax
 import numpy as np
 
 
+class _AddressReprAux:
+    pass
+
+
+@jax.tree_util.register_pytree_node_class
+class _TreeWithAddressAux:
+    def __init__(self, value):
+        self.value = value
+
+    def tree_flatten(self):
+        return (self.value,), _AddressReprAux()
+
+    @classmethod
+    def tree_unflatten(cls, _aux, children):
+        return cls(children[0])
+
+
 def test_inprocess_pair_builds_one_common_warmup_and_two_active_updates():
     from tools.run_g1_jave_inprocess_pair import (
         JAVE_VG_WEIGHT,
@@ -75,6 +92,19 @@ def test_control_repeatability_requires_exact_state_hashes_and_telemetry():
     report = compare_control_repeats(control_a, control_b)
     assert report["valid"] is False
     assert report["first_mismatch_step"] == 2
+
+
+def test_numeric_state_hash_ignores_unstable_pytree_aux_repr():
+    from tools.run_g1_jave_inprocess_pair import numeric_tree_sha256
+
+    first = _TreeWithAddressAux(np.asarray([1.0, 2.0], dtype=np.float32))
+    second = _TreeWithAddressAux(np.asarray([1.0, 2.0], dtype=np.float32))
+
+    assert repr(jax.tree.structure(first)) != repr(jax.tree.structure(second))
+    assert numeric_tree_sha256(first) == numeric_tree_sha256(second)
+    assert numeric_tree_sha256(first) != numeric_tree_sha256(
+        _TreeWithAddressAux(np.asarray([1.0, 3.0], dtype=np.float32))
+    )
 
 
 def test_jave_pair_selection_requires_control_and_retained_preservation():

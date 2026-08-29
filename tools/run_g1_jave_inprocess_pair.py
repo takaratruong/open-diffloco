@@ -40,6 +40,24 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def numeric_tree_sha256(tree: object) -> str:
+    """Hash stable leaf paths, dtypes, shapes, and exact numeric bytes."""
+
+    import jax
+    import numpy as np
+
+    digest = hashlib.sha256()
+    paths_and_leaves, _ = jax.tree_util.tree_flatten_with_path(tree)
+    digest.update(str(len(paths_and_leaves)).encode("ascii"))
+    for path, value in paths_and_leaves:
+        digest.update(repr(path).encode("utf-8"))
+        array = np.ascontiguousarray(np.asarray(value))
+        digest.update(str(array.dtype).encode("ascii"))
+        digest.update(repr(array.shape).encode("ascii"))
+        digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
 def expected_branch_checkpoint_steps(active_updates: int) -> tuple[int, ...]:
     if (
         isinstance(active_updates, bool)
@@ -313,7 +331,7 @@ def _validate_branch_training(
     if sha256_file(branch_checkpoint) != branch_checkpoint_sha256:
         raise ValueError("common JAVE branch checkpoint changed")
     branch_state = _load_state(branch_checkpoint)
-    if parameter_tree_sha256(branch_state) != branch_state_sha256:
+    if numeric_tree_sha256(branch_state) != branch_state_sha256:
         raise ValueError("common JAVE branch state changed")
     parent_sha256 = parameter_tree_sha256(branch_state.actor_params.parent)
     normalizer_sha256 = parameter_tree_sha256(branch_state.normalizer)
@@ -354,7 +372,7 @@ def _validate_branch_training(
             )
         ):
             raise ValueError("paired JAVE checkpoint is invalid")
-        state_hashes.append(parameter_tree_sha256(state))
+        state_hashes.append(numeric_tree_sha256(state))
         checkpoint_hashes.append(sha256_file(checkpoint))
         del state
 
@@ -398,9 +416,6 @@ def _validate_branch_training(
 
 
 def _run_worker(args: argparse.Namespace) -> int:
-    from src.algorithms.shac.counterfactual_wrench_distillation import (
-        parameter_tree_sha256,
-    )
     from tools.run_g1_jave_continuation import (
         build_jave_kwargs,
         validate_preflight,
@@ -460,7 +475,7 @@ def _run_worker(args: argparse.Namespace) -> int:
     branch_checkpoint = warmup_run / f"checkpoint_step_{WARMUP_STEP}.pkl"
     branch_checkpoint_sha256 = sha256_file(branch_checkpoint)
     branch_state = _load_state(branch_checkpoint)
-    branch_state_sha256 = parameter_tree_sha256(branch_state)
+    branch_state_sha256 = numeric_tree_sha256(branch_state)
     del branch_state
     branch_report = {
         "protocol": "g1-jave-common-branch-point-v1",
