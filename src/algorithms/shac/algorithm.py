@@ -221,6 +221,12 @@ FIRST_MJX_SUBSTEP_FIELDS = (
     "qacc_smooth",
     "qacc_warmstart",
     "qfrc_applied",
+    "qfrc_passive",
+    "qfrc_bias",
+    "qfrc_actuator",
+    "actuator_force",
+    "xfrc_applied",
+    "xfrc_accumulated",
     "qfrc_smooth",
     "qfrc_constraint",
     "efc_force",
@@ -315,7 +321,7 @@ def run_determinism_probe(compiled_step, state) -> dict[str, object]:
         and metrics_exact
     )
     return {
-        "protocol": "shac-compiled-update-determinism-v5",
+        "protocol": "shac-compiled-update-determinism-v6",
         "valid": valid,
         "boundaries": boundaries,
         "first_mismatch_boundary": first_mismatch,

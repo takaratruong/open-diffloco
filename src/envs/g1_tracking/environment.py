@@ -9,6 +9,7 @@ import jax.numpy as jp
 import mujoco
 import numpy as np
 from mujoco import mjx
+from mujoco.mjx._src import support as mjx_support
 
 from src.core.contact import contact_stiffness
 from src.core.data_structures import EnvState
@@ -1724,6 +1725,12 @@ class G1TrackingEnv:
                 data.qacc_smooth,
                 data.qacc_warmstart,
                 data.qfrc_applied,
+                data.qfrc_passive,
+                data.qfrc_bias,
+                data.qfrc_actuator,
+                data.actuator_force,
+                data.xfrc_applied,
+                mjx_support.xfrc_accumulate(model, data),
                 data.qfrc_smooth,
                 data.qfrc_constraint,
                 data._impl.efc_force,
@@ -1755,6 +1762,14 @@ class G1TrackingEnv:
                 "qacc_smooth": data.qacc_smooth,
                 "qacc_warmstart": data.qacc_warmstart,
                 "qfrc_applied": data.qfrc_applied,
+                "qfrc_passive": data.qfrc_passive,
+                "qfrc_bias": data.qfrc_bias,
+                "qfrc_actuator": data.qfrc_actuator,
+                "actuator_force": data.actuator_force,
+                "xfrc_applied": data.xfrc_applied,
+                "xfrc_accumulated": mjx_support.xfrc_accumulate(
+                    model, data
+                ),
                 "qfrc_smooth": data.qfrc_smooth,
                 "qfrc_constraint": data.qfrc_constraint,
                 "efc_force": data._impl.efc_force,
