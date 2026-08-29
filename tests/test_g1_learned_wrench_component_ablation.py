@@ -74,6 +74,14 @@ def test_evaluator_command_preserves_route_and_changes_only_component_mask(tmp_p
     )
     assert command[command.index("--phase") + 1] == "0"
     assert command[command.index("--solver-profile") + 1] == "g1-4x5"
+    assert command[command.index("--env-variant") + 1] == (
+        "g1_tracking_rmr_50hz_action_parity"
+    )
+    assert command[command.index("--reference-stride") + 1] == "1"
+    assert command[command.index("--actor-history-len") + 1] == "10"
+    assert command[command.index("--actor-reference-preview-mode") + 1] == "delta"
+    assert "--reference-residual-control" in command
+    assert command[command.index("--reference-residual-scale") + 1] == "1.0"
     assert command[command.index("--actor-reference-lookahead-steps") + 1 :] == [
         "4",
         "8",

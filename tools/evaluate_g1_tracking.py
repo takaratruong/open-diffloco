@@ -1865,6 +1865,11 @@ def main() -> None:
         "actor_reference_lookahead_steps": list(
             env.actor_reference_lookahead_steps
         ),
+        "environment_variant": args.env_variant,
+        "actor_history_len": env.actor_history_len,
+        "actor_reference_preview_mode": args.actor_reference_preview_mode,
+        "reference_residual_control": args.reference_residual_control,
+        "reference_residual_scale": args.reference_residual_scale,
         "actor_observe_motion_anchor_position": (
             env.actor_observe_motion_anchor_position
         ),

@@ -108,7 +108,16 @@ def build_evaluator_command(
         "--render-every",
         "2",
         "--env-variant",
-        "g1_tracking_rmr_50hz_source_step",
+        "g1_tracking_rmr_50hz_action_parity",
+        "--reference-stride",
+        "1",
+        "--actor-history-len",
+        "10",
+        "--actor-reference-preview-mode",
+        "delta",
+        "--reference-residual-control",
+        "--reference-residual-scale",
+        "1.0",
         "--solver-iterations",
         str(profile.iterations),
         "--solver-ls-iterations",
@@ -151,6 +160,18 @@ def _validate_condition(
         raise ValueError("condition phase does not match")
     if summary.get("solver_profile") != solver_profile:
         raise ValueError("condition solver profile does not match")
+    if summary.get("environment_variant") != "g1_tracking_rmr_50hz_action_parity":
+        raise ValueError("condition environment variant does not match")
+    if summary.get("reference_stride") != 1:
+        raise ValueError("condition reference stride does not match")
+    if summary.get("actor_history_len") != 10:
+        raise ValueError("condition actor history does not match")
+    if summary.get("actor_reference_preview_mode") != "delta":
+        raise ValueError("condition reference preview mode does not match")
+    if summary.get("reference_residual_control") is not True:
+        raise ValueError("condition reference residual control does not match")
+    if summary.get("reference_residual_scale") != 1.0:
+        raise ValueError("condition reference residual scale does not match")
     if summary.get("actor_learned_torso_wrench") is not True:
         raise ValueError("condition did not load a learned-wrench checkpoint")
     if summary.get("learned_torso_wrench_components") != components:
