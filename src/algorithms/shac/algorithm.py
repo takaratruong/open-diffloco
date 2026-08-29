@@ -213,6 +213,20 @@ FIRST_MJX_SUBSTEP_COMPONENTS = (
     "contact_state",
 )
 
+FIRST_MJX_SUBSTEP_FIELDS = (
+    "time",
+    "qpos",
+    "qvel",
+    "qacc",
+    "qacc_smooth",
+    "qacc_warmstart",
+    "qfrc_applied",
+    "qfrc_smooth",
+    "qfrc_constraint",
+    "efc_force",
+    "contact",
+)
+
 
 def numeric_tree_sha256(tree: object) -> str:
     """Hash stable leaf paths, dtypes, shapes, and exact numeric bytes."""
@@ -267,6 +281,21 @@ def run_determinism_probe(compiled_step, state) -> dict[str, object]:
         if not exact:
             mismatching_first_mjx_substep_components.append(name)
 
+    first_mjx_substep_fields: dict[str, dict[str, object]] = {}
+    mismatching_first_mjx_substep_fields = []
+    for name in FIRST_MJX_SUBSTEP_FIELDS:
+        key = f"determinism_first_mjx_substep_field_{name}_fingerprint"
+        first = np.asarray(first_metrics[key], dtype=np.uint32)
+        second = np.asarray(second_metrics[key], dtype=np.uint32)
+        exact = bool(np.array_equal(first, second))
+        first_mjx_substep_fields[name] = {
+            "first": first.tolist(),
+            "second": second.tolist(),
+            "exact": exact,
+        }
+        if not exact:
+            mismatching_first_mjx_substep_fields.append(name)
+
     first_state_sha256 = numeric_tree_sha256(first_state)
     second_state_sha256 = numeric_tree_sha256(second_state)
     first_metrics_sha256 = numeric_tree_sha256(first_metrics)
@@ -279,17 +308,24 @@ def run_determinism_probe(compiled_step, state) -> dict[str, object]:
             item["exact"]
             for item in first_mjx_substep_components.values()
         )
+        and all(
+            item["exact"] for item in first_mjx_substep_fields.values()
+        )
         and full_state_exact
         and metrics_exact
     )
     return {
-        "protocol": "shac-compiled-update-determinism-v4",
+        "protocol": "shac-compiled-update-determinism-v5",
         "valid": valid,
         "boundaries": boundaries,
         "first_mismatch_boundary": first_mismatch,
         "first_mjx_substep_components": first_mjx_substep_components,
         "mismatching_first_mjx_substep_components": (
             mismatching_first_mjx_substep_components
+        ),
+        "first_mjx_substep_fields": first_mjx_substep_fields,
+        "mismatching_first_mjx_substep_fields": (
+            mismatching_first_mjx_substep_fields
         ),
         "full_state_exact": full_state_exact,
         "metrics_exact": metrics_exact,
@@ -4778,6 +4814,13 @@ def train(
                     ]
                     for name in FIRST_MJX_SUBSTEP_COMPONENTS
                 }
+                determinism_mjx_substep_field_fingerprints = {
+                    name: candidate_unreplayed_state.info[
+                        "determinism_mjx_substep_"
+                        f"field_{name}_fingerprint"
+                    ]
+                    for name in FIRST_MJX_SUBSTEP_FIELDS
+                }
                 determinism_mjx_control_step_fingerprint = (
                     candidate_unreplayed_state.info[
                         "determinism_mjx_control_step_fingerprint"
@@ -4797,6 +4840,11 @@ def train(
                                 *(
                                     f"determinism_mjx_substep_{name}_fingerprint"
                                     for name in FIRST_MJX_SUBSTEP_COMPONENTS
+                                ),
+                                *(
+                                    "determinism_mjx_substep_"
+                                    f"field_{name}_fingerprint"
+                                    for name in FIRST_MJX_SUBSTEP_FIELDS
                                 ),
                             }
                         }
@@ -5029,6 +5077,13 @@ def train(
                             )
                             for name, fingerprint in (
                                 determinism_mjx_substep_component_fingerprints.items()
+                            )
+                        },
+                        **{
+                            "determinism_mjx_substep_"
+                            f"field_{name}_fingerprint": fingerprint
+                            for name, fingerprint in (
+                                determinism_mjx_substep_field_fingerprints.items()
                             )
                         },
                     }
@@ -5956,6 +6011,15 @@ def train(
                 )
                 for name in FIRST_MJX_SUBSTEP_COMPONENTS
             }
+            first_mjx_substep_field_fingerprints = {
+                name: tree_bit_fingerprint(
+                    trajs[
+                        "determinism_mjx_substep_"
+                        f"field_{name}_fingerprint"
+                    ][:, 0]
+                )
+                for name in FIRST_MJX_SUBSTEP_FIELDS
+            }
             first_mjx_control_step_fingerprint = tree_bit_fingerprint(
                 trajs["determinism_mjx_control_step_fingerprint"][:, 0]
             )
@@ -6658,6 +6722,13 @@ def train(
                         )
                         for name, fingerprint in (
                             first_mjx_substep_component_fingerprints.items()
+                        )
+                    },
+                    **{
+                        "determinism_first_mjx_substep_"
+                        f"field_{name}_fingerprint": fingerprint
+                        for name, fingerprint in (
+                            first_mjx_substep_field_fingerprints.items()
                         )
                     },
                     "determinism_first_mjx_control_step_fingerprint": (

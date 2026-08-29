@@ -1724,6 +1724,7 @@ class G1TrackingEnv:
                 data.qacc_smooth,
                 data.qacc_warmstart,
                 data.qfrc_applied,
+                data.qfrc_smooth,
                 data.qfrc_constraint,
                 data._impl.efc_force,
                 data._impl.contact,
@@ -1743,6 +1744,21 @@ class G1TrackingEnv:
                     data._impl.efc_force,
                 ),
                 "contact_state": data._impl.contact,
+            }
+
+        def mjx_probe_field_values(data):
+            return {
+                "time": data.time,
+                "qpos": data.qpos,
+                "qvel": data.qvel,
+                "qacc": data.qacc,
+                "qacc_smooth": data.qacc_smooth,
+                "qacc_warmstart": data.qacc_warmstart,
+                "qfrc_applied": data.qfrc_applied,
+                "qfrc_smooth": data.qfrc_smooth,
+                "qfrc_constraint": data.qfrc_constraint,
+                "efc_force": data._impl.efc_force,
+                "contact": data._impl.contact,
             }
 
         def physics_step(data, _):
@@ -1768,6 +1784,12 @@ class G1TrackingEnv:
                             mjx_probe_component_values(next_data).items()
                         )
                     },
+                    **{
+                        f"field_{name}": tree_bit_fingerprint(values)
+                        for name, values in (
+                            mjx_probe_field_values(next_data).items()
+                        )
+                    },
                 }
             else:
                 fingerprints = None
@@ -1781,9 +1803,12 @@ class G1TrackingEnv:
                 "combined"
             ][0]
             first_mjx_substep_component_fingerprints = {
-                name: fingerprints[0]
-                for name, fingerprints in mjx_substep_fingerprints.items()
-                if name != "combined"
+                name: mjx_substep_fingerprints[name][0]
+                for name in mjx_probe_component_values(data)
+            }
+            first_mjx_substep_field_fingerprints = {
+                name: mjx_substep_fingerprints[f"field_{name}"][0]
+                for name in mjx_probe_field_values(data)
             }
             mjx_control_step_fingerprint = tree_bit_fingerprint(
                 mjx_probe_values(data)
@@ -2034,6 +2059,13 @@ class G1TrackingEnv:
                     )
                     for name, fingerprint in (
                         first_mjx_substep_component_fingerprints.items()
+                    )
+                },
+                **{
+                    "determinism_mjx_substep_"
+                    f"field_{name}_fingerprint": fingerprint
+                    for name, fingerprint in (
+                        first_mjx_substep_field_fingerprints.items()
                     )
                 },
             }

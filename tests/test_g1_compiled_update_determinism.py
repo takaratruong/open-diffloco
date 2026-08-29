@@ -8,11 +8,26 @@ FIRST_MJX_SUBSTEP_COMPONENTS = (
     "contact_state",
 )
 
+FIRST_MJX_SUBSTEP_FIELDS = (
+    "time",
+    "qpos",
+    "qvel",
+    "qacc",
+    "qacc_smooth",
+    "qacc_warmstart",
+    "qfrc_applied",
+    "qfrc_smooth",
+    "qfrc_constraint",
+    "efc_force",
+    "contact",
+)
+
 
 def _report(
     *,
     first_mismatch=None,
     component_mismatches=(),
+    field_mismatches=(),
     state_exact=True,
     metrics_exact=True,
 ):
@@ -42,11 +57,20 @@ def _report(
         }
         for name in FIRST_MJX_SUBSTEP_COMPONENTS
     }
+    fields = {
+        name: {
+            "first": [1, 2, 3, 4],
+            "second": [1, 2, 3, 4],
+            "exact": name not in field_mismatches,
+        }
+        for name in FIRST_MJX_SUBSTEP_FIELDS
+    }
     return {
-        "protocol": "shac-compiled-update-determinism-v4",
+        "protocol": "shac-compiled-update-determinism-v5",
         "valid": (
             first_mismatch is None
             and not component_mismatches
+            and not field_mismatches
             and state_exact
             and metrics_exact
         ),
@@ -56,6 +80,8 @@ def _report(
         "mismatching_first_mjx_substep_components": list(
             component_mismatches
         ),
+        "first_mjx_substep_fields": fields,
+        "mismatching_first_mjx_substep_fields": list(field_mismatches),
         "full_state_exact": state_exact,
         "metrics_exact": metrics_exact,
     }
@@ -97,6 +123,7 @@ def test_probe_classification_localizes_the_first_boundary():
         _report(
             first_mismatch="first_mjx_substep",
             component_mismatches=("constraint_force", "contact_state"),
+            field_mismatches=("qacc", "efc_force"),
         )
     )
     assert mjx_substep["outcome"] == (
@@ -105,6 +132,10 @@ def test_probe_classification_localizes_the_first_boundary():
     assert mjx_substep["mismatching_first_mjx_substep_components"] == [
         "constraint_force",
         "contact_state",
+    ]
+    assert mjx_substep["mismatching_first_mjx_substep_fields"] == [
+        "qacc",
+        "efc_force",
     ]
 
     mjx_control_step = classify_probe(
@@ -137,6 +168,10 @@ def test_probe_artifact_validation_accepts_sorted_json_boundary_keys(
     report["boundaries"] = {
         name: report["boundaries"][name]
         for name in sorted(report["boundaries"])
+    }
+    report["first_mjx_substep_fields"] = {
+        name: report["first_mjx_substep_fields"][name]
+        for name in sorted(report["first_mjx_substep_fields"])
     }
     report.update(
         input_step=probe.SOURCE_STEP,

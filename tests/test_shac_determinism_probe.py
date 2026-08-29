@@ -22,6 +22,20 @@ FIRST_MJX_SUBSTEP_COMPONENTS = (
     "contact_state",
 )
 
+FIRST_MJX_SUBSTEP_FIELDS = (
+    "time",
+    "qpos",
+    "qvel",
+    "qacc",
+    "qacc_smooth",
+    "qacc_warmstart",
+    "qfrc_applied",
+    "qfrc_smooth",
+    "qfrc_constraint",
+    "efc_force",
+    "contact",
+)
+
 
 def _metrics(value):
     metrics = {
@@ -36,6 +50,14 @@ def _metrics(value):
                 jnp.asarray([value, value + index], dtype=jnp.uint32)
             )
             for index, name in enumerate(FIRST_MJX_SUBSTEP_COMPONENTS)
+        }
+    )
+    metrics.update(
+        {
+            f"determinism_first_mjx_substep_field_{name}_fingerprint": (
+                jnp.asarray([value, value + index], dtype=jnp.uint32)
+            )
+            for index, name in enumerate(FIRST_MJX_SUBSTEP_FIELDS)
         }
     )
     return metrics
@@ -62,6 +84,10 @@ def test_probe_reuses_one_jitted_callable_and_accepts_exact_replay():
     assert all(
         component["exact"]
         for component in report["first_mjx_substep_components"].values()
+    )
+    assert all(
+        field["exact"]
+        for field in report["first_mjx_substep_fields"].values()
     )
 
 
@@ -118,6 +144,42 @@ def test_probe_reports_first_mjx_substep_components_without_causal_ordering():
     ] is False
 
 
+def test_probe_reports_individual_first_mjx_substep_fields():
+    from src.algorithms.shac.algorithm import run_determinism_probe
+
+    class SmoothAccelerationChangingStep:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, state):
+            self.calls += 1
+            metrics = _metrics(jnp.asarray(7, dtype=jnp.uint32))
+            if self.calls == 2:
+                metrics["determinism_first_mjx_substep_fingerprint"] += 1
+                metrics[
+                    "determinism_first_mjx_substep_acceleration_state_fingerprint"
+                ] += 1
+                metrics[
+                    "determinism_first_mjx_substep_field_qacc_smooth_fingerprint"
+                ] += 1
+            return state, metrics
+
+    report = run_determinism_probe(
+        SmoothAccelerationChangingStep(), jnp.asarray(0.0)
+    )
+
+    assert report["first_mismatch_boundary"] == "first_mjx_substep"
+    assert report["mismatching_first_mjx_substep_fields"] == [
+        "qacc_smooth"
+    ]
+    assert report["first_mjx_substep_fields"]["qfrc_smooth"][
+        "exact"
+    ] is True
+    assert report["first_mjx_substep_fields"]["qacc_smooth"][
+        "exact"
+    ] is False
+
+
 def test_boundary_fingerprint_is_stable_and_change_sensitive():
     from src.algorithms.shac.algorithm import tree_bit_fingerprint
 
@@ -140,6 +202,9 @@ def test_train_probe_runs_after_compile_and_before_the_training_loop():
     from src.algorithms.shac.algorithm import (
         FIRST_MJX_SUBSTEP_COMPONENTS as IMPLEMENTED_COMPONENTS,
     )
+    from src.algorithms.shac.algorithm import (
+        FIRST_MJX_SUBSTEP_FIELDS as IMPLEMENTED_FIELDS,
+    )
     from src.algorithms.shac.algorithm import train
 
     parameters = inspect.signature(train).parameters
@@ -154,7 +219,9 @@ def test_train_probe_runs_after_compile_and_before_the_training_loop():
     for name in BOUNDARIES:
         assert f'"determinism_{name}_fingerprint"' in source
     assert IMPLEMENTED_COMPONENTS == FIRST_MJX_SUBSTEP_COMPONENTS
+    assert IMPLEMENTED_FIELDS == FIRST_MJX_SUBSTEP_FIELDS
     assert "determinism_first_mjx_substep_{name}_fingerprint" in source
+    assert "field_{name}_fingerprint" in source
 
 
 def test_g1_step_exposes_raw_mjx_probe_boundaries():
@@ -175,5 +242,7 @@ def test_g1_step_exposes_raw_mjx_probe_boundaries():
     assert first_mjx_step < control_step < returned_state
     component = source.index("determinism_mjx_substep_{name}_fingerprint")
     assert first_mjx_step < component < returned_state
+    field = source.index("field_{name}_fingerprint")
+    assert first_mjx_step < field < returned_state
     for name in FIRST_MJX_SUBSTEP_COMPONENTS:
         assert f'"{name}"' in source

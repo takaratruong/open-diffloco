@@ -1372,6 +1372,17 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
             "determinism_mjx_substep_acceleration_state_fingerprint",
             "determinism_mjx_substep_constraint_force_fingerprint",
             "determinism_mjx_substep_contact_state_fingerprint",
+            "determinism_mjx_substep_field_time_fingerprint",
+            "determinism_mjx_substep_field_qpos_fingerprint",
+            "determinism_mjx_substep_field_qvel_fingerprint",
+            "determinism_mjx_substep_field_qacc_fingerprint",
+            "determinism_mjx_substep_field_qacc_smooth_fingerprint",
+            "determinism_mjx_substep_field_qacc_warmstart_fingerprint",
+            "determinism_mjx_substep_field_qfrc_applied_fingerprint",
+            "determinism_mjx_substep_field_qfrc_smooth_fingerprint",
+            "determinism_mjx_substep_field_qfrc_constraint_fingerprint",
+            "determinism_mjx_substep_field_efc_force_fingerprint",
+            "determinism_mjx_substep_field_contact_fingerprint",
         ):
             fingerprint = next_state.info[name]
             self.assertEqual(fingerprint.shape, (4,))
