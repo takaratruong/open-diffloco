@@ -22,10 +22,12 @@ and additional residual capacity all produced the same broad pattern.
 
 JAVE is now implemented on the exact G1 SHAC continuation path and its learned
 dynamics and gradient-Bellman losses are finite and active. The first smoke does
-not establish a policy improvement. It also does not reject JAVE: the only
-evaluated active checkpoint was an unmatched one-update engineering smoke, and
-the later matched-arm attempts diverged during the pre-treatment warm-up because
-separate GPU contact executions were not bitwise paired.
+not establish a policy improvement. A registered same-process discriminator was
+then attempted. After repairing one invalid tree-hash check, its two weight-zero
+controls diverged at their first active update despite reloading one exact branch
+checkpoint in one worker on one GPU. JAVE was correctly skipped. The current
+evidence therefore neither supports nor rejects JAVE; it shows that the present
+sequential `train()` route is not an exact causal pairing boundary.
 
 ## What the primary methods actually solve
 
@@ -80,12 +82,13 @@ exchange where our policies fail.
 | Does DiffMimic-style replay solve G1? | Sparse threshold replay first improves safely, then full-budget checkpoints reach mixed phase-local gains and no componentwise-safe actor (E-20260821-008/009). | Helpful curriculum, not a solution. |
 | Does noisy reference-state initialization solve it? | E-20260814-025 remains finite but reaches only 63/99/62/49/24 at update 128. | No under the tested recipe. |
 | Can a local recovery expert learn the missing action? | E-20260815-038 reproduces local H32 recoveries; global application and transfer variants regress other states. | Locally yes; globally no. |
-| Does JAVE execute on the current G1 route? | The active smoke has finite learned-dynamics loss 184.915, gradient-Bellman loss 0.1853, target norm 0.5298, 12,288 replay rows, and fully finite actor gradients. | Yes, engineering feasibility only. |
+| Does JAVE execute on the current G1 route? | The active smoke has finite learned-dynamics loss 184.915, gradient-Bellman loss 0.1853, target norm 0.5298, 12,288 replay rows, and fully finite actor gradients. E-20260828-001 then stops before treatment because two sequential weight-zero controls are not exact. | Yes, engineering feasibility only; causal policy effect remains unmeasured. |
 
 ## What remains unproven or not done
 
-1. No registered, causally paired G1 JAVE experiment exists. The current outputs
-   are explicitly engineering smokes.
+1. A registered bounded G1 JAVE discriminator exists, but E-20260828-001 fails
+   its preregistered control-repeatability gate before treatment. No causally
+   valid JAVE policy comparison exists.
 2. The strongest registered PPO proof is the 125-state walk. Local code and
    artifacts connect PPO to the LAFAN source motion, but a fresh hash-bound PPO
    phase grid under the retained 271-transition evaluator is not registered.
@@ -126,10 +129,17 @@ Commits:
   graph for control and treatment.
 - `9bdfd5a6b5317f021bd74edfda8921094f0b1670` — JAVE weight made a dynamic state
   value so both arms compile the same executable graph.
+- `2fac237817eb875f89ace8a2d2ca3b24cd872772` and
+  `7767cc49d57c10a227e8534887cc4166507e6d48` — bounded same-process pair runner
+  and learning diagnostics.
+- `16697546618d396f5dde82f65474842d8f1dbfc8` — stable numeric-state hashing
+  after E-20260828-000 exposed address-dependent MJX PyTree metadata.
 
 The focused verification passed 42 tests after the final parity change; the
-larger initial verification passed 51 tests. Ruff, Python compilation, direct
-reward reconstruction, and direct JAVE math checks also passed.
+larger initial verification passed 51 tests. The pair-runner repair passed 13
+focused JAVE and integration tests plus an exact two-reload check on the failed
+696 MB checkpoint. Ruff, Python compilation, direct reward reconstruction, and
+direct JAVE math checks also passed.
 
 ## JAVE smoke result and why it is not causal
 
@@ -157,6 +167,37 @@ This does **not** show that JAVE itself is nondeterministic or harmful. It shows
 that separate-GPU, cross-process execution is not an adequate bitwise pairing
 method for this chaotic contact rollout.
 
+## Registered same-process discriminator
+
+E-20260828-000 first stopped after control A because the runner hashed
+`repr(PyTreeDef)`. MJX Contact auxiliary wrappers put process-specific addresses
+in that text. The checkpoint file was unchanged and two reloads had identical
+320 leaf paths and exact leaf bytes, so this was an integrity-check defect, not
+training evidence. Commit `1669754` replaced only that runner hash with stable
+path, dtype, shape, and exact-byte hashing.
+
+The unchanged successor E-20260828-001 completed one common weight-zero warm-up
+and two individually valid controls in one worker on physical GPU 3. Both arms
+reloaded exact branch file/state hashes `42b8c1d2...` and `20a9546f...`, but they
+diverged at the first active checkpoint:
+
+- state hashes: `0620da77...` versus `5fa2681f...`;
+- learned-dynamics loss: `145.175964` versus `144.562881`;
+- actor-gradient norm: `0.0892101` versus `0.0872930`;
+- actor-update norm: `0.1716264` versus `0.1706680`.
+
+The stored PRNG key, phase-bin counts, frozen actor parent, and actor normalizer
+remain exact. A direct checkpoint comparison finds 190/320 numeric leaves
+different after one update: environment 86/149, critic 14/14, learned dynamics
+10/10, and trainable actor 4/22 with maximum actor delta `0.00115047`. The two
+arms call `train()` separately and each rebuilds/compiles its train step even
+though they share a process and graph. Treatment, phase-grid evaluation, and
+renders were correctly skipped under the registered gate.
+
+This is still not evidence that JAVE is harmful. It is evidence that sequential
+top-level training invocations are not an exact counterfactual boundary for this
+GPU contact workload, even within one process and on one device.
+
 ## The likely missing ingredient
 
 The highest-probability explanation is conditional specialization plus safe
@@ -179,24 +220,23 @@ bad updates, but there are two important limitations:
 
 ## Recommended next decision
 
-Do not launch a long JAVE run from the current smoke. First close the causal
-measurement problem with one preregistered bounded discriminator:
+Do not launch a longer JAVE run or reinterpret the engineering smoke. First
+close the remaining causal measurement boundary with a separately approved,
+bounded determinism discriminator: expose one compiled SHAC update callable,
+clone one in-memory `TrainState`, and invoke that exact callable twice with
+weight zero before introducing a treatment. If even this replay diverges, test
+one deterministic CPU or deterministic-reduction positive control to separate
+an uncheckpointed host state from GPU contact/reduction nondeterminism. A paired
+JAVE comparison is authorized only after the zero/zero replay is exact.
 
-1. Compile one shared executable in one process on one GPU.
-2. Execute the common warm-up once, then clone that exact post-warm-up
-   `TrainState` as the branch point.
-3. Run control (`weight=0`) and treatment (`weight>0`) from those identical
-   bytes, with the dynamic scalar as the only treatment difference.
-4. Evaluate every bounded checkpoint on the complete phase grid. Stop unless a
-   treatment checkpoint componentwise preserves the control and retained E002.
+If an exact boundary is established, the next JAVE comparison remains only two
+updates and keeps the existing componentwise E002/control gate. A separate
+fresh-initialization experiment would still be required to test JAVE's published
+early-training claim.
 
-That experiment answers whether late JAVE can help this retained controller. A
-separate fresh-initialization experiment would be required to test JAVE's
-published early-training claim.
-
-If the bounded JAVE discriminator again produces only phase redistribution,
+If a valid bounded JAVE discriminator later produces only phase redistribution,
 retire it for this branch and test the more directly supported structural
-hypothesis: a zero-initialized, reference-contact-mode-gated residual over
-frozen E002, with strict componentwise preservation. That is the smallest
-experiment that asks whether the actor must represent different correction
-functions on different stance/contact regimes.
+hypothesis: a zero-initialized, reference-contact-mode-gated residual over frozen
+E002, with strict componentwise preservation. That is the smallest experiment
+that asks whether the actor must represent different correction functions on
+different stance/contact regimes.
