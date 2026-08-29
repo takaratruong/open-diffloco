@@ -206,6 +206,13 @@ DETERMINISM_BOUNDARIES = (
     "critic",
 )
 
+FIRST_MJX_SUBSTEP_COMPONENTS = (
+    "integrated_state",
+    "acceleration_state",
+    "constraint_force",
+    "contact_state",
+)
+
 
 def numeric_tree_sha256(tree: object) -> str:
     """Hash stable leaf paths, dtypes, shapes, and exact numeric bytes."""
@@ -245,6 +252,21 @@ def run_determinism_probe(compiled_step, state) -> dict[str, object]:
         if not exact and first_mismatch is None:
             first_mismatch = name
 
+    first_mjx_substep_components: dict[str, dict[str, object]] = {}
+    mismatching_first_mjx_substep_components = []
+    for name in FIRST_MJX_SUBSTEP_COMPONENTS:
+        key = f"determinism_first_mjx_substep_{name}_fingerprint"
+        first = np.asarray(first_metrics[key], dtype=np.uint32)
+        second = np.asarray(second_metrics[key], dtype=np.uint32)
+        exact = bool(np.array_equal(first, second))
+        first_mjx_substep_components[name] = {
+            "first": first.tolist(),
+            "second": second.tolist(),
+            "exact": exact,
+        }
+        if not exact:
+            mismatching_first_mjx_substep_components.append(name)
+
     first_state_sha256 = numeric_tree_sha256(first_state)
     second_state_sha256 = numeric_tree_sha256(second_state)
     first_metrics_sha256 = numeric_tree_sha256(first_metrics)
@@ -253,14 +275,22 @@ def run_determinism_probe(compiled_step, state) -> dict[str, object]:
     metrics_exact = first_metrics_sha256 == second_metrics_sha256
     valid = (
         all(item["exact"] for item in boundaries.values())
+        and all(
+            item["exact"]
+            for item in first_mjx_substep_components.values()
+        )
         and full_state_exact
         and metrics_exact
     )
     return {
-        "protocol": "shac-compiled-update-determinism-v3",
+        "protocol": "shac-compiled-update-determinism-v4",
         "valid": valid,
         "boundaries": boundaries,
         "first_mismatch_boundary": first_mismatch,
+        "first_mjx_substep_components": first_mjx_substep_components,
+        "mismatching_first_mjx_substep_components": (
+            mismatching_first_mjx_substep_components
+        ),
         "full_state_exact": full_state_exact,
         "metrics_exact": metrics_exact,
         "first_state_sha256": first_state_sha256,
@@ -4742,6 +4772,12 @@ def train(
                         "determinism_mjx_substep_fingerprint"
                     ]
                 )
+                determinism_mjx_substep_component_fingerprints = {
+                    name: candidate_unreplayed_state.info[
+                        f"determinism_mjx_substep_{name}_fingerprint"
+                    ]
+                    for name in FIRST_MJX_SUBSTEP_COMPONENTS
+                }
                 determinism_mjx_control_step_fingerprint = (
                     candidate_unreplayed_state.info[
                         "determinism_mjx_control_step_fingerprint"
@@ -4758,6 +4794,10 @@ def train(
                             not in {
                                 "determinism_mjx_substep_fingerprint",
                                 "determinism_mjx_control_step_fingerprint",
+                                *(
+                                    f"determinism_mjx_substep_{name}_fingerprint"
+                                    for name in FIRST_MJX_SUBSTEP_COMPONENTS
+                                ),
                             }
                         }
                     )
@@ -4983,6 +5023,14 @@ def train(
                         "determinism_env_step_fingerprint": (
                             determinism_env_step_fingerprint
                         ),
+                        **{
+                            f"determinism_mjx_substep_{name}_fingerprint": (
+                                fingerprint
+                            )
+                            for name, fingerprint in (
+                                determinism_mjx_substep_component_fingerprints.items()
+                            )
+                        },
                     }
                 )
             if jave_enabled:
@@ -5900,6 +5948,14 @@ def train(
             first_mjx_substep_fingerprint = tree_bit_fingerprint(
                 trajs["determinism_mjx_substep_fingerprint"][:, 0]
             )
+            first_mjx_substep_component_fingerprints = {
+                name: tree_bit_fingerprint(
+                    trajs[
+                        f"determinism_mjx_substep_{name}_fingerprint"
+                    ][:, 0]
+                )
+                for name in FIRST_MJX_SUBSTEP_COMPONENTS
+            }
             first_mjx_control_step_fingerprint = tree_bit_fingerprint(
                 trajs["determinism_mjx_control_step_fingerprint"][:, 0]
             )
@@ -6596,6 +6652,14 @@ def train(
                     "determinism_first_mjx_substep_fingerprint": (
                         first_mjx_substep_fingerprint
                     ),
+                    **{
+                        f"determinism_first_mjx_substep_{name}_fingerprint": (
+                            fingerprint
+                        )
+                        for name, fingerprint in (
+                            first_mjx_substep_component_fingerprints.items()
+                        )
+                    },
                     "determinism_first_mjx_control_step_fingerprint": (
                         first_mjx_control_step_fingerprint
                     ),

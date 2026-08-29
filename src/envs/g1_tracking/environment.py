@@ -1729,6 +1729,22 @@ class G1TrackingEnv:
                 data._impl.contact,
             )
 
+        def mjx_probe_component_values(data):
+            return {
+                "integrated_state": (data.time, data.qpos, data.qvel),
+                "acceleration_state": (
+                    data.qacc,
+                    data.qacc_smooth,
+                    data.qacc_warmstart,
+                    data.qfrc_applied,
+                ),
+                "constraint_force": (
+                    data.qfrc_constraint,
+                    data._impl.efc_force,
+                ),
+                "contact_state": data._impl.contact,
+            }
+
         def physics_step(data, _):
             torque = jp.clip(
                 kp * (position_target - data.qpos[7:])
@@ -1741,18 +1757,34 @@ class G1TrackingEnv:
                 model,
                 data.replace(qfrc_applied=applied),
             )
-            fingerprint = (
-                tree_bit_fingerprint(mjx_probe_values(next_data))
-                if self.determinism_probe
-                else None
-            )
-            return next_data, fingerprint
+            if self.determinism_probe:
+                fingerprints = {
+                    "combined": tree_bit_fingerprint(
+                        mjx_probe_values(next_data)
+                    ),
+                    **{
+                        name: tree_bit_fingerprint(values)
+                        for name, values in (
+                            mjx_probe_component_values(next_data).items()
+                        )
+                    },
+                }
+            else:
+                fingerprints = None
+            return next_data, fingerprints
 
         data, mjx_substep_fingerprints = jax.lax.scan(
             physics_step, state.data, None, length=self.n_frames
         )
         if self.determinism_probe:
-            first_mjx_substep_fingerprint = mjx_substep_fingerprints[0]
+            first_mjx_substep_fingerprint = mjx_substep_fingerprints[
+                "combined"
+            ][0]
+            first_mjx_substep_component_fingerprints = {
+                name: fingerprints[0]
+                for name, fingerprints in mjx_substep_fingerprints.items()
+                if name != "combined"
+            }
             mjx_control_step_fingerprint = tree_bit_fingerprint(
                 mjx_probe_values(data)
             )
@@ -1996,6 +2028,14 @@ class G1TrackingEnv:
                 "determinism_mjx_control_step_fingerprint": (
                     mjx_control_step_fingerprint
                 ),
+                **{
+                    f"determinism_mjx_substep_{name}_fingerprint": (
+                        fingerprint
+                    )
+                    for name, fingerprint in (
+                        first_mjx_substep_component_fingerprints.items()
+                    )
+                },
             }
         return EnvState(
             data=next_data,

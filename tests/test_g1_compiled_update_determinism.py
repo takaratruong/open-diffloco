@@ -1,8 +1,21 @@
 import json
 from pathlib import Path
 
+FIRST_MJX_SUBSTEP_COMPONENTS = (
+    "integrated_state",
+    "acceleration_state",
+    "constraint_force",
+    "contact_state",
+)
 
-def _report(*, first_mismatch=None, state_exact=True, metrics_exact=True):
+
+def _report(
+    *,
+    first_mismatch=None,
+    component_mismatches=(),
+    state_exact=True,
+    metrics_exact=True,
+):
     boundaries = {
         name: {
             "first": [1, 2, 3, 4],
@@ -21,11 +34,28 @@ def _report(*, first_mismatch=None, state_exact=True, metrics_exact=True):
             "critic",
         )
     }
+    components = {
+        name: {
+            "first": [1, 2, 3, 4],
+            "second": [1, 2, 3, 4],
+            "exact": name not in component_mismatches,
+        }
+        for name in FIRST_MJX_SUBSTEP_COMPONENTS
+    }
     return {
-        "protocol": "shac-compiled-update-determinism-v3",
-        "valid": first_mismatch is None and state_exact and metrics_exact,
+        "protocol": "shac-compiled-update-determinism-v4",
+        "valid": (
+            first_mismatch is None
+            and not component_mismatches
+            and state_exact
+            and metrics_exact
+        ),
         "boundaries": boundaries,
         "first_mismatch_boundary": first_mismatch,
+        "first_mjx_substep_components": components,
+        "mismatching_first_mjx_substep_components": list(
+            component_mismatches
+        ),
         "full_state_exact": state_exact,
         "metrics_exact": metrics_exact,
     }
@@ -64,11 +94,18 @@ def test_probe_classification_localizes_the_first_boundary():
     assert first_step["outcome"] == "compiled-update-diverges-first-env-step"
 
     mjx_substep = classify_probe(
-        _report(first_mismatch="first_mjx_substep")
+        _report(
+            first_mismatch="first_mjx_substep",
+            component_mismatches=("constraint_force", "contact_state"),
+        )
     )
     assert mjx_substep["outcome"] == (
         "compiled-update-diverges-first-mjx-substep"
     )
+    assert mjx_substep["mismatching_first_mjx_substep_components"] == [
+        "constraint_force",
+        "contact_state",
+    ]
 
     mjx_control_step = classify_probe(
         _report(first_mismatch="first_mjx_control_step")

@@ -1368,6 +1368,10 @@ class G1TrackingEnvironmentTest(unittest.TestCase):
         for name in (
             "determinism_mjx_substep_fingerprint",
             "determinism_mjx_control_step_fingerprint",
+            "determinism_mjx_substep_integrated_state_fingerprint",
+            "determinism_mjx_substep_acceleration_state_fingerprint",
+            "determinism_mjx_substep_constraint_force_fingerprint",
+            "determinism_mjx_substep_contact_state_fingerprint",
         ):
             fingerprint = next_state.info[name]
             self.assertEqual(fingerprint.shape, (4,))

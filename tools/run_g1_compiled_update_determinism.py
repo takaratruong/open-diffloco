@@ -50,6 +50,13 @@ BOUNDARIES = (
     "critic",
 )
 
+FIRST_MJX_SUBSTEP_COMPONENTS = (
+    "integrated_state",
+    "acceleration_state",
+    "constraint_force",
+    "contact_state",
+)
+
 
 def _write_json_atomically(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -108,10 +115,13 @@ def classify_probe(report: dict[str, object]) -> dict[str, object]:
     else:
         raise ValueError("probe report has no classifiable exactness result")
     return {
-        "protocol": "g1-compiled-update-determinism-selection-v3",
+        "protocol": "g1-compiled-update-determinism-selection-v4",
         "outcome": outcome,
         "scientific_valid": True,
         "first_mismatch_boundary": first_mismatch,
+        "mismatching_first_mjx_substep_components": report.get(
+            "mismatching_first_mjx_substep_components", []
+        ),
         "full_state_exact": report.get("full_state_exact"),
         "metrics_exact": report.get("metrics_exact"),
         "policy_retained": False,
@@ -188,7 +198,7 @@ def validate_preflight(
         raise ValueError("; ".join(errors))
     return {
         "valid": True,
-        "protocol": "g1-compiled-update-determinism-preflight-v3",
+        "protocol": "g1-compiled-update-determinism-preflight-v4",
         "authoritative_entrypoint": (
             "python -m tools.run_g1_compiled_update_determinism"
         ),
@@ -206,6 +216,9 @@ def validate_preflight(
         "model": str(MODEL_PATH),
         "model_sha256": EXPECTED_MODEL_SHA256,
         "boundaries": list(BOUNDARIES),
+        "first_mjx_substep_components": list(
+            FIRST_MJX_SUBSTEP_COMPONENTS
+        ),
     }
 
 
@@ -221,7 +234,7 @@ def validate_probe_artifacts(
     hparams_path = run_directory / "hparams.json"
     hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
     errors = []
-    if report.get("protocol") != "shac-compiled-update-determinism-v3":
+    if report.get("protocol") != "shac-compiled-update-determinism-v4":
         errors.append("probe protocol mismatch")
     if report.get("input_step") != SOURCE_STEP:
         errors.append("probe input step mismatch")
@@ -257,6 +270,37 @@ def validate_probe_artifacts(
     )
     if report.get("first_mismatch_boundary") != expected_first_mismatch:
         errors.append("first mismatch localization is inconsistent")
+    component_reports = report.get("first_mjx_substep_components")
+    if not isinstance(component_reports, dict) or set(component_reports) != set(
+        FIRST_MJX_SUBSTEP_COMPONENTS
+    ):
+        errors.append("first MJX substep component set mismatch")
+        component_reports = {}
+    component_exactness = []
+    for name in FIRST_MJX_SUBSTEP_COMPONENTS:
+        component = component_reports.get(name)
+        if (
+            not isinstance(component, dict)
+            or not isinstance(component.get("first"), list)
+            or len(component["first"]) != 4
+            or not isinstance(component.get("second"), list)
+            or len(component["second"]) != 4
+            or not isinstance(component.get("exact"), bool)
+        ):
+            errors.append(f"{name} first MJX substep component is invalid")
+        else:
+            component_exactness.append(component["exact"])
+    expected_component_mismatches = [
+        name
+        for name in FIRST_MJX_SUBSTEP_COMPONENTS
+        if component_reports.get(name, {}).get("exact") is False
+    ]
+    if report.get("mismatching_first_mjx_substep_components") != (
+        expected_component_mismatches
+    ):
+        errors.append(
+            "first MJX substep component mismatch list is inconsistent"
+        )
     if not isinstance(report.get("full_state_exact"), bool):
         errors.append("full state exactness is missing")
     if not isinstance(report.get("metrics_exact"), bool):
@@ -264,6 +308,8 @@ def validate_probe_artifacts(
     expected_valid = (
         len(exactness) == len(BOUNDARIES)
         and all(exactness)
+        and len(component_exactness) == len(FIRST_MJX_SUBSTEP_COMPONENTS)
+        and all(component_exactness)
         and report.get("full_state_exact") is True
         and report.get("metrics_exact") is True
     )
@@ -299,7 +345,7 @@ def validate_probe_artifacts(
         raise ValueError("; ".join(errors))
     return {
         "valid": True,
-        "protocol": "g1-compiled-update-determinism-validation-v3",
+        "protocol": "g1-compiled-update-determinism-validation-v4",
         "report": str(report_path),
         "report_sha256": sha256_file(report_path),
         "run_directory": str(run_directory),
@@ -362,7 +408,7 @@ def run(args: argparse.Namespace) -> int:
         _write_json_atomically(
             output_root / "selection.json",
             {
-                "protocol": "g1-compiled-update-determinism-selection-v3",
+                "protocol": "g1-compiled-update-determinism-selection-v4",
                 "outcome": "invalid-execution",
                 "scientific_valid": False,
                 "reason": f"{type(error).__name__}: {error}",

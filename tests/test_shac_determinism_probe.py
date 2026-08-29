@@ -15,14 +15,30 @@ BOUNDARIES = (
     "critic",
 )
 
+FIRST_MJX_SUBSTEP_COMPONENTS = (
+    "integrated_state",
+    "acceleration_state",
+    "constraint_force",
+    "contact_state",
+)
+
 
 def _metrics(value):
-    return {
+    metrics = {
         f"determinism_{name}_fingerprint": jnp.asarray(
             [value, value + index], dtype=jnp.uint32
         )
         for index, name in enumerate(BOUNDARIES)
     }
+    metrics.update(
+        {
+            f"determinism_first_mjx_substep_{name}_fingerprint": (
+                jnp.asarray([value, value + index], dtype=jnp.uint32)
+            )
+            for index, name in enumerate(FIRST_MJX_SUBSTEP_COMPONENTS)
+        }
+    )
+    return metrics
 
 
 def test_probe_reuses_one_jitted_callable_and_accepts_exact_replay():
@@ -43,6 +59,10 @@ def test_probe_reuses_one_jitted_callable_and_accepts_exact_replay():
     assert report["first_mismatch_boundary"] is None
     assert report["full_state_exact"] is True
     assert report["metrics_exact"] is True
+    assert all(
+        component["exact"]
+        for component in report["first_mjx_substep_components"].values()
+    )
 
 
 def test_probe_reports_the_first_mismatching_boundary():
@@ -65,6 +85,39 @@ def test_probe_reports_the_first_mismatching_boundary():
     assert report["metrics_exact"] is False
 
 
+def test_probe_reports_first_mjx_substep_components_without_causal_ordering():
+    from src.algorithms.shac.algorithm import run_determinism_probe
+
+    class ConstraintChangingStep:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, state):
+            self.calls += 1
+            metrics = _metrics(jnp.asarray(7, dtype=jnp.uint32))
+            if self.calls == 2:
+                metrics["determinism_first_mjx_substep_fingerprint"] += 1
+                metrics[
+                    "determinism_first_mjx_substep_constraint_force_fingerprint"
+                ] += 1
+            return state, metrics
+
+    report = run_determinism_probe(
+        ConstraintChangingStep(), jnp.asarray(0.0)
+    )
+
+    assert report["first_mismatch_boundary"] == "first_mjx_substep"
+    assert report["mismatching_first_mjx_substep_components"] == [
+        "constraint_force"
+    ]
+    assert report["first_mjx_substep_components"]["integrated_state"][
+        "exact"
+    ] is True
+    assert report["first_mjx_substep_components"]["constraint_force"][
+        "exact"
+    ] is False
+
+
 def test_boundary_fingerprint_is_stable_and_change_sensitive():
     from src.algorithms.shac.algorithm import tree_bit_fingerprint
 
@@ -84,6 +137,9 @@ def test_boundary_fingerprint_is_stable_and_change_sensitive():
 
 
 def test_train_probe_runs_after_compile_and_before_the_training_loop():
+    from src.algorithms.shac.algorithm import (
+        FIRST_MJX_SUBSTEP_COMPONENTS as IMPLEMENTED_COMPONENTS,
+    )
     from src.algorithms.shac.algorithm import train
 
     parameters = inspect.signature(train).parameters
@@ -97,6 +153,8 @@ def test_train_probe_runs_after_compile_and_before_the_training_loop():
 
     for name in BOUNDARIES:
         assert f'"determinism_{name}_fingerprint"' in source
+    assert IMPLEMENTED_COMPONENTS == FIRST_MJX_SUBSTEP_COMPONENTS
+    assert "determinism_first_mjx_substep_{name}_fingerprint" in source
 
 
 def test_g1_step_exposes_raw_mjx_probe_boundaries():
@@ -115,3 +173,7 @@ def test_g1_step_exposes_raw_mjx_probe_boundaries():
 
     assert first_mjx_step < first_substep < returned_state
     assert first_mjx_step < control_step < returned_state
+    component = source.index("determinism_mjx_substep_{name}_fingerprint")
+    assert first_mjx_step < component < returned_state
+    for name in FIRST_MJX_SUBSTEP_COMPONENTS:
+        assert f'"{name}"' in source
