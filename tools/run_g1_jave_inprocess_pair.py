@@ -614,6 +614,75 @@ def _render_command(
     ]
 
 
+def _plot_learning_diagnostics(
+    selection: dict[str, object],
+    training_pair: dict[str, object],
+    output: Path,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    records = selection["checkpoints"]
+    steps = [record["checkpoint_step"] for record in records]
+    figure, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    for phase_index, phase in enumerate(PHASES):
+        axes[0].plot(
+            steps,
+            [record["control_survival"][phase_index] for record in records],
+            linestyle="--",
+            marker="o",
+            linewidth=1.0,
+            label=f"control p{phase}",
+        )
+        axes[0].plot(
+            steps,
+            [record["treatment_survival"][phase_index] for record in records],
+            marker="o",
+            linewidth=1.5,
+            label=f"JAVE p{phase}",
+        )
+    axes[0].set_title("Replay-free phase survival")
+    axes[0].set_xlabel("transition step")
+    axes[0].set_ylabel("transitions survived")
+    axes[0].legend(fontsize=6, ncol=2)
+
+    for arm, color in (("control_a", "tab:blue"), ("jave", "tab:orange")):
+        run_directory = Path(training_pair["arms"][arm]["run_directory"])
+        telemetry = json.loads(
+            (run_directory / "checkpoint_phase_metrics.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        axes[1].plot(
+            [row["step"] for row in telemetry],
+            [row["jave_ldm_loss"] for row in telemetry],
+            color=color,
+            marker="o",
+            label=f"{arm} LDM",
+        )
+        axes[1].plot(
+            [row["step"] for row in telemetry],
+            [row["jave_vg_loss"] for row in telemetry],
+            color=color,
+            linestyle="--",
+            marker="x",
+            label=f"{arm} gradient-Bellman",
+        )
+    axes[1].set_title("JAVE auxiliary losses")
+    axes[1].set_xlabel("transition step")
+    axes[1].set_ylabel("loss")
+    axes[1].set_yscale("symlog", linthresh=0.1)
+    axes[1].legend(fontsize=7)
+    figure.tight_layout()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(f".{output.name}.tmp.png")
+    figure.savefig(temporary, dpi=160)
+    plt.close(figure)
+    os.replace(temporary, output)
+
+
 def _run_parent(args: argparse.Namespace) -> int:
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -732,6 +801,12 @@ def _run_parent(args: argparse.Namespace) -> int:
         training_pair_sha256=sha256_file(training_pair_path),
         evaluation_artifacts=evaluation_artifacts,
     )
+    diagnostics_path = output_root / "learning_diagnostics.png"
+    _plot_learning_diagnostics(selection, training_pair, diagnostics_path)
+    selection["learning_diagnostics"] = {
+        "path": str(diagnostics_path),
+        "sha256": sha256_file(diagnostics_path),
+    }
     diagnostic_step = int(selection["diagnostic_step"])
     render_artifacts = []
     for arm in ("control_a", "jave"):
