@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import linprog
 
-import analyze_g1_contact_impulse_realizability as realizability
+from tools import analyze_g1_contact_impulse_realizability as realizability
 
 
 PROTOCOL_VERSION = "g1-contact-impulse-projection-v1"
