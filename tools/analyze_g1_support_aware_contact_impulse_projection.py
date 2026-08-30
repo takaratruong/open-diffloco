@@ -133,7 +133,7 @@ def _bilateral_comparison(
                     np.min(selected_increment)
                 ),
                 "unchanged_from_bilateral_count": int(
-                    np.count_nonzero(correction_norm[selection] <= 1e-10)
+                    np.count_nonzero(correction_norm <= 1e-10)
                 ),
                 "linear_correction_rms_newton_seconds": realizability.rms_norm(
                     selected_correction[:, :3]
