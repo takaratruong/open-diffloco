@@ -374,8 +374,13 @@ def friction_pyramid_feasible(
         inequality[row + 3, column + 1] = -1.0
         inequality[row + 3, column + 2] = -friction_coefficient
         bounds.extend(((None, None), (None, None), (0.0, None)))
+    # A zero objective can make HiGHS 1.17 report an infeasible primal as
+    # model_status Unknown.  Total normal impulse is fixed by the force-z
+    # equality, so this objective changes no feasible set while producing a
+    # categorical feasible/infeasible status.
+    objective = np.tile(np.asarray((0.0, 0.0, 1.0)), point_count)
     result = linprog(
-        np.zeros(3 * point_count),
+        objective,
         A_ub=inequality,
         b_ub=np.zeros(4 * point_count),
         A_eq=matrix,
