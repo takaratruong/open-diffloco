@@ -386,7 +386,7 @@ def friction_pyramid_feasible(
         A_eq=matrix,
         b_eq=np.asarray(target, dtype=np.float64),
         bounds=bounds,
-        method="highs",
+        method="highs-ipm",
     )
     if result.status not in (0, 2):
         raise ValueError(
