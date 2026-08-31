@@ -82,3 +82,36 @@ def test_support_aware_selector_requires_componentwise_safe_gain() -> None:
             candidate_survival=[137, 144, 84, 90, 79],
             checkpoint_sha256="c" * 64,
         )
+
+
+def test_support_target_gate_rejects_incomplete_candidate_without_comparing_losses() -> None:
+    from tools.run_g1_support_aware_impulse_continuation import (
+        annotate_target_metric_coverage,
+        classify_target_reachability,
+    )
+
+    source = annotate_target_metric_coverage(
+        {
+            "primary": {"loss": 0.0040, "valid_window_count": 125},
+            "heldout": {"loss": 0.0041, "valid_window_count": 125},
+        }
+    )
+    candidate = annotate_target_metric_coverage(
+        {
+            "primary": {"loss": 0.0027, "valid_window_count": 99},
+            "heldout": {"loss": 0.0028, "valid_window_count": 99},
+        }
+    )
+
+    assert source["complete_window_coverage"] is True
+    assert candidate["complete_window_coverage"] is False
+    gate = classify_target_reachability(source=source, candidate=candidate)
+    assert gate == {
+        "target_reached": False,
+        "target_gate_reason": "candidate-incomplete-window-coverage",
+        "expected_target_window_count": 125,
+        "source_complete_window_coverage": True,
+        "candidate_complete_window_coverage": False,
+        "primary_target_loss_relative_improvement": None,
+        "heldout_target_loss_relative_improvement": None,
+    }

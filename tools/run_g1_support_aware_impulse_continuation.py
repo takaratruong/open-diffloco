@@ -55,6 +55,7 @@ SUPPORT_COMPONENT_SCALES = np.asarray(
     dtype=np.float64,
 )
 TARGET_LOSS_RELATIVE_IMPROVEMENT = 0.01
+EXPECTED_TARGET_WINDOW_COUNT = 125
 
 
 def expected_checkpoint_steps() -> tuple[int, ...]:
@@ -141,6 +142,102 @@ def classify_candidate(
             else "support-aware-joint-treatment-insufficient"
         ),
         "policy_retained": preserves and improves,
+    }
+
+
+def annotate_target_metric_coverage(
+    metrics: dict[str, object],
+) -> dict[str, object]:
+    """Record whether one rollout covers the complete registered target."""
+    counts = []
+    for replica in ("primary", "heldout"):
+        replica_metrics = metrics.get(replica)
+        if not isinstance(replica_metrics, dict):
+            raise ValueError("support-aware target metrics are invalid")
+        count = replica_metrics.get("valid_window_count")
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 0
+            or count > EXPECTED_TARGET_WINDOW_COUNT
+        ):
+            raise ValueError("support-aware target window count is invalid")
+        counts.append(count)
+    if counts[0] != counts[1]:
+        raise ValueError("support-aware target replicas cover different windows")
+    return {
+        **metrics,
+        "expected_window_count": EXPECTED_TARGET_WINDOW_COUNT,
+        "complete_window_coverage": counts[0] == EXPECTED_TARGET_WINDOW_COUNT,
+    }
+
+
+def classify_target_reachability(
+    *,
+    source: dict[str, object],
+    candidate: dict[str, object],
+) -> dict[str, object]:
+    """Apply the registered all-window, both-replica target-loss gate."""
+    source_complete = source.get("complete_window_coverage") is True
+    candidate_complete = candidate.get("complete_window_coverage") is True
+    if not source_complete:
+        raise ValueError("source support-aware evaluation lacks all 125 windows")
+    common = {
+        "expected_target_window_count": EXPECTED_TARGET_WINDOW_COUNT,
+        "source_complete_window_coverage": source_complete,
+        "candidate_complete_window_coverage": candidate_complete,
+    }
+    if not candidate_complete:
+        return {
+            "target_reached": False,
+            "target_gate_reason": "candidate-incomplete-window-coverage",
+            **common,
+            "primary_target_loss_relative_improvement": None,
+            "heldout_target_loss_relative_improvement": None,
+        }
+
+    relative_improvements = {}
+    for replica in ("primary", "heldout"):
+        source_replica = source.get(replica)
+        candidate_replica = candidate.get(replica)
+        if not isinstance(source_replica, dict) or not isinstance(
+            candidate_replica, dict
+        ):
+            raise ValueError("support-aware target metrics are invalid")
+        source_loss = source_replica.get("loss")
+        candidate_loss = candidate_replica.get("loss")
+        if (
+            isinstance(source_loss, bool)
+            or isinstance(candidate_loss, bool)
+            or not isinstance(source_loss, (int, float))
+            or not isinstance(candidate_loss, (int, float))
+            or not math.isfinite(float(source_loss))
+            or not math.isfinite(float(candidate_loss))
+            or float(source_loss) <= 0.0
+            or float(candidate_loss) < 0.0
+        ):
+            raise ValueError("support-aware target losses are invalid")
+        relative_improvements[replica] = (
+            float(source_loss) - float(candidate_loss)
+        ) / float(source_loss)
+    target_reached = all(
+        value >= TARGET_LOSS_RELATIVE_IMPROVEMENT
+        for value in relative_improvements.values()
+    )
+    return {
+        "target_reached": target_reached,
+        "target_gate_reason": (
+            "both-target-losses-improve"
+            if target_reached
+            else "target-loss-improvement-below-floor"
+        ),
+        **common,
+        "primary_target_loss_relative_improvement": relative_improvements[
+            "primary"
+        ],
+        "heldout_target_loss_relative_improvement": relative_improvements[
+            "heldout"
+        ],
     }
 
 
@@ -393,18 +490,13 @@ def support_target_metrics(
             "component_rms": component_rms.tolist(),
         }
 
-    output = {
+    output = annotate_target_metric_coverage({
         "protocol": "g1-support-aware-evaluation-v1",
         "evaluation_npz": str(evaluation_npz.resolve()),
         "evaluation_npz_sha256": sha256_file(evaluation_npz),
         "primary": summarize(primary),
         "heldout": summarize(heldout),
-    }
-    if (
-        output["primary"]["valid_window_count"] != 125
-        or output["heldout"]["valid_window_count"] != 125
-    ):
-        raise ValueError("support-aware phase-zero evaluation lacks all 125 windows")
+    })
     return output
 
 
@@ -520,16 +612,11 @@ def evaluate_and_select(
             "contact_sheet_sha256": sha256_file(output / "contact_sheet.png"),
         }
 
-    source_primary = previews["source_e002"]["target_metrics"]["primary"]["loss"]
-    source_heldout = previews["source_e002"]["target_metrics"]["heldout"]["loss"]
-    candidate_primary = previews["candidate"]["target_metrics"]["primary"]["loss"]
-    candidate_heldout = previews["candidate"]["target_metrics"]["heldout"]["loss"]
-    primary_relative = (source_primary - candidate_primary) / source_primary
-    heldout_relative = (source_heldout - candidate_heldout) / source_heldout
-    target_reached = (
-        primary_relative >= TARGET_LOSS_RELATIVE_IMPROVEMENT
-        and heldout_relative >= TARGET_LOSS_RELATIVE_IMPROVEMENT
+    target_gate = classify_target_reachability(
+        source=previews["source_e002"]["target_metrics"],
+        candidate=previews["candidate"]["target_metrics"],
     )
+    target_reached = bool(target_gate["target_reached"])
     behavior_safe = bool(selection["policy_retained"])
     if behavior_safe and target_reached:
         final_outcome = "support-aware-joint-treatment-advances"
@@ -549,10 +636,8 @@ def evaluate_and_select(
     selection.update(
         outcome=final_outcome,
         policy_retained=policy_retained,
-        target_reached=target_reached,
+        **target_gate,
         target_loss_relative_improvement_floor=(TARGET_LOSS_RELATIVE_IMPROVEMENT),
-        primary_target_loss_relative_improvement=primary_relative,
-        heldout_target_loss_relative_improvement=heldout_relative,
         source_target_metrics=previews["source_e002"]["target_metrics"],
         candidate_target_metrics=previews["candidate"]["target_metrics"],
         source_preview=previews["source_e002"],
