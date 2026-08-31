@@ -24,6 +24,16 @@ def test_centroidal_and_frozen_controller_flags_are_default_off() -> None:
         parameters["allow_resume_actor_centroidal_propulsion_start"].default
         is False
     )
+    assert parameters["actor_support_aware_impulse"].default is False
+    assert parameters["actor_support_aware_impulse_path"].default is None
+    assert parameters["actor_support_aware_impulse_sha256"].default is None
+    assert parameters["actor_support_aware_impulse_window"].default == 4
+    assert parameters["actor_support_aware_impulse_delta"].default == 0.1
+    assert parameters["actor_support_aware_impulse_weight"].default == 1.0
+    assert (
+        parameters["allow_resume_actor_support_aware_impulse_start"].default
+        is False
+    )
     assert parameters["actor_capture_point_tracking"].default is False
     assert parameters["actor_capture_point_delta"].default == 0.1
     assert parameters["actor_capture_point_weight"].default == 1.0
@@ -124,6 +134,37 @@ def test_centroidal_upgrade_requires_exact_registered_settings() -> None:
     ) == (True, 4, 0.1, 1.0, True)
 
 
+def test_support_aware_upgrade_requires_hash_and_explicit_authority() -> None:
+    from src.algorithms.shac.algorithm import (
+        resolve_support_aware_impulse_resume_settings,
+    )
+
+    legacy = {"actor_support_aware_impulse": False}
+    kwargs = {
+        "resumed_hparams": legacy,
+        "requested_enabled": True,
+        "requested_path": "/tmp/support.npz",
+        "requested_sha256": "a" * 64,
+        "requested_window": 4,
+        "requested_delta": 0.1,
+        "requested_weight": 1.0,
+        "is_resume": True,
+    }
+    with pytest.raises(ValueError, match="explicit authority"):
+        resolve_support_aware_impulse_resume_settings(**kwargs, allow_start=False)
+    assert resolve_support_aware_impulse_resume_settings(
+        **kwargs, allow_start=True
+    ) == (
+        True,
+        "/tmp/support.npz",
+        "a" * 64,
+        4,
+        0.1,
+        1.0,
+        True,
+    )
+
+
 def test_train_wires_nested_controller_and_window_objective() -> None:
     from src.algorithms.shac.algorithm import train
 
@@ -135,6 +176,10 @@ def test_train_wires_nested_controller_and_window_objective() -> None:
     assert "centroidal_window_objective(" in source
     assert '"actor_centroidal_propulsion"' in source
     assert '"actor_centroidal_valid_window_count"' in source
+    assert "load_support_aware_impulse_target(" in source
+    assert "support_aware_impulse_objective(" in source
+    assert '"actor_support_aware_impulse_loss"' in source
+    assert '"actor_support_aware_impulse_heldout_loss"' in source
     assert "mjx_capture_point(" in source
     assert "capture_point_objective(" in source
     assert "final_capture_point = mjx_capture_point(" in source
@@ -173,6 +218,44 @@ def test_centroidal_treatment_rejects_assistance_and_unfrozen_parent() -> None:
             validate_centroidal_propulsion_configuration(
                 **{**valid, **change}
             )
+
+
+def test_support_aware_treatment_requires_exact_zero_wrench_depth_two() -> None:
+    from src.algorithms.shac.algorithm import (
+        validate_support_aware_impulse_configuration,
+    )
+
+    valid = {
+        "enabled": True,
+        "path": "/tmp/support.npz",
+        "sha256": "a" * 64,
+        "window": 4,
+        "delta": 0.1,
+        "weight": 1.0,
+        "frozen_controller_residual": True,
+        "frozen_controller_residual_depth": 2,
+        "actor_residual_preview_adapter": True,
+        "torso_wrench_assistance": False,
+        "actor_learned_torso_wrench": False,
+        "actor_counterfactual_wrench_distillation": False,
+        "actor_centroidal_propulsion": False,
+        "actor_capture_point_tracking": False,
+        "actor_cagrad": True,
+        "actor_phase_bin_count": 5,
+        "gradient_accumulation_steps": 2,
+        "unroll_length": 24,
+        "env_variant": "g1_tracking_rmr50_shac",
+    }
+    validate_support_aware_impulse_configuration(**valid)
+    for change in (
+        {"frozen_controller_residual_depth": 1},
+        {"torso_wrench_assistance": True},
+        {"actor_learned_torso_wrench": True},
+        {"actor_centroidal_propulsion": True},
+        {"actor_cagrad": False},
+    ):
+        with pytest.raises(ValueError):
+            validate_support_aware_impulse_configuration(**{**valid, **change})
 
 
 def test_capture_point_upgrade_requires_explicit_resume_authority() -> None:

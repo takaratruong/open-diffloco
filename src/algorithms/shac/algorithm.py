@@ -113,6 +113,8 @@ from src.algorithms.shac.future_reference_migration import (
 )
 from src.algorithms.shac.centroidal_objective import (
     centroidal_window_objective,
+    load_support_aware_impulse_target,
+    support_aware_impulse_objective,
 )
 from src.algorithms.shac.frozen_controller_residual import (
     FrozenControllerResidualOptState,
@@ -1413,6 +1415,80 @@ def resolve_centroidal_propulsion_resume_settings(
     return requested_enabled, 4, 0.1, 1.0, upgrade
 
 
+def resolve_support_aware_impulse_resume_settings(
+    resumed_hparams: dict[str, object] | None,
+    *,
+    requested_enabled: bool,
+    requested_path: str | None,
+    requested_sha256: str | None,
+    requested_window: int,
+    requested_delta: float,
+    requested_weight: float,
+    allow_start: bool,
+    is_resume: bool,
+) -> tuple[bool, str | None, str | None, int, float, float, bool]:
+    """Resolve one hash-bound support-aware impulse treatment."""
+    if not all(
+        isinstance(value, bool) for value in (requested_enabled, allow_start, is_resume)
+    ):
+        raise ValueError("support-aware impulse settings must be boolean")
+    if (requested_window, requested_delta, requested_weight) != (4, 0.1, 1.0):
+        raise ValueError("support-aware impulse settings must match the registry")
+    if requested_enabled:
+        if (
+            not isinstance(requested_path, str)
+            or not requested_path
+            or not isinstance(requested_sha256, str)
+            or len(requested_sha256) != 64
+            or any(
+                character not in "0123456789abcdef" for character in requested_sha256
+            )
+        ):
+            raise ValueError("support-aware impulse target identity is invalid")
+    elif requested_path is not None or requested_sha256 is not None:
+        raise ValueError("disabled support-aware impulse cannot carry a target")
+    if not is_resume:
+        if requested_enabled:
+            raise ValueError("support-aware impulse requires an E002 resume")
+        return False, None, None, 4, 0.1, 1.0, False
+    if resumed_hparams is None:
+        raise ValueError("support-aware impulse resume metadata is required")
+    saved = resumed_hparams.get("actor_support_aware_impulse", False)
+    if not isinstance(saved, bool):
+        raise ValueError("saved support-aware impulse setting is invalid")
+    upgrade = bool(requested_enabled and not saved)
+    if upgrade and not allow_start:
+        raise ValueError("support-aware impulse requires explicit authority")
+    if saved != requested_enabled and not upgrade:
+        raise ValueError("support-aware impulse must match the checkpoint")
+    if saved:
+        saved_contract = (
+            resumed_hparams.get("actor_support_aware_impulse_path"),
+            resumed_hparams.get("actor_support_aware_impulse_sha256"),
+            resumed_hparams.get("actor_support_aware_impulse_window"),
+            resumed_hparams.get("actor_support_aware_impulse_delta"),
+            resumed_hparams.get("actor_support_aware_impulse_weight"),
+        )
+        requested_contract = (
+            requested_path,
+            requested_sha256,
+            4,
+            0.1,
+            1.0,
+        )
+        if saved_contract != requested_contract:
+            raise ValueError("support-aware impulse target must match checkpoint")
+    return (
+        requested_enabled,
+        requested_path,
+        requested_sha256,
+        4,
+        0.1,
+        1.0,
+        upgrade,
+    )
+
+
 def validate_centroidal_propulsion_configuration(
     *,
     enabled: bool,
@@ -1439,6 +1515,69 @@ def validate_centroidal_propulsion_configuration(
         raise ValueError("centroidal window does not fit the actor horizon")
     if not env_variant.startswith("g1_tracking"):
         raise ValueError("centroidal propulsion requires G1 tracking")
+
+
+def validate_support_aware_impulse_configuration(
+    *,
+    enabled: bool,
+    path: str | None,
+    sha256: str | None,
+    window: int,
+    delta: float,
+    weight: float,
+    frozen_controller_residual: bool,
+    frozen_controller_residual_depth: int,
+    actor_residual_preview_adapter: bool,
+    torso_wrench_assistance: bool,
+    actor_learned_torso_wrench: bool,
+    actor_counterfactual_wrench_distillation: bool,
+    actor_centroidal_propulsion: bool,
+    actor_capture_point_tracking: bool,
+    actor_cagrad: bool,
+    actor_phase_bin_count: int,
+    gradient_accumulation_steps: int,
+    unroll_length: int,
+    env_variant: str,
+) -> None:
+    """Fail closed around the registered support-target joint treatment."""
+    if not enabled:
+        if path is not None or sha256 is not None:
+            raise ValueError("disabled support-aware treatment has a target")
+        return
+    if (window, delta, weight) != (4, 0.1, 1.0):
+        raise ValueError("support-aware impulse contract is not registered")
+    if (
+        not isinstance(path, str)
+        or not path
+        or not isinstance(sha256, str)
+        or len(sha256) != 64
+    ):
+        raise ValueError("support-aware impulse target identity is required")
+    if (
+        not frozen_controller_residual
+        or frozen_controller_residual_depth != 2
+        or not actor_residual_preview_adapter
+    ):
+        raise ValueError("support-aware impulse requires frozen depth-two E002")
+    if (
+        torso_wrench_assistance
+        or actor_learned_torso_wrench
+        or actor_counterfactual_wrench_distillation
+        or actor_centroidal_propulsion
+        or actor_capture_point_tracking
+    ):
+        raise ValueError(
+            "support-aware impulse requires an exclusive zero-wrench route"
+        )
+    if (
+        not actor_cagrad
+        or actor_phase_bin_count != 5
+        or gradient_accumulation_steps != 2
+        or unroll_length != 24
+    ):
+        raise ValueError("support-aware impulse requires the E002 rollout shape")
+    if not env_variant.startswith("g1_tracking"):
+        raise ValueError("support-aware impulse requires G1 tracking")
 
 
 def resolve_capture_point_tracking_resume_settings(
@@ -2591,6 +2730,13 @@ def train(
     actor_centroidal_delta: float = 0.1,
     actor_centroidal_weight: float = 1.0,
     allow_resume_actor_centroidal_propulsion_start: bool = False,
+    actor_support_aware_impulse: bool = False,
+    actor_support_aware_impulse_path: str | None = None,
+    actor_support_aware_impulse_sha256: str | None = None,
+    actor_support_aware_impulse_window: int = 4,
+    actor_support_aware_impulse_delta: float = 0.1,
+    actor_support_aware_impulse_weight: float = 1.0,
+    allow_resume_actor_support_aware_impulse_start: bool = False,
     actor_capture_point_tracking: bool = False,
     actor_capture_point_delta: float = 0.1,
     actor_capture_point_weight: float = 1.0,
@@ -2950,6 +3096,29 @@ def train(
         unroll_length=unroll_length,
         env_variant=env_variant,
     )
+    validate_support_aware_impulse_configuration(
+        enabled=actor_support_aware_impulse,
+        path=actor_support_aware_impulse_path,
+        sha256=actor_support_aware_impulse_sha256,
+        window=actor_support_aware_impulse_window,
+        delta=actor_support_aware_impulse_delta,
+        weight=actor_support_aware_impulse_weight,
+        frozen_controller_residual=actor_frozen_controller_residual,
+        frozen_controller_residual_depth=actor_frozen_controller_residual_depth,
+        actor_residual_preview_adapter=actor_residual_preview_adapter,
+        torso_wrench_assistance=torso_wrench_assistance,
+        actor_learned_torso_wrench=actor_learned_torso_wrench,
+        actor_counterfactual_wrench_distillation=(
+            actor_counterfactual_wrench_distillation
+        ),
+        actor_centroidal_propulsion=actor_centroidal_propulsion,
+        actor_capture_point_tracking=actor_capture_point_tracking,
+        actor_cagrad=actor_cagrad,
+        actor_phase_bin_count=actor_phase_bin_count,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        unroll_length=unroll_length,
+        env_variant=env_variant,
+    )
     validate_capture_point_tracking_configuration(
         enabled=actor_capture_point_tracking,
         delta=actor_capture_point_delta,
@@ -3263,6 +3432,8 @@ def train(
             raise ValueError(
                 "checkpoint_steps must be increasing actor-update steps ending at total_steps"
             )
+    if actor_support_aware_impulse and resume_from is None:
+        raise ValueError("support-aware impulse requires an E002 resume")
 
     # Handle checkpoint resumption
     resumed_state = None
@@ -3394,6 +3565,25 @@ def train(
             requested_delta=actor_centroidal_delta,
             requested_weight=actor_centroidal_weight,
             allow_start=allow_resume_actor_centroidal_propulsion_start,
+            is_resume=True,
+        )
+        (
+            actor_support_aware_impulse,
+            actor_support_aware_impulse_path,
+            actor_support_aware_impulse_sha256,
+            actor_support_aware_impulse_window,
+            actor_support_aware_impulse_delta,
+            actor_support_aware_impulse_weight,
+            _support_aware_impulse_upgrade,
+        ) = resolve_support_aware_impulse_resume_settings(
+            resumed_hparams,
+            requested_enabled=actor_support_aware_impulse,
+            requested_path=actor_support_aware_impulse_path,
+            requested_sha256=actor_support_aware_impulse_sha256,
+            requested_window=actor_support_aware_impulse_window,
+            requested_delta=actor_support_aware_impulse_delta,
+            requested_weight=actor_support_aware_impulse_weight,
+            allow_start=allow_resume_actor_support_aware_impulse_start,
             is_resume=True,
         )
         (
@@ -3958,6 +4148,37 @@ def train(
     if env_variant.startswith("g1_tracking"):
         max_episode_length = env.reference_transitions
         reference_hparams = reference_hparams_for_env(env)
+    support_aware_target = None
+    support_aware_target_report = None
+    support_aware_gravity_impulse = None
+    if actor_support_aware_impulse:
+        if env.reference_stride != 1:
+            raise ValueError("support-aware impulse requires reference stride one")
+        linear_impulse_scale = (
+            env.nominal_total_mass
+            * env.base_gravity_mag
+            * actor_support_aware_impulse_window
+            * env.dt
+        )
+        expected_component_scales = np.asarray(
+            [linear_impulse_scale] * 3 + [linear_impulse_scale * 0.3] * 3,
+            dtype=np.float64,
+        )
+        support_aware_target, support_aware_target_report = (
+            load_support_aware_impulse_target(
+                actor_support_aware_impulse_path,
+                expected_sha256=actor_support_aware_impulse_sha256,
+                reference_length=env.reference_length,
+                expected_component_scales=expected_component_scales,
+            )
+        )
+        support_aware_gravity_impulse = jp.asarray(
+            env.nominal_total_mass
+            * np.asarray(env.mj_model.opt.gravity, dtype=np.float64)
+            * actor_support_aware_impulse_window
+            * env.dt,
+            dtype=jp.float64,
+        )
     counterfactual_feasibility = None
     counterfactual_teacher_params = None
     counterfactual_target_rms = None
@@ -5164,7 +5385,7 @@ def train(
                         "transition_phase": transition_phase,
                     }
                 )
-            if actor_centroidal_propulsion:
+            if actor_centroidal_propulsion or actor_support_aware_impulse:
                 transition.update(
                     {
                         "centroidal_momentum": mjx_centroidal_momentum(
@@ -5173,16 +5394,18 @@ def train(
                             env.root_body_id,
                             env.nominal_total_mass,
                         ),
-                        "reference_centroidal_momentum": (
-                            env.reference_centroidal_momentum[
-                                state.info["phase"]
-                            ]
-                        ),
+                        "centroidal_phase": state.info["phase"],
                         "root_quaternion": state.data.xquat[
                             env.anchor_body_id
                         ],
                     }
                 )
+                if actor_centroidal_propulsion:
+                    transition["reference_centroidal_momentum"] = (
+                        env.reference_centroidal_momentum[
+                            state.info["phase"]
+                        ]
+                    )
             if actor_capture_point_tracking:
                 transition.update(
                     {
@@ -5268,7 +5491,9 @@ def train(
             info={**final_state.info, "foot_bump_ou": final_foot_bump_ou}
         )
         centroidal_result = None
-        if actor_centroidal_propulsion:
+        support_aware_result = None
+        support_aware_heldout_result = None
+        if actor_centroidal_propulsion or actor_support_aware_impulse:
             final_centroidal = mjx_centroidal_momentum(
                 env.mjx_model,
                 final_state.data,
@@ -5279,19 +5504,20 @@ def train(
                 (traj["centroidal_momentum"], final_centroidal[None]),
                 axis=0,
             )
+            root_quaternion = jp.concatenate(
+                (
+                    traj["root_quaternion"],
+                    final_state.data.xquat[env.anchor_body_id][None],
+                ),
+                axis=0,
+            )
+        if actor_centroidal_propulsion:
             reference_momentum = jp.concatenate(
                 (
                     traj["reference_centroidal_momentum"],
                     env.reference_centroidal_momentum[
                         final_state.info["phase"]
                     ][None],
-                ),
-                axis=0,
-            )
-            root_quaternion = jp.concatenate(
-                (
-                    traj["root_quaternion"],
-                    final_state.data.xquat[env.anchor_body_id][None],
                 ),
                 axis=0,
             )
@@ -5330,6 +5556,77 @@ def train(
                     centroidal_result.p99_forward_abs
                 ),
                 "actor_centroidal_component_rms": component_rms,
+            }
+        if actor_support_aware_impulse:
+            support_aware_result = support_aware_impulse_objective(
+                actual_momentum,
+                root_quaternion,
+                traj["centroidal_phase"],
+                support_aware_target.primary_by_phase,
+                support_aware_target.phase_valid,
+                done=traj["done"],
+                active=traj["ahac_active"],
+                gravity_impulse=support_aware_gravity_impulse,
+                component_scales=support_aware_target.component_scales,
+                window=actor_support_aware_impulse_window,
+                reference_stride=env.reference_stride,
+                delta=actor_support_aware_impulse_delta,
+            )
+            support_aware_heldout_result = support_aware_impulse_objective(
+                actual_momentum,
+                root_quaternion,
+                traj["centroidal_phase"],
+                support_aware_target.duplicate_by_phase,
+                support_aware_target.phase_valid,
+                done=traj["done"],
+                active=traj["ahac_active"],
+                gravity_impulse=support_aware_gravity_impulse,
+                component_scales=support_aware_target.component_scales,
+                window=actor_support_aware_impulse_window,
+                reference_stride=env.reference_stride,
+                delta=actor_support_aware_impulse_delta,
+            )
+            valid_denominator = jp.maximum(
+                support_aware_result.valid_count, 1
+            ).astype(support_aware_result.error.dtype)
+            primary_component_rms = jp.sqrt(
+                jp.sum(
+                    jp.where(
+                        support_aware_result.valid[:, None],
+                        jp.square(support_aware_result.normalized_error),
+                        0.0,
+                    ),
+                    axis=0,
+                )
+                / valid_denominator
+            )
+            heldout_component_rms = jp.sqrt(
+                jp.sum(
+                    jp.where(
+                        support_aware_heldout_result.valid[:, None],
+                        jp.square(support_aware_heldout_result.normalized_error),
+                        0.0,
+                    ),
+                    axis=0,
+                )
+                / valid_denominator
+            )
+            traj = {
+                **traj,
+                "actor_support_aware_impulse_loss": (support_aware_result.loss),
+                "actor_support_aware_impulse_heldout_loss": (
+                    support_aware_heldout_result.loss
+                ),
+                "actor_support_aware_impulse_valid_window_count": (
+                    support_aware_result.valid_count
+                ),
+                "actor_support_aware_impulse_p99_forward_abs": (
+                    support_aware_result.p99_forward_abs
+                ),
+                "actor_support_aware_impulse_component_rms": (primary_component_rms),
+                "actor_support_aware_impulse_heldout_component_rms": (
+                    heldout_component_rms
+                ),
             }
         capture_point_result = None
         if actor_capture_point_tracking:
@@ -5480,6 +5777,11 @@ def train(
             actor_objective = (
                 actor_objective
                 + actor_centroidal_weight * centroidal_result.loss
+            )
+        if support_aware_result is not None:
+            actor_objective = (
+                actor_objective
+                + actor_support_aware_impulse_weight * support_aware_result.loss
             )
         if capture_point_result is not None:
             actor_objective = (
@@ -7242,6 +7544,43 @@ def train(
                     ),
                 }
             )
+        if actor_support_aware_impulse:
+            metrics.update(
+                {
+                    "actor_support_aware_impulse_loss": jp.mean(
+                        trajs["actor_support_aware_impulse_loss"]
+                    ),
+                    "actor_support_aware_impulse_heldout_loss": jp.mean(
+                        trajs["actor_support_aware_impulse_heldout_loss"]
+                    ),
+                    "actor_support_aware_impulse_valid_window_count": jp.sum(
+                        trajs["actor_support_aware_impulse_valid_window_count"]
+                    ),
+                    "actor_support_aware_impulse_p99_forward_abs": jp.max(
+                        trajs["actor_support_aware_impulse_p99_forward_abs"]
+                    ),
+                    "actor_support_aware_impulse_component_rms": jp.sqrt(
+                        jp.mean(
+                            jp.square(
+                                trajs["actor_support_aware_impulse_component_rms"]
+                            ),
+                            axis=0,
+                        )
+                    ),
+                    "actor_support_aware_impulse_heldout_component_rms": (
+                        jp.sqrt(
+                            jp.mean(
+                                jp.square(
+                                    trajs[
+                                        "actor_support_aware_impulse_heldout_component_rms"
+                                    ]
+                                ),
+                                axis=0,
+                            )
+                        )
+                    ),
+                }
+            )
         if actor_capture_point_tracking:
             metrics.update(
                 {
@@ -8140,6 +8479,17 @@ def train(
         "actor_centroidal_window": actor_centroidal_window,
         "actor_centroidal_delta": actor_centroidal_delta,
         "actor_centroidal_weight": actor_centroidal_weight,
+        "actor_support_aware_impulse": actor_support_aware_impulse,
+        "actor_support_aware_impulse_path": (
+            str(Path(actor_support_aware_impulse_path).resolve())
+            if actor_support_aware_impulse_path is not None
+            else None
+        ),
+        "actor_support_aware_impulse_sha256": (actor_support_aware_impulse_sha256),
+        "actor_support_aware_impulse_window": (actor_support_aware_impulse_window),
+        "actor_support_aware_impulse_delta": (actor_support_aware_impulse_delta),
+        "actor_support_aware_impulse_weight": (actor_support_aware_impulse_weight),
+        "actor_support_aware_impulse_target_report": (support_aware_target_report),
         "actor_capture_point_tracking": actor_capture_point_tracking,
         "actor_capture_point_delta": actor_capture_point_delta,
         "actor_capture_point_weight": actor_capture_point_weight,
@@ -9093,6 +9443,33 @@ def train(
                             }
                             if residual_muon_treatment
                             else {}
+                        ),
+                    }
+                )
+            if actor_support_aware_impulse:
+                checkpoint_metrics.update(
+                    {
+                        "actor_support_aware_impulse_loss": float(
+                            metrics["actor_support_aware_impulse_loss"]
+                        ),
+                        "actor_support_aware_impulse_heldout_loss": float(
+                            metrics["actor_support_aware_impulse_heldout_loss"]
+                        ),
+                        "actor_support_aware_impulse_valid_window_count": int(
+                            metrics["actor_support_aware_impulse_valid_window_count"]
+                        ),
+                        "actor_support_aware_impulse_p99_forward_abs": float(
+                            metrics["actor_support_aware_impulse_p99_forward_abs"]
+                        ),
+                        "actor_support_aware_impulse_component_rms": np.asarray(
+                            metrics["actor_support_aware_impulse_component_rms"]
+                        ).tolist(),
+                        "actor_support_aware_impulse_heldout_component_rms": (
+                            np.asarray(
+                                metrics[
+                                    "actor_support_aware_impulse_heldout_component_rms"
+                                ]
+                            ).tolist()
                         ),
                     }
                 )
