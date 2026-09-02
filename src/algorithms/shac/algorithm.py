@@ -46,6 +46,11 @@ from src.envs.g1_tracking.demonstration_replay import (
     apply_demonstration_replay,
     resolve_demonstration_replay_resume_setting,
 )
+from src.algorithms.shac.fresh_reference import (
+    fresh_reference_count,
+    refresh_reference_population,
+    resolve_fresh_reference_resume_fraction,
+)
 from src.core.utils import compute_grad_norm, tree_bit_fingerprint
 from src.algorithms.shac.gradients import (
     aggregate_per_env_gradients,
@@ -592,7 +597,13 @@ def persist_checkpoint_phase_metric(
     return path
 
 
-GRADIENT_GROUP_NAMES = ("phase", "support", "terminal")
+GRADIENT_GROUP_NAMES = (
+    "phase",
+    "support",
+    "terminal",
+    "fresh_reference",
+)
+CAGRAD_CHECKPOINT_GRADIENT_GROUP_NAMES = ("phase", "support", "terminal")
 
 
 def gradient_group_metrics(
@@ -710,7 +721,7 @@ def build_checkpoint_cagrad_telemetry(metrics) -> dict[str, object]:
         "actor_cagrad_valid": bool(metrics["actor_cagrad_valid"]),
         **{
             key: value
-            for group in GRADIENT_GROUP_NAMES
+            for group in CAGRAD_CHECKPOINT_GRADIENT_GROUP_NAMES
             for key, value in build_checkpoint_gradient_group_telemetry(
                 metrics, group=group
             ).items()
@@ -2911,6 +2922,8 @@ def train(
     allow_resume_reference_root_reset_noise_change: bool = False,
     demonstration_replay_threshold: float | None = None,
     allow_resume_demonstration_replay_change: bool = False,
+    actor_update_fresh_reference_fraction: float = 0.0,
+    allow_resume_actor_update_fresh_reference_change: bool = False,
     reference_residual_control: bool = False,
     reference_residual_scale: float = 0.5,
     carried_reset_bank_path: str | None = None,
@@ -2995,6 +3008,11 @@ def train(
                                                 root-focused recovery cohort.
         allow_resume_reference_root_reset_noise_change: Explicitly permit a
                                                         resumed reset treatment.
+        actor_update_fresh_reference_fraction: Exact fraction of environments
+                                               reset from random reference phases
+                                               at each actor-update boundary.
+        allow_resume_actor_update_fresh_reference_change: Explicitly permit a
+                                                           resumed coverage change.
         carried_reset_bank_path: Optional NPZ containing rollout qpos/qvel/phase.
         carried_reset_probability: Fraction of resets sampled from that bank.
         carried_reset_bank_start: Leading bank rows excluded from sampling.
@@ -3333,6 +3351,14 @@ def train(
         requested=tracking_root_velocity_weight,
         allow_change=allow_resume_tracking_root_velocity_change,
         is_resume=False,
+    )
+    actor_update_fresh_reference_fraction = (
+        resolve_fresh_reference_resume_fraction(
+            None,
+            is_resume=False,
+            requested=actor_update_fresh_reference_fraction,
+            allow_change=allow_resume_actor_update_fresh_reference_change,
+        )
     )
     if not isinstance(allow_resume_carried_reset_change, bool):
         raise ValueError(
@@ -3777,6 +3803,16 @@ def train(
             requested_probability=reference_root_reset_noise_probability,
             allow_change=allow_resume_reference_root_reset_noise_change,
         )
+        actor_update_fresh_reference_fraction = (
+            resolve_fresh_reference_resume_fraction(
+                resumed_hparams,
+                is_resume=True,
+                requested=actor_update_fresh_reference_fraction,
+                allow_change=(
+                    allow_resume_actor_update_fresh_reference_change
+                ),
+            )
+        )
 
         actor_per_env_grad_clip = (
             resolve_actor_per_env_grad_clip_resume_setting(
@@ -3927,6 +3963,16 @@ def train(
     ):
         raise ValueError(
             "demonstration replay requires a G1 tracking environment"
+        )
+    actor_update_fresh_reference_count = fresh_reference_count(
+        actor_update_fresh_reference_fraction,
+        population_size=effective_num_envs,
+    )
+    if actor_update_fresh_reference_count and not env_variant.startswith(
+        "g1_tracking"
+    ):
+        raise ValueError(
+            "actor-update fresh-reference coverage requires a G1 tracking environment"
         )
     saved_jave_vg_weight = float(
         resumed_hparams.get("jave_vg_weight", 0.0)
@@ -6017,10 +6063,56 @@ def train(
             jp.full((effective_num_envs,), difficulty),
         )
 
-        # Inject per-env difficulty into all non-zeroed-out env states
-        updated_env_state = state.env_state.replace(
-            info={**state.env_state.info, "difficulty": per_env_difficulty}
+        if actor_update_fresh_reference_count:
+            fresh_reference_mask_key = jax.random.fold_in(
+                state.key, 0x46524553
+            )
+            fresh_reference_reset_key = jax.random.fold_in(
+                state.key, 0x52534554
+            )
+            refreshed_env_state, fresh_reference_mask = (
+                refresh_reference_population(
+                    env,
+                    state.env_state,
+                    mask_key=fresh_reference_mask_key,
+                    reset_key=fresh_reference_reset_key,
+                    difficulties=per_env_difficulty,
+                    fraction=actor_update_fresh_reference_fraction,
+                    phase_sampler_failed_count=(
+                        state.env_state.info["phase_sampler_failed_count"]
+                        if adaptive_phase_sampling
+                        else None
+                    ),
+                )
+            )
+        else:
+            refreshed_env_state = state.env_state
+            fresh_reference_mask = jp.zeros(
+                (effective_num_envs,), dtype=jp.bool_
+            )
+
+        # Inject the current difficulty into carried and freshly reset states.
+        updated_env_state = refreshed_env_state.replace(
+            info={
+                **refreshed_env_state.info,
+                "difficulty": per_env_difficulty,
+            }
         )
+        if env_variant.startswith("g1_tracking"):
+            fresh_reference_phase_bins = phase_bin_indices(
+                updated_env_state.info["phase"],
+                phase_count=int(env.reference_transitions),
+                bin_count=actor_phase_bin_count,
+            )
+            fresh_reference_phase_bin_counts = (
+                jp.zeros((actor_phase_bin_count,), dtype=jp.int32)
+                .at[fresh_reference_phase_bins]
+                .add(fresh_reference_mask.astype(jp.int32))
+            )
+        else:
+            fresh_reference_phase_bin_counts = jp.zeros(
+                (actor_phase_bin_count,), dtype=jp.int32
+            )
         if actor_phase_robust_weighting or actor_cagrad:
             actor_start_phases = jax.lax.stop_gradient(
                 updated_env_state.info["phase"]
@@ -6091,6 +6183,16 @@ def train(
                     updated_env_state.info["rng"],
                     zero_diff_mask,
                     per_env_difficulty,
+                    *(
+                        (
+                            fresh_reference_mask_key,
+                            fresh_reference_reset_key,
+                            fresh_reference_mask,
+                            updated_env_state.info["phase"],
+                        )
+                        if actor_update_fresh_reference_count
+                        else ()
+                    ),
                     all_randomization,
                 )
             )
@@ -6196,6 +6298,16 @@ def train(
                     sharded_actor_start_phases,
                     sharded_actor_start_support_modes,
                 )
+                if actor_update_fresh_reference_count:
+                    sharded_fresh_reference_mask = reshape_population(
+                        fresh_reference_mask,
+                        accumulation_steps=gradient_accumulation_steps,
+                        microbatch_size=num_envs,
+                    )
+                    actor_shard_inputs = (
+                        *actor_shard_inputs,
+                        sharded_fresh_reference_mask,
+                    )
             else:
                 actor_shard_inputs = (
                     sharded_env_state,
@@ -6271,6 +6383,16 @@ def train(
                             per_env_max_norm=actor_per_env_grad_clip,
                         ),
                     }
+                    if actor_update_fresh_reference_count:
+                        shard_reduction["fresh_reference"] = (
+                            accumulate_phase_gradients(
+                                shard_per_env_grads,
+                                inputs[4].astype(jp.int32),
+                                phase_count=2,
+                                bin_count=2,
+                                per_env_max_norm=actor_per_env_grad_clip,
+                            )
+                        )
                 else:
                     shard_reduction, shard_grad_stats = (
                         aggregate_env_gradients(
@@ -6330,6 +6452,14 @@ def train(
                         iterations=actor_cagrad_iterations,
                     )
                 )
+                if actor_update_fresh_reference_count:
+                    fresh_reference_gradient_reduction = (
+                        reduce_cagrad_shard_accumulators(
+                            shard_reductions["fresh_reference"],
+                            alpha=actor_cagrad_alpha,
+                            iterations=actor_cagrad_iterations,
+                        )
+                    )
                 grads = cagrad_reduction["result"].combined_gradient
             else:
                 grads = mean_shard_trees(shard_reductions)
@@ -6401,6 +6531,22 @@ def train(
                     group_count=4,
                 )
             )
+            if actor_update_fresh_reference_count:
+                actor_gradient_fresh_reference_distribution = (
+                    grouped_gradient_population_statistics(
+                        group_mean_gradients=(
+                            fresh_reference_gradient_reduction[
+                                "task_gradients"
+                            ]
+                        ),
+                        population_mean_gradient=population_mean_gradient,
+                        effective_norm_by_env=actor_grad_stats[
+                            "effective_norm_by_env"
+                        ],
+                        group_indices=fresh_reference_mask.astype(jp.int32),
+                        group_count=2,
+                    )
+                )
             cagrad_loss_diagnostics = cagrad_phase_loss_diagnostics(
                 losses=losses,
                 phases=actor_start_phases,
@@ -7267,6 +7413,15 @@ def train(
             "demonstration_replay_fraction": jp.mean(
                 trajs["demonstration_replay"]
             ),
+            "actor_update_fresh_reference_count": jp.sum(
+                fresh_reference_mask
+            ),
+            "actor_update_fresh_reference_actual_fraction": jp.mean(
+                fresh_reference_mask
+            ),
+            "actor_update_fresh_reference_phase_bin_counts": (
+                fresh_reference_phase_bin_counts
+            ),
         }
         if jave_enabled:
             metrics.update(
@@ -7592,6 +7747,17 @@ def train(
                         terminal_gradient_reduction[
                             "result"
                         ].cosine_matrix,
+                    ),
+                    **(
+                        gradient_group_metrics(
+                            "fresh_reference",
+                            actor_gradient_fresh_reference_distribution,
+                            fresh_reference_gradient_reduction[
+                                "result"
+                            ].cosine_matrix,
+                        )
+                        if actor_update_fresh_reference_count
+                        else {}
                     ),
                     "actor_cagrad_valid": (
                         cagrad_reduction["valid"]
@@ -8553,6 +8719,15 @@ def train(
         "allow_resume_demonstration_replay_change": (
             allow_resume_demonstration_replay_change
         ),
+        "actor_update_fresh_reference_fraction": (
+            actor_update_fresh_reference_fraction
+        ),
+        "actor_update_fresh_reference_count": (
+            actor_update_fresh_reference_count
+        ),
+        "allow_resume_actor_update_fresh_reference_change": (
+            allow_resume_actor_update_fresh_reference_change
+        ),
         "reference_residual_control": reference_residual_control,
         "reference_residual_scale": reference_residual_scale,
         "carried_reset_bank_path": carried_reset_bank_path,
@@ -9121,6 +9296,21 @@ def train(
                     "contact_topology_event_fraction": float(
                         metrics["contact_topology_event_fraction"]
                     ),
+                    "actor_update_fresh_reference_count": int(
+                        metrics["actor_update_fresh_reference_count"]
+                    ),
+                    "actor_update_fresh_reference_actual_fraction": float(
+                        metrics[
+                            "actor_update_fresh_reference_actual_fraction"
+                        ]
+                    ),
+                    "actor_update_fresh_reference_phase_bin_counts": (
+                        np.asarray(
+                            metrics[
+                                "actor_update_fresh_reference_phase_bin_counts"
+                            ]
+                        ).tolist()
+                    ),
                 }
                 if jave_enabled:
                     diag_entry.update(jave_telemetry)
@@ -9159,6 +9349,12 @@ def train(
                     diag_entry.update(
                         build_checkpoint_cagrad_telemetry(metrics)
                     )
+                    if actor_update_fresh_reference_count:
+                        diag_entry.update(
+                            build_checkpoint_gradient_group_telemetry(
+                                metrics, group="fresh_reference"
+                            )
+                        )
                 if demonstration_replay_threshold is not None:
                     diag_entry.update(
                         build_checkpoint_demonstration_replay_telemetry(
@@ -9489,11 +9685,30 @@ def train(
                 "actor_grad_population_esnr": float(
                     metrics["actor_grad_population_esnr"]
                 ),
+                "actor_update_fresh_reference_count": int(
+                    metrics["actor_update_fresh_reference_count"]
+                ),
+                "actor_update_fresh_reference_actual_fraction": float(
+                    metrics[
+                        "actor_update_fresh_reference_actual_fraction"
+                    ]
+                ),
+                "actor_update_fresh_reference_phase_bin_counts": np.asarray(
+                    metrics[
+                        "actor_update_fresh_reference_phase_bin_counts"
+                    ]
+                ).tolist(),
             }
             if actor_cagrad:
                 checkpoint_metrics.update(
                     build_checkpoint_cagrad_telemetry(metrics)
                 )
+                if actor_update_fresh_reference_count:
+                    checkpoint_metrics.update(
+                        build_checkpoint_gradient_group_telemetry(
+                            metrics, group="fresh_reference"
+                        )
+                    )
             if jave_enabled:
                 checkpoint_metrics.update(jave_telemetry)
             if ahac:
