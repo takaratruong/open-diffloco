@@ -525,25 +525,26 @@ def classify_representations(
     final_test: Mapping[str, Mapping[str, Any]],
     *,
     required_boundaries: Sequence[str] = METRIC_BOUNDARIES,
+    current_only_first: bool = False,
 ) -> str:
     """Classify the frozen final-test metrics without selecting on them."""
 
     if set(final_test) != set(REPRESENTATION_NAMES):
         raise ValueError("representation test arms are incomplete")
-    if representation_adequate(
-        final_test["current_plus_actor_latent"],
-        required_boundaries=required_boundaries,
-    ):
+    adequate = {
+        name: representation_adequate(
+            final_test[name],
+            required_boundaries=required_boundaries,
+        )
+        for name in REPRESENTATION_NAMES
+    }
+    if current_only_first and adequate["current_only"]:
+        return "current-only-refit-adequate"
+    if adequate["current_plus_actor_latent"]:
         return "actor-latent-representation-adequate"
-    if representation_adequate(
-        final_test["current_plus_action"],
-        required_boundaries=required_boundaries,
-    ):
+    if adequate["current_plus_action"]:
         return "policy-action-representation-adequate"
-    if representation_adequate(
-        final_test["current_only"],
-        required_boundaries=required_boundaries,
-    ):
+    if adequate["current_only"]:
         return "current-only-refit-adequate"
     baseline_quality = _quality(
         final_test["current_only"],
@@ -1074,6 +1075,7 @@ def collect_representation_audit(
     classification = classify_representations(
         final_test,
         required_boundaries=required_boundaries,
+        current_only_first=include_h0,
     )
 
     split_code = np.full(row_count, -1, dtype=np.int8)
@@ -1188,6 +1190,19 @@ def collect_representation_audit(
             "required_boundaries": list(required_boundaries),
             "required_gate_count": len(METRIC_GROUPS) * len(required_boundaries),
             "all_required_gates_must_pass": True,
+            "classification_priority": (
+                [
+                    "current_only",
+                    "current_plus_actor_latent",
+                    "current_plus_action",
+                ]
+                if include_h0
+                else [
+                    "current_plus_actor_latent",
+                    "current_plus_action",
+                    "current_only",
+                ]
+            ),
         },
         "interpretation_boundary": (
             "This critic-only paired audit tests held-out scalar return "

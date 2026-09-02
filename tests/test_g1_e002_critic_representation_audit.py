@@ -292,6 +292,17 @@ def test_representation_classification_prioritizes_latent_then_action() -> None:
         )
         == "current-only-refit-adequate"
     )
+    assert (
+        classify_representations(
+            {
+                "current_only": passing,
+                "current_plus_action": passing,
+                "current_plus_actor_latent": passing,
+            },
+            current_only_first=True,
+        )
+        == "current-only-refit-adequate"
+    )
 
 
 def test_representation_classification_distinguishes_improvement_from_no_gain() -> None:
