@@ -47,6 +47,30 @@ class PerEnvironmentGradientAggregationTest(unittest.TestCase):
         self.assertAlmostEqual(float(stats["raw_norm_median"]), 1.0)
         self.assertAlmostEqual(float(stats["raw_norm_max"]), 1_000_000.0)
 
+    def test_statistics_measure_clipped_population_cancellation(self):
+        gradients = {
+            "w": jnp.array(
+                [
+                    [10.0, 0.0],
+                    [-10.0, 0.0],
+                    [0.0, 1.0],
+                    [0.0, 1.0],
+                ]
+            )
+        }
+
+        stats = per_env_gradient_statistics(gradients, max_norm=1.0)
+
+        np.testing.assert_allclose(
+            stats["effective_norm_by_env"], np.ones(4), atol=1e-6
+        )
+        self.assertAlmostEqual(float(stats["population_mean_norm"]), 0.5)
+        self.assertAlmostEqual(float(stats["population_rms_norm"]), 1.0)
+        self.assertAlmostEqual(float(stats["population_variance_trace"]), 0.75)
+        self.assertAlmostEqual(float(stats["population_cancellation_ratio"]), 0.5)
+        self.assertAlmostEqual(float(stats["population_gradient_noise_scale"]), 3.0)
+        self.assertAlmostEqual(float(stats["population_esnr"]), 4.0 / 3.0)
+
     def test_nonfinite_rollout_is_removed_as_a_whole(self):
         gradients = {
             "w": jnp.array([[2.0, 0.0], [jnp.nan, 4.0]]),

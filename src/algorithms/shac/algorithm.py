@@ -49,6 +49,7 @@ from src.envs.g1_tracking.demonstration_replay import (
 from src.core.utils import compute_grad_norm, tree_bit_fingerprint
 from src.algorithms.shac.gradients import (
     aggregate_per_env_gradients,
+    gradient_population_statistics,
     per_env_gradient_statistics,
 )
 from src.algorithms.shac.ahac import (
@@ -6135,7 +6136,8 @@ def train(
                     )
                 if actor_cagrad:
                     shard_grad_stats = per_env_gradient_statistics(
-                        shard_per_env_grads
+                        shard_per_env_grads,
+                        max_norm=actor_per_env_grad_clip,
                     )
                     shard_reduction = accumulate_phase_gradients(
                         shard_per_env_grads,
@@ -6161,6 +6163,9 @@ def train(
                         ],
                         "raw_norm_by_env": shard_grad_stats[
                             "raw_norm_by_env"
+                        ],
+                        "effective_norm_by_env": shard_grad_stats[
+                            "effective_norm_by_env"
                         ],
                     },
                 )
@@ -6190,6 +6195,26 @@ def train(
             else:
                 grads = mean_shard_trees(shard_reductions)
             actor_grad_stats = summarize_shard_stats(shard_grad_stats)
+
+        if actor_cagrad:
+            population_bin_weights = cagrad_reduction["bin_counts"].astype(
+                jp.float32
+            )
+            population_bin_weights = population_bin_weights / jp.maximum(
+                jp.sum(population_bin_weights), 1.0
+            )
+            population_mean_gradient = jax.tree_util.tree_map(
+                lambda leaf: jp.tensordot(
+                    population_bin_weights, leaf, axes=1
+                ),
+                cagrad_reduction["task_gradients"],
+            )
+        else:
+            population_mean_gradient = grads
+        actor_grad_distribution = gradient_population_statistics(
+            population_mean_gradient,
+            actor_grad_stats["effective_norm_by_env"],
+        )
 
         if actor_cagrad:
             cagrad_loss_diagnostics = cagrad_phase_loss_diagnostics(
@@ -6996,6 +7021,24 @@ def train(
             "actor_grad_finite_fraction": actor_grad_stats["finite_fraction"],
             "actor_grad_raw_median": actor_grad_stats["raw_norm_median"],
             "actor_grad_raw_max": actor_grad_stats["raw_norm_max"],
+            "actor_grad_population_mean_norm": actor_grad_distribution[
+                "population_mean_norm"
+            ],
+            "actor_grad_population_rms_norm": actor_grad_distribution[
+                "population_rms_norm"
+            ],
+            "actor_grad_population_variance_trace": actor_grad_distribution[
+                "population_variance_trace"
+            ],
+            "actor_grad_population_cancellation_ratio": actor_grad_distribution[
+                "population_cancellation_ratio"
+            ],
+            "actor_grad_population_noise_scale": actor_grad_distribution[
+                "population_gradient_noise_scale"
+            ],
+            "actor_grad_population_esnr": actor_grad_distribution[
+                "population_esnr"
+            ],
             "critic_loss": critic_update_metrics["loss"][-1],
             "critic_grad_finite_fraction": critic_update_metrics[
                 "finite_fraction"
@@ -8839,6 +8882,26 @@ def train(
                     "actor_grad_finite_fraction": float(
                         metrics["actor_grad_finite_fraction"]
                     ),
+                    "actor_grad_population_mean_norm": float(
+                        metrics["actor_grad_population_mean_norm"]
+                    ),
+                    "actor_grad_population_rms_norm": float(
+                        metrics["actor_grad_population_rms_norm"]
+                    ),
+                    "actor_grad_population_variance_trace": float(
+                        metrics["actor_grad_population_variance_trace"]
+                    ),
+                    "actor_grad_population_cancellation_ratio": float(
+                        metrics[
+                            "actor_grad_population_cancellation_ratio"
+                        ]
+                    ),
+                    "actor_grad_population_noise_scale": float(
+                        metrics["actor_grad_population_noise_scale"]
+                    ),
+                    "actor_grad_population_esnr": float(
+                        metrics["actor_grad_population_esnr"]
+                    ),
                     "critic_loss": float(metrics["critic_loss"]),
                     "critic_grad_raw_median": float(
                         metrics["critic_grad_raw_median"]
@@ -9240,6 +9303,24 @@ def train(
                 "step": int(current_step),
                 "action_noise_current": action_noise_std_hparam(
                     np.asarray(metrics["action_noise_current"])
+                ),
+                "actor_grad_population_mean_norm": float(
+                    metrics["actor_grad_population_mean_norm"]
+                ),
+                "actor_grad_population_rms_norm": float(
+                    metrics["actor_grad_population_rms_norm"]
+                ),
+                "actor_grad_population_variance_trace": float(
+                    metrics["actor_grad_population_variance_trace"]
+                ),
+                "actor_grad_population_cancellation_ratio": float(
+                    metrics["actor_grad_population_cancellation_ratio"]
+                ),
+                "actor_grad_population_noise_scale": float(
+                    metrics["actor_grad_population_noise_scale"]
+                ),
+                "actor_grad_population_esnr": float(
+                    metrics["actor_grad_population_esnr"]
                 ),
             }
             if actor_cagrad:

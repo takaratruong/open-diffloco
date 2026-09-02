@@ -67,12 +67,22 @@ def summarize_shard_stats(shard_stats: dict[str, jax.Array]) -> dict[str, jax.Ar
     """Reduces per-shard gradient diagnostics over the full population."""
     finite_by_env = shard_stats["finite_by_env"].reshape(-1)
     raw_norm_by_env = shard_stats["raw_norm_by_env"].reshape(-1)
-    if finite_by_env.shape != raw_norm_by_env.shape:
-        raise ValueError("finite flags and raw norms must share population shape")
+    effective_norm_by_env = shard_stats.get(
+        "effective_norm_by_env", shard_stats["raw_norm_by_env"]
+    ).reshape(-1)
+    if not (
+        finite_by_env.shape
+        == raw_norm_by_env.shape
+        == effective_norm_by_env.shape
+    ):
+        raise ValueError(
+            "finite flags and gradient norms must share population shape"
+        )
     return {
         "finite_fraction": jp.mean(finite_by_env.astype(jp.float32)),
         "raw_norm_median": jp.median(raw_norm_by_env),
         "raw_norm_max": jp.max(raw_norm_by_env),
         "finite_by_env": finite_by_env,
         "raw_norm_by_env": raw_norm_by_env,
+        "effective_norm_by_env": effective_norm_by_env,
     }
