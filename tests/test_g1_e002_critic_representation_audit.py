@@ -44,6 +44,10 @@ def test_actor_history_latent_reconstructs_exact_base_actor_action() -> None:
     )
     params = actor.init(jax.random.PRNGKey(1), observations)
     latent = ActorHistoryLatent(hidden=(5, 4, 2)).apply(params, observations)
+    early_latent = ActorHistoryLatent(hidden=(5, 4, 2), output_index=0).apply(
+        params,
+        observations,
+    )
     reconstructed = reconstruct_base_actor_action(params, latent, squash=True)
 
     np.testing.assert_allclose(
@@ -53,6 +57,7 @@ def test_actor_history_latent_reconstructs_exact_base_actor_action() -> None:
         atol=1e-6,
     )
     assert latent.shape == (7, 2)
+    assert early_latent.shape == (7, 5)
 
 
 def test_unwrap_base_actor_requires_preview_base_and_reports_depth() -> None:
@@ -335,6 +340,45 @@ def test_representation_classification_distinguishes_improvement_from_no_gain() 
     )
 
 
+def test_early_latent_classification_prefers_simplest_then_richer_history() -> None:
+    from experiments.g1_e002_critic_representation_audit.run import (
+        classify_early_latent_representations,
+    )
+
+    passing = _metrics(
+        rank=0.85,
+        nrmse=0.20,
+        boundaries=("aggregate", "h0", "h24"),
+    )
+    failing = _metrics(
+        rank=0.85,
+        nrmse=0.30,
+        boundaries=("aggregate", "h0", "h24"),
+    )
+    arms = {
+        "current_only": failing,
+        "current_plus_action": failing,
+        "current_plus_actor_latent": failing,
+        "current_plus_actor_early_latent": passing,
+    }
+
+    assert (
+        classify_early_latent_representations(
+            arms,
+            required_boundaries=("aggregate", "h0", "h24"),
+        )
+        == "actor-early-latent-representation-adequate"
+    )
+    arms["current_only"] = passing
+    assert (
+        classify_early_latent_representations(
+            arms,
+            required_boundaries=("aggregate", "h0", "h24"),
+        )
+        == "current-only-refit-adequate"
+    )
+
+
 def test_representation_metrics_reject_missing_or_nonfinite_gates() -> None:
     from experiments.g1_e002_critic_representation_audit.run import (
         representation_adequate,
@@ -399,7 +443,10 @@ def test_critic_fit_selects_only_on_validation_and_runs_exact_budget() -> None:
 
 
 def test_parser_makes_h0_an_explicit_opt_in() -> None:
-    from experiments.g1_e002_critic_representation_audit.run import build_parser
+    from experiments.g1_e002_critic_representation_audit.run import (
+        build_parser,
+        validate_representation_options,
+    )
 
     base = [
         "--checkpoint",
@@ -414,5 +461,14 @@ def test_parser_makes_h0_an_explicit_opt_in() -> None:
         "0" * 40,
     ]
 
-    assert build_parser().parse_args(base).include_h0 is False
-    assert build_parser().parse_args([*base, "--include-h0"]).include_h0 is True
+    defaults = build_parser().parse_args(base)
+    assert defaults.include_h0 is False
+    assert defaults.include_early_latent is False
+    enabled = build_parser().parse_args(
+        [*base, "--include-h0", "--include-early-latent"]
+    )
+    assert enabled.include_h0 is True
+    assert enabled.include_early_latent is True
+    validate_representation_options(include_h0=True, include_early_latent=True)
+    with pytest.raises(ValueError, match="requires H0"):
+        validate_representation_options(include_h0=False, include_early_latent=True)
