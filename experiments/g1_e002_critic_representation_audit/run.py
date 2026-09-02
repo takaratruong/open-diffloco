@@ -1,4 +1,4 @@
-"""Compare current-only, action-, and actor-latent-conditioned E002 critics."""
+"""Compare current-only and policy-context-conditioned E002 critics."""
 
 from __future__ import annotations
 
@@ -83,6 +83,7 @@ REPRESENTATION_NAMES = (
     "current_plus_actor_latent",
 )
 EARLY_LATENT_REPRESENTATION = "current_plus_actor_early_latent"
+RAW_HISTORY_REPRESENTATION = "current_plus_actor_history"
 METRIC_GROUPS = ("combined", "carried", "repeated_current")
 METRIC_BOUNDARIES = ("aggregate", "h24")
 
@@ -111,12 +112,17 @@ class ActorHistoryLatent(nn.Module):
 
 
 def validate_representation_options(
-    *, include_h0: bool, include_early_latent: bool
+    *,
+    include_h0: bool,
+    include_early_latent: bool,
+    include_raw_history: bool,
 ) -> None:
     """Fail closed on experimental option combinations."""
 
-    if include_early_latent and not include_h0:
-        raise ValueError("early actor latent requires H0 gates")
+    if (include_early_latent or include_raw_history) and not include_h0:
+        raise ValueError("actor history representation requires H0 gates")
+    if include_early_latent and include_raw_history:
+        raise ValueError("early latent and raw history are mutually exclusive")
 
 
 def reconstruct_base_actor_action(params: Mapping[str, Any], latent, *, squash: bool):
@@ -637,6 +643,54 @@ def classify_early_latent_representations(
     return "tested-representations-insufficient"
 
 
+def classify_raw_history_representations(
+    final_test: Mapping[str, Mapping[str, Any]],
+    *,
+    required_boundaries: Sequence[str],
+) -> str:
+    """Classify the full frozen actor-input arm with smallest-first precedence."""
+
+    names = (*REPRESENTATION_NAMES, RAW_HISTORY_REPRESENTATION)
+    if set(final_test) != set(names):
+        raise ValueError("raw-history representation test arms are incomplete")
+    adequate = {
+        name: representation_adequate(
+            final_test[name],
+            required_boundaries=required_boundaries,
+        )
+        for name in names
+    }
+    priority = (
+        ("current_only", "current-only-refit-adequate"),
+        ("current_plus_action", "policy-action-representation-adequate"),
+        (
+            "current_plus_actor_latent",
+            "actor-latent-representation-adequate",
+        ),
+        (RAW_HISTORY_REPRESENTATION, "actor-history-representation-adequate"),
+    )
+    for name, label in priority:
+        if adequate[name]:
+            return label
+    baseline_quality = _quality(
+        final_test["current_only"],
+        required_boundaries=required_boundaries,
+    )
+    if (
+        max(
+            _quality(
+                final_test[name],
+                required_boundaries=required_boundaries,
+            )
+            for name in names
+            if name != "current_only"
+        )
+        > baseline_quality
+    ):
+        return "augmented-representation-improves-but-insufficient"
+    return "tested-representations-insufficient"
+
+
 def _predict(critic, params: Any, observations: np.ndarray) -> np.ndarray:
     values = jnp.asarray(observations, dtype=jnp.float32)
     return np.asarray(
@@ -764,16 +818,20 @@ def collect_representation_audit(
     alias_trace: Path,
     include_h0: bool = False,
     include_early_latent: bool = False,
+    include_raw_history: bool = False,
 ) -> tuple[dict[str, np.ndarray], dict[str, object]]:
     """Capture paired policy contexts and fit matched critic arms."""
 
     validate_representation_options(
         include_h0=include_h0,
         include_early_latent=include_early_latent,
+        include_raw_history=include_raw_history,
     )
     representation_names = (
         (*REPRESENTATION_NAMES, EARLY_LATENT_REPRESENTATION)
         if include_early_latent
+        else (*REPRESENTATION_NAMES, RAW_HISTORY_REPRESENTATION)
+        if include_raw_history
         else REPRESENTATION_NAMES
     )
     boundary_indices = (
@@ -923,6 +981,8 @@ def collect_representation_audit(
                 )
                 if actor_early_latent is not None:
                     finite_values = (*finite_values, actor_early_latent)
+                if include_raw_history:
+                    finite_values = (*finite_values, normalized_actor_obs)
                 output = {
                     "online_value": online_value,
                     "target_value": target_value,
@@ -942,6 +1002,8 @@ def collect_representation_audit(
                 }
                 if actor_early_latent is not None:
                     output["actor_early_latent"] = actor_early_latent
+                if include_raw_history:
+                    output["normalized_actor_history"] = normalized_actor_obs
                 return next_state, output
 
             return jax.lax.scan(step, initial_state, noise)
@@ -1005,6 +1067,16 @@ def collect_representation_audit(
                 )
             )
         )
+    start_raw_history_max_abs_delta = None
+    if include_raw_history:
+        start_raw_history_max_abs_delta = float(
+            np.max(
+                np.abs(
+                    np.asarray(normalized_start)
+                    - np.asarray(traces["carried"]["normalized_actor_history"])[0]
+                )
+            )
+        )
     if (
         base_action_max_abs_delta > 1e-6
         or start_latent_max_abs_delta > 1e-6
@@ -1012,8 +1084,12 @@ def collect_representation_audit(
             start_early_latent_max_abs_delta is not None
             and start_early_latent_max_abs_delta > 1e-6
         )
+        or (
+            start_raw_history_max_abs_delta is not None
+            and start_raw_history_max_abs_delta > 1e-6
+        )
     ):
-        raise ValueError("actor latent does not reproduce the frozen base")
+        raise ValueError("actor representation does not reproduce the frozen base")
 
     time_grid = np.broadcast_to(
         np.arange(horizon, dtype=np.int32)[:, None],
@@ -1035,6 +1111,8 @@ def collect_representation_audit(
     }
     if include_early_latent:
         dataset_parts["early_latent"] = []
+    if include_raw_history:
+        dataset_parts["raw_history"] = []
     for arm_id, name in enumerate(("carried", "repeated_current")):
         alive = np.asarray(derived[name]["alive"], dtype=bool)
         dataset_parts["current"].append(
@@ -1050,6 +1128,13 @@ def collect_representation_audit(
             dataset_parts["early_latent"].append(
                 np.asarray(
                     traces[name]["actor_early_latent"],
+                    dtype=np.float32,
+                )[alive]
+            )
+        if include_raw_history:
+            dataset_parts["raw_history"].append(
+                np.asarray(
+                    traces[name]["normalized_actor_history"],
                     dtype=np.float32,
                 )[alive]
             )
@@ -1072,6 +1157,10 @@ def collect_representation_audit(
         or (
             include_early_latent
             and dataset["early_latent"].shape != (row_count, ACTOR_EARLY_LATENT_DIM)
+        )
+        or (
+            include_raw_history
+            and dataset["raw_history"].shape != (row_count, ACTOR_OBS_DIM)
         )
         or not all(np.isfinite(value).all() for value in dataset.values())
     ):
@@ -1111,6 +1200,17 @@ def collect_representation_audit(
             dataset["early_latent"],
             fit_mask,
         )
+    raw_history_statistics = None
+    if include_raw_history:
+        raw_history_std = np.std(
+            np.asarray(dataset["raw_history"], dtype=np.float64)[fit_mask],
+            axis=0,
+        )
+        raw_history_statistics = {
+            "minimum_normalized_column_std": float(np.min(raw_history_std)),
+            "maximum_normalized_column_std": float(np.max(raw_history_std)),
+            "nonconstant_columns": int(np.sum(raw_history_std > 1e-6)),
+        }
     representations = {
         "current_only": np.asarray(dataset["current"], dtype=np.float32),
         "current_plus_action": np.concatenate(
@@ -1123,6 +1223,11 @@ def collect_representation_audit(
     if normalized_early_latent is not None:
         representations[EARLY_LATENT_REPRESENTATION] = np.concatenate(
             (dataset["current"], normalized_early_latent),
+            axis=-1,
+        ).astype(np.float32)
+    if include_raw_history:
+        representations[RAW_HISTORY_REPRESENTATION] = np.concatenate(
+            (dataset["current"], dataset["raw_history"]),
             axis=-1,
         ).astype(np.float32)
 
@@ -1146,6 +1251,15 @@ def collect_representation_audit(
             state.critic_params,
             state.critic_opt,
             extra_dim=ACTOR_EARLY_LATENT_DIM,
+            optimizer=optimizer,
+        )
+    raw_history_params = None
+    raw_history_opt = None
+    if include_raw_history:
+        raw_history_params, raw_history_opt = migrate_critic_input(
+            state.critic_params,
+            state.critic_opt,
+            extra_dim=ACTOR_OBS_DIM,
             optimizer=optimizer,
         )
     initial_baseline = _predict(
@@ -1181,6 +1295,16 @@ def collect_representation_audit(
             ),
             tolerance=1e-6,
         )
+    if raw_history_params is not None:
+        migration_drift[RAW_HISTORY_REPRESENTATION] = validate_initial_equivalence(
+            initial_baseline,
+            _predict(
+                critic,
+                raw_history_params,
+                representations[RAW_HISTORY_REPRESENTATION],
+            ),
+            tolerance=1e-6,
+        )
     starting = {
         "current_only": (state.critic_params, state.critic_opt),
         "current_plus_action": (action_params, action_opt),
@@ -1190,6 +1314,11 @@ def collect_representation_audit(
         starting[EARLY_LATENT_REPRESENTATION] = (
             early_latent_params,
             early_latent_opt,
+        )
+    if raw_history_params is not None and raw_history_opt is not None:
+        starting[RAW_HISTORY_REPRESENTATION] = (
+            raw_history_params,
+            raw_history_opt,
         )
     selected_params: dict[str, Any] = {}
     fit_reports: dict[str, dict[str, Any]] = {}
@@ -1238,6 +1367,11 @@ def collect_representation_audit(
             final_test,
             required_boundaries=required_boundaries,
         )
+    elif include_raw_history:
+        classification = classify_raw_history_representations(
+            final_test,
+            required_boundaries=required_boundaries,
+        )
     else:
         classification = classify_representations(
             final_test,
@@ -1280,16 +1414,24 @@ def collect_representation_audit(
             early_latent_fit_mean=np.asarray(early_latent_statistics["mean"]),
             early_latent_fit_std=np.asarray(early_latent_statistics["std"]),
         )
+    if include_raw_history:
+        artifact_arrays["normalized_actor_history"] = np.asarray(
+            dataset["raw_history"],
+            dtype=np.float32,
+        )
     result = {
         "protocol": (
             "g1-e002-critic-representation-early-latent-h0-audit-v1"
             if include_early_latent
+            else "g1-e002-critic-representation-raw-history-h0-audit-v1"
+            if include_raw_history
             else "g1-e002-critic-representation-h0-audit-v1"
             if include_h0
             else "g1-e002-critic-representation-audit-v1"
         ),
         "include_h0": include_h0,
         "include_early_latent": include_early_latent,
+        "include_raw_history": include_raw_history,
         "valid": True,
         "classification": classification,
         "actor_optimizer_updates": 0,
@@ -1317,10 +1459,14 @@ def collect_representation_audit(
             "early_latent_dim": (
                 ACTOR_EARLY_LATENT_DIM if include_early_latent else None
             ),
+            "raw_history_dim": ACTOR_OBS_DIM if include_raw_history else None,
             "base_action_max_abs_reconstruction_delta": (base_action_max_abs_delta),
             "start_latent_max_abs_rollout_delta": (start_latent_max_abs_delta),
             "start_early_latent_max_abs_rollout_delta": (
                 start_early_latent_max_abs_delta
+            ),
+            "start_raw_history_max_abs_rollout_delta": (
+                start_raw_history_max_abs_delta
             ),
             "history_sensitive_base": True,
             "current_frame_residual_adapters": 2,
@@ -1348,6 +1494,7 @@ def collect_representation_audit(
                 if early_latent_statistics is not None
                 else None
             ),
+            "raw_history_statistics": raw_history_statistics,
         },
         "representations": {
             "current_only": {
@@ -1392,6 +1539,13 @@ def collect_representation_audit(
                 if include_early_latent
                 else [
                     "current_only",
+                    "current_plus_action",
+                    "current_plus_actor_latent",
+                    RAW_HISTORY_REPRESENTATION,
+                ]
+                if include_raw_history
+                else [
+                    "current_only",
                     "current_plus_actor_latent",
                     "current_plus_action",
                 ]
@@ -1417,6 +1571,11 @@ def collect_representation_audit(
             "dimension": CRITIC_OBS_DIM + ACTOR_EARLY_LATENT_DIM,
             "parameter_count": _parameter_count(early_latent_params),
         }
+    if raw_history_params is not None:
+        result["representations"][RAW_HISTORY_REPRESENTATION] = {
+            "dimension": CRITIC_OBS_DIM + ACTOR_OBS_DIM,
+            "parameter_count": _parameter_count(raw_history_params),
+        }
     return artifact_arrays, result
 
 
@@ -1438,6 +1597,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="add the frozen actor's first 512-wide history activation",
     )
+    parser.add_argument(
+        "--include-raw-history",
+        action="store_true",
+        help="add the actor-normalized full ten-frame history input",
+    )
     return parser
 
 
@@ -1448,6 +1612,7 @@ def main() -> None:
     validate_representation_options(
         include_h0=args.include_h0,
         include_early_latent=args.include_early_latent,
+        include_raw_history=args.include_raw_history,
     )
     configure_jax()
     runtime = _validate_runtime()
@@ -1469,6 +1634,8 @@ def main() -> None:
         protocol=(
             "g1-e002-critic-representation-early-latent-h0-preflight-v1"
             if args.include_early_latent
+            else "g1-e002-critic-representation-raw-history-h0-preflight-v1"
+            if args.include_raw_history
             else "g1-e002-critic-representation-h0-preflight-v1"
             if args.include_h0
             else "g1-e002-critic-representation-preflight-v1"
@@ -1481,6 +1648,7 @@ def main() -> None:
         environment_steps_retained=0,
         include_h0=args.include_h0,
         include_early_latent=args.include_early_latent,
+        include_raw_history=args.include_raw_history,
     )
     preflight_path = output_root / "preflight.json"
     _write_json_atomically(preflight_path, preflight)
@@ -1491,6 +1659,7 @@ def main() -> None:
         alias_trace=alias_trace,
         include_h0=args.include_h0,
         include_early_latent=args.include_early_latent,
+        include_raw_history=args.include_raw_history,
     )
     dataset_path = output_root / "critic_representation_dataset.npz"
     result_path = output_root / "critic_representation_audit.json"
@@ -1501,6 +1670,8 @@ def main() -> None:
         "protocol": (
             "g1-e002-critic-representation-early-latent-h0-completion-v1"
             if args.include_early_latent
+            else "g1-e002-critic-representation-raw-history-h0-completion-v1"
+            if args.include_raw_history
             else "g1-e002-critic-representation-h0-completion-v1"
             if args.include_h0
             else "g1-e002-critic-representation-completion-v1"

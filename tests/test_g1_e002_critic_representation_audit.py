@@ -379,6 +379,51 @@ def test_early_latent_classification_prefers_simplest_then_richer_history() -> N
     )
 
 
+def test_raw_history_classification_requires_raw_arm_and_prefers_current() -> None:
+    from experiments.g1_e002_critic_representation_audit.run import (
+        classify_raw_history_representations,
+    )
+
+    passing = _metrics(
+        rank=0.85,
+        nrmse=0.20,
+        boundaries=("aggregate", "h0", "h24"),
+    )
+    failing = _metrics(
+        rank=0.85,
+        nrmse=0.30,
+        boundaries=("aggregate", "h0", "h24"),
+    )
+    arms = {
+        "current_only": failing,
+        "current_plus_action": failing,
+        "current_plus_actor_latent": failing,
+        "current_plus_actor_history": passing,
+    }
+
+    assert (
+        classify_raw_history_representations(
+            arms,
+            required_boundaries=("aggregate", "h0", "h24"),
+        )
+        == "actor-history-representation-adequate"
+    )
+    arms["current_only"] = passing
+    assert (
+        classify_raw_history_representations(
+            arms,
+            required_boundaries=("aggregate", "h0", "h24"),
+        )
+        == "current-only-refit-adequate"
+    )
+    del arms["current_plus_actor_history"]
+    with pytest.raises(ValueError, match="raw-history representation test arms"):
+        classify_raw_history_representations(
+            arms,
+            required_boundaries=("aggregate", "h0", "h24"),
+        )
+
+
 def test_representation_metrics_reject_missing_or_nonfinite_gates() -> None:
     from experiments.g1_e002_critic_representation_audit.run import (
         representation_adequate,
@@ -464,11 +509,42 @@ def test_parser_makes_h0_an_explicit_opt_in() -> None:
     defaults = build_parser().parse_args(base)
     assert defaults.include_h0 is False
     assert defaults.include_early_latent is False
+    assert defaults.include_raw_history is False
     enabled = build_parser().parse_args(
         [*base, "--include-h0", "--include-early-latent"]
     )
     assert enabled.include_h0 is True
     assert enabled.include_early_latent is True
-    validate_representation_options(include_h0=True, include_early_latent=True)
+    assert enabled.include_raw_history is False
+    raw = build_parser().parse_args([*base, "--include-h0", "--include-raw-history"])
+    assert raw.include_h0 is True
+    assert raw.include_early_latent is False
+    assert raw.include_raw_history is True
+    validate_representation_options(
+        include_h0=True,
+        include_early_latent=True,
+        include_raw_history=False,
+    )
+    validate_representation_options(
+        include_h0=True,
+        include_early_latent=False,
+        include_raw_history=True,
+    )
     with pytest.raises(ValueError, match="requires H0"):
-        validate_representation_options(include_h0=False, include_early_latent=True)
+        validate_representation_options(
+            include_h0=False,
+            include_early_latent=True,
+            include_raw_history=False,
+        )
+    with pytest.raises(ValueError, match="requires H0"):
+        validate_representation_options(
+            include_h0=False,
+            include_early_latent=False,
+            include_raw_history=True,
+        )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        validate_representation_options(
+            include_h0=True,
+            include_early_latent=True,
+            include_raw_history=True,
+        )
