@@ -100,6 +100,8 @@ def test_ahac_builder_changes_only_registered_optimizer_family_fields() -> None:
     assert treatment["ahac_dual_lr"] == 5e-4
     assert treatment["ahac_critic_max_iterations"] == 64
     assert treatment["ahac_critic_tolerance"] == 0.2
+    assert treatment["ahac_contact_metric"] == "root_generalized"
+    assert treatment["ahac_semantics"] == "legacy_horizon_only_target"
     assert treatment["actor_bootstrap_scale"] == 1.0
     assert treatment["actor_bootstrap_delay_steps"] == 0
     assert treatment["num_envs"] * treatment["gradient_accumulation_steps"] == 512

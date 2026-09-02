@@ -249,6 +249,7 @@ def make_evaluation_env(
     reference_reset_noise_scale: float = 0.0,
     reference_residual_control: bool = False,
     reference_residual_scale: float = 0.5,
+    contact_stiffness_metric: str = "root_generalized",
 ) -> G1TrackingEnv:
     """Build an exact-termination task on the requested control timebase."""
     if variant not in EVALUATION_ENV_VARIANTS:
@@ -277,6 +278,7 @@ def make_evaluation_env(
         "effort_limit_scale": effort_limit_scale,
         "reference_residual_control": reference_residual_control,
         "reference_residual_scale": reference_residual_scale,
+        "contact_stiffness_metric": contact_stiffness_metric,
     }
     if reference_path is not None:
         kwargs["reference_path"] = str(reference_path)

@@ -86,6 +86,8 @@ def test_ahac_resume_fails_closed_on_missing_or_changed_metadata() -> None:
         "ahac_dual_lr": 5e-4,
         "ahac_critic_max_iterations": 64,
         "ahac_critic_tolerance": 0.2,
+        "ahac_contact_metric": "all_body_spatial",
+        "ahac_semantics": "paper_equation_10_no_target",
     }
 
     with pytest.raises(ValueError, match="metadata"):
@@ -121,6 +123,8 @@ def test_legacy_shac_resume_does_not_require_ahac_metadata() -> None:
         "ahac_dual_lr": 5e-4,
         "ahac_critic_max_iterations": 64,
         "ahac_critic_tolerance": 0.2,
+        "ahac_contact_metric": "root_generalized",
+        "ahac_semantics": "paper_equation_10_no_target",
     }
 
     assert resolve_ahac_resume_settings(
@@ -137,6 +141,54 @@ def test_legacy_shac_resume_does_not_require_ahac_metadata() -> None:
     ) == requested
 
 
+def test_pre_metric_ahac_resume_is_unambiguously_legacy_root_proxy() -> None:
+    from src.algorithms.shac.ahac import resolve_ahac_resume_settings
+
+    requested = {
+        "ahac": True,
+        "ahac_horizon_min": 8,
+        "ahac_horizon_max": 24,
+        "ahac_contact_threshold": 339.0,
+        "ahac_dual_lr": 5e-4,
+        "ahac_critic_max_iterations": 64,
+        "ahac_critic_tolerance": 0.2,
+        "ahac_contact_metric": "root_generalized",
+        "ahac_semantics": "legacy_horizon_only_target",
+    }
+    legacy = {
+        key: value
+        for key, value in requested.items()
+        if key not in {"ahac_contact_metric", "ahac_semantics"}
+    }
+
+    assert resolve_ahac_resume_settings(
+        requested=requested,
+        resumed_hparams=legacy,
+        is_resume=True,
+        allow_change=False,
+    ) == requested
+    with pytest.raises(ValueError, match="match"):
+        resolve_ahac_resume_settings(
+            requested={
+                **requested,
+                "ahac_contact_metric": "all_body_spatial",
+            },
+            resumed_hparams=legacy,
+            is_resume=True,
+            allow_change=False,
+        )
+    with pytest.raises(ValueError, match="match"):
+        resolve_ahac_resume_settings(
+            requested={
+                **requested,
+                "ahac_semantics": "paper_equation_10_no_target",
+            },
+            resumed_hparams=legacy,
+            is_resume=True,
+            allow_change=False,
+        )
+
+
 def test_train_signature_and_source_wire_all_ahac_contracts() -> None:
     from src.algorithms.shac.algorithm import train
 
@@ -149,6 +201,8 @@ def test_train_signature_and_source_wire_all_ahac_contracts() -> None:
         "ahac_dual_lr",
         "ahac_critic_max_iterations",
         "ahac_critic_tolerance",
+        "ahac_contact_metric",
+        "ahac_semantics",
         "allow_resume_ahac_change",
     ):
         assert name in signature.parameters
@@ -156,11 +210,69 @@ def test_train_signature_and_source_wire_all_ahac_contracts() -> None:
     source = inspect.getsource(train)
     assert "DoubleCritic" in source
     assert "contact_stiffness" in source
+    assert "ahac_contact_metric" in source
     assert "active_horizon_mask" in source
     assert "update_horizon_dual" in source
+    assert "adaptive_contact_penalty" in source
+    assert 'paper_ahac = ahac and ahac_semantics ==' in source
+    assert "bootstrap_critic_params" in source
     assert "critic_convergence" in source
     assert '"ahac_horizon"' in source
     assert '"ahac_contact_stiffness_mean"' in source
+
+
+def test_single_critic_duplication_preserves_both_ahac_heads_exactly() -> None:
+    from src.algorithms.shac.ahac import duplicate_single_critic_params
+
+    source = {
+        "params": {
+            "Dense_0": {
+                "kernel": jp.arange(6, dtype=jp.float32).reshape(2, 3),
+                "bias": jp.asarray([1.0, 2.0, 3.0]),
+            }
+        }
+    }
+    duplicated = duplicate_single_critic_params(source)
+
+    assert set(duplicated["params"]) == {"critic_0", "critic_1"}
+    for head in ("critic_0", "critic_1"):
+        np.testing.assert_array_equal(
+            duplicated["params"][head]["Dense_0"]["kernel"],
+            source["params"]["Dense_0"]["kernel"],
+        )
+        np.testing.assert_array_equal(
+            duplicated["params"][head]["Dense_0"]["bias"],
+            source["params"]["Dense_0"]["bias"],
+        )
+
+
+def test_single_critic_duplication_rejects_double_or_malformed_trees() -> None:
+    from src.algorithms.shac.ahac import duplicate_single_critic_params
+
+    with pytest.raises(ValueError, match="single critic"):
+        duplicate_single_critic_params(
+            {"params": {"critic_0": {}, "critic_1": {}}}
+        )
+    with pytest.raises(ValueError, match="single critic"):
+        duplicate_single_critic_params({"wrong": {}})
+
+
+def test_paper_ahac_bootstraps_online_without_delayed_target() -> None:
+    from src.algorithms.shac.ahac import select_critic_bootstrap_params
+
+    online = object()
+    delayed = object()
+
+    assert select_critic_bootstrap_params(
+        online,
+        delayed,
+        semantics="paper_equation_10_no_target",
+    ) is online
+    assert select_critic_bootstrap_params(
+        online,
+        delayed,
+        semantics="legacy_horizon_only_target",
+    ) is delayed
 
 
 def test_g1_reset_and_step_metrics_share_contact_stiffness_leaf() -> None:
@@ -182,8 +294,10 @@ def test_checkpoint_ahac_telemetry_is_complete_and_fails_closed() -> None:
         "ahac_horizon": 8.5,
         "ahac_horizon_before_update": 8.0,
         "ahac_active_transitions": 8,
+        "ahac_dual_min": 0.0,
         "ahac_dual_mean": 0.1,
         "ahac_dual_max": 0.2,
+        "ahac_actor_constraint_penalty": 0.05,
         "ahac_contact_stiffness_mean": 12.0,
         "ahac_contact_stiffness_max": 20.0,
         "ahac_contact_threshold": 15.0,

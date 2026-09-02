@@ -12,7 +12,7 @@ from mujoco import mjx
 from mujoco.mjx._src import scan as mjx_scan
 from mujoco.mjx._src import support as mjx_support
 
-from src.core.contact import contact_stiffness
+from src.core.contact import contact_stiffness, mjx_all_body_contact_stiffness
 from src.core.data_structures import EnvState
 from src.core.utils import tree_bit_fingerprint
 from src.envs.g1_tracking.contact_topology import (
@@ -224,6 +224,7 @@ class G1TrackingEnv:
         carried_reset_bank_start: int = 0,
         adaptive_phase_sampling: bool = False,
         adaptive_phase_uniform_ratio: float = 0.5,
+        contact_stiffness_metric: str = "root_generalized",
         **_unused_go2_options,
     ):
         if actor_history_len < 1:
@@ -231,6 +232,15 @@ class G1TrackingEnv:
         if not isinstance(actor_observation_noise, bool):
             raise ValueError("actor_observation_noise must be boolean")
         self.actor_observation_noise = actor_observation_noise
+        if contact_stiffness_metric not in {
+            "root_generalized",
+            "all_body_spatial",
+        }:
+            raise ValueError(
+                "contact stiffness metric must be 'root_generalized' or "
+                "'all_body_spatial'"
+            )
+        self.contact_stiffness_metric = contact_stiffness_metric
         if not isinstance(actor_observe_motion_anchor_position, bool):
             raise ValueError(
                 "actor_observe_motion_anchor_position must be boolean"
@@ -1941,10 +1951,15 @@ class G1TrackingEnv:
                     final_subtree_probe_values,
                 )
             )
-        transition_contact_stiffness = contact_stiffness(
-            data.qfrc_constraint,
-            data.qacc,
-        )
+        if self.contact_stiffness_metric == "all_body_spatial":
+            transition_contact_stiffness = (
+                mjx_all_body_contact_stiffness(self.mjx_model, data)
+            )
+        else:
+            transition_contact_stiffness = contact_stiffness(
+                data.qfrc_constraint,
+                data.qacc,
+            )
         next_phase = jp.minimum(
             state.info["phase"] + self.reference_stride,
             self.reference_length - 1,

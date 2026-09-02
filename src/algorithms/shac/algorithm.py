@@ -61,11 +61,16 @@ from src.algorithms.shac.gradients import (
     support_contact_mode_indices,
 )
 from src.algorithms.shac.ahac import (
+    AHAC_CONTACT_METRICS,
+    AHAC_SEMANTICS,
     active_horizon_mask,
+    adaptive_contact_penalty,
     conservative_value,
     critic_convergence,
     critic_value_loss,
+    duplicate_single_critic_params,
     resolve_ahac_resume_settings,
+    select_critic_bootstrap_params,
     select_active_tree,
     update_horizon_dual,
 )
@@ -571,6 +576,22 @@ def persist_reference_path_migration_report(
     return path
 
 
+def persist_ahac_resume_migration_report(
+    save_dir: str | Path, report: dict[str, object]
+) -> Path:
+    """Publish the exact legacy-SHAC to double-critic AHAC boundary."""
+
+    if report.get("valid") is not True:
+        raise ValueError("AHAC resume migration failed")
+    path = Path(save_dir) / "ahac_resume_migration.json"
+    temp_path = path.with_name(f".{path.name}.tmp")
+    with temp_path.open("w", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    os.replace(temp_path, path)
+    return path
+
+
 def persist_checkpoint_phase_metric(
     save_dir: str | Path, row: dict[str, object]
 ) -> Path:
@@ -751,8 +772,10 @@ def build_checkpoint_ahac_telemetry(metrics) -> dict[str, object]:
     float_names = (
         "horizon",
         "horizon_before_update",
+        "dual_min",
         "dual_mean",
         "dual_max",
+        "actor_constraint_penalty",
         "contact_stiffness_mean",
         "contact_stiffness_max",
         "contact_threshold",
@@ -780,6 +803,8 @@ def build_checkpoint_ahac_telemetry(metrics) -> dict[str, object]:
         raise ValueError("AHAC telemetry must be finite and complete")
     if active_transitions < 1 or critic_iterations_executed < 1:
         raise ValueError("AHAC telemetry counts must be positive")
+    if values["dual_min"] < 0.0:
+        raise ValueError("AHAC dual telemetry must be nonnegative")
     valid = bool(metrics["ahac_horizon_valid"])
     if not valid:
         raise ValueError("AHAC horizon/dual telemetry is invalid")
@@ -2881,6 +2906,8 @@ def train(
     ahac_dual_lr: float = 5e-4,
     ahac_critic_max_iterations: int = 64,
     ahac_critic_tolerance: float = 0.2,
+    ahac_contact_metric: str = "root_generalized",
+    ahac_semantics: str = "paper_equation_10_no_target",
     allow_resume_ahac_change: bool = False,
     actor_hidden: tuple[int, ...] = (512, 256, 128),
     actor_layer_norm: bool = True,
@@ -3286,6 +3313,27 @@ def train(
         raise ValueError("ahac must be boolean")
     if not isinstance(allow_resume_ahac_change, bool):
         raise ValueError("allow_resume_ahac_change must be boolean")
+    if ahac_contact_metric not in AHAC_CONTACT_METRICS:
+        raise ValueError(
+            "AHAC contact metric must be 'root_generalized' or "
+            "'all_body_spatial'"
+        )
+    if ahac_semantics not in AHAC_SEMANTICS:
+        raise ValueError(
+            "AHAC semantics must be 'legacy_horizon_only_target' or "
+            "'paper_equation_10_no_target'"
+        )
+    if not ahac and ahac_contact_metric != "root_generalized":
+        raise ValueError(
+            "all-body spatial contact measurement requires AHAC"
+        )
+    if (
+        ahac_contact_metric == "all_body_spatial"
+        and not env_variant.startswith("g1_tracking")
+    ):
+        raise ValueError(
+            "all-body spatial AHAC currently requires a G1 tracking task"
+        )
     for name, value in (
         ("ahac_horizon_min", ahac_horizon_min),
         ("ahac_horizon_max", ahac_horizon_max),
@@ -3565,6 +3613,7 @@ def train(
     counterfactual_wrench_upgrade = False
     centroidal_propulsion_upgrade = False
     reference_path_migration_report = None
+    ahac_resume_migration_report = None
     recovery_support = None
     recovery_support_report = None
 
@@ -4096,11 +4145,14 @@ def train(
             "ahac_dual_lr": ahac_dual_lr,
             "ahac_critic_max_iterations": ahac_critic_max_iterations,
             "ahac_critic_tolerance": ahac_critic_tolerance,
+            "ahac_contact_metric": ahac_contact_metric,
+            "ahac_semantics": ahac_semantics,
         },
         resumed_hparams=resumed_hparams,
         is_resume=resume_from is not None,
         allow_change=allow_resume_ahac_change,
     )
+    paper_ahac = ahac and ahac_semantics == "paper_equation_10_no_target"
     actor_contact_topology_gradient_truncation = (
         resolve_contact_topology_truncation_resume_setting(
             requested=actor_contact_topology_gradient_truncation,
@@ -4246,6 +4298,7 @@ def train(
                 "adaptive_phase_uniform_ratio": (
                     adaptive_phase_uniform_ratio
                 ),
+                "contact_stiffness_metric": ahac_contact_metric,
             }
         )
         if reference_path is not None:
@@ -4862,7 +4915,7 @@ def train(
 
     def actor_loss(
         actor_params,
-        target_critic_params,
+        bootstrap_critic_params,
         actor_norm_state,
         critic_norm_state,
         env_state,
@@ -4870,6 +4923,7 @@ def train(
         current_noise_std,
         current_actor_bootstrap_scale,
         current_ahac_horizon,
+        current_ahac_dual,
         current_learned_wrench_scale,
     ):
         """Short-horizon actor objective with sampled perturbations."""
@@ -5827,7 +5881,7 @@ def train(
             critic_norm_state, traj["bootstrap_critic_obs"]
         ).astype(jp.float32)
         bootstrap_v = conservative_value(
-            critic.apply(target_critic_params, bootstrap_obs),
+            critic.apply(bootstrap_critic_params, bootstrap_obs),
             double=ahac,
         )
 
@@ -5866,7 +5920,7 @@ def train(
             env._get_critic_obs(final_state.data, final_state.info),
         ).astype(jp.float32)
         final_v = conservative_value(
-            critic.apply(target_critic_params, final_obs),
+            critic.apply(bootstrap_critic_params, final_obs),
             double=ahac,
         )
         final_bootstrap = jp.where(
@@ -5882,6 +5936,23 @@ def train(
             jp.sum(traj["actor_policy_anchor_penalty"]) / active_count
         )
         actor_objective = -total_ret / active_count + anchor_loss
+        ahac_actor_constraint_penalty = (
+            adaptive_contact_penalty(
+                contact_by_step=traj["ahac_contact_stiffness"],
+                dual=current_ahac_dual,
+                active_mask=traj["ahac_active"],
+                threshold=ahac_contact_threshold,
+            )
+            if paper_ahac
+            else jp.asarray(0.0, dtype=actor_objective.dtype)
+        )
+        actor_objective = actor_objective + ahac_actor_constraint_penalty
+        traj = {
+            **traj,
+            "ahac_actor_constraint_penalty": (
+                ahac_actor_constraint_penalty
+            ),
+        }
         if actor_counterfactual_wrench_distillation:
             counterfactual_valid_count = jp.maximum(
                 jp.sum(traj["counterfactual_valid"]), 1
@@ -6214,6 +6285,20 @@ def train(
             if ahac
             else jp.asarray(unroll_length, dtype=jp.float32)
         )
+        current_ahac_dual = (
+            state.ahac_dual
+            if ahac
+            else jp.zeros((unroll_length,), dtype=jp.float64)
+        )
+        bootstrap_critic_params = (
+            select_critic_bootstrap_params(
+                state.critic_params,
+                state.target_critic_params,
+                semantics=ahac_semantics,
+            )
+            if ahac
+            else state.target_critic_params
+        )
         current_learned_wrench_scale = (
             learned_wrench_scale_at_step(
                 state.step,
@@ -6231,10 +6316,22 @@ def train(
         if gradient_accumulation_steps == 1:
             (losses, (trajs, final_states)), per_env_grads = jax.vmap(
                 actor_grad_fn,
-                in_axes=(None, None, None, None, 0, 0, None, None, None, None),
+                in_axes=(
+                    None,
+                    None,
+                    None,
+                    None,
+                    0,
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
             )(
                 state.actor_params,
-                state.target_critic_params,
+                bootstrap_critic_params,
                 state.normalizer,
                 state.critic_normalizer,
                 updated_env_state,
@@ -6242,6 +6339,7 @@ def train(
                 current_noise_std,
                 current_actor_bootstrap_scale,
                 current_ahac_horizon,
+                current_ahac_dual,
                 current_learned_wrench_scale,
             )
             if actor_learned_torso_wrench:
@@ -6332,10 +6430,11 @@ def train(
                         None,
                         None,
                         None,
+                        None,
                     ),
                 )(
                     state.actor_params,
-                    state.target_critic_params,
+                    bootstrap_critic_params,
                     state.normalizer,
                     state.critic_normalizer,
                     shard_env_state,
@@ -6343,6 +6442,7 @@ def train(
                     current_noise_std,
                     current_actor_bootstrap_scale,
                     current_ahac_horizon,
+                    current_ahac_dual,
                     current_learned_wrench_scale,
                 )
                 if actor_learned_torso_wrench:
@@ -6889,7 +6989,7 @@ def train(
                     dynamics_model=learned_dynamics_model,
                     dynamics_params=new_ldm_params,
                     critic=critic,
-                    target_critic_params=state.target_critic_params,
+                    target_critic_params=bootstrap_critic_params,
                     normalized_observations=jave_vg_observations,
                     actions=jave_vg_actions,
                     critic_dim=env.critic_obs_dim,
@@ -6991,7 +7091,7 @@ def train(
                     in_axes=(None, None, None, 0, 0, 0, 0, 0, 0, 0),
                 )(
                     c_params,
-                    state.target_critic_params,
+                    bootstrap_critic_params,
                     state.critic_normalizer,
                     all_obs,
                     all_rewards,
@@ -7034,7 +7134,7 @@ def train(
                         in_axes=(None, None, None, 0, 0, 0, 0, 0, 0, 0),
                     )(
                         c_params,
-                        state.target_critic_params,
+                        bootstrap_critic_params,
                         state.critic_normalizer,
                         shard_obs,
                         shard_rewards,
@@ -7241,7 +7341,7 @@ def train(
             ):
                 fit = critic_fit_from_data(
                     new_critic_params,
-                    state.target_critic_params,
+                    bootstrap_critic_params,
                     state.critic_normalizer,
                     obs,
                     rewards,
@@ -7494,8 +7594,12 @@ def train(
                     "ahac_horizon": ahac_update.horizon,
                     "ahac_horizon_before_update": state.ahac_horizon,
                     "ahac_active_transitions": jp.sum(ahac_active_mask),
+                    "ahac_dual_min": jp.min(ahac_update.dual),
                     "ahac_dual_mean": jp.mean(ahac_update.dual),
                     "ahac_dual_max": jp.max(ahac_update.dual),
+                    "ahac_actor_constraint_penalty": jp.mean(
+                        trajs["ahac_actor_constraint_penalty"]
+                    ),
                     "ahac_contact_stiffness_mean": jp.nanmean(active_contact),
                     "ahac_contact_stiffness_max": jp.nanmax(active_contact),
                     "ahac_contact_threshold": jp.asarray(
@@ -8077,11 +8181,6 @@ def train(
             save_dir, reference_path_migration_report
         )
     if resumed_state is not None:
-        if ahac and (
-            getattr(resumed_state, "ahac_horizon", None) is None
-            or getattr(resumed_state, "ahac_dual", None) is None
-        ):
-            raise ValueError("AHAC checkpoint state is missing horizon or dual leaves")
         print(
             "Restoring complete training state from step "
             f"{resumed_step} (PRNG, environments, parameters, optimizers, "
@@ -8093,6 +8192,78 @@ def train(
                 initialized_state.env_state,
             )
         )
+        legacy_shac_to_ahac = ahac and (
+            getattr(resumed_state, "ahac_horizon", None) is None
+            or getattr(resumed_state, "ahac_dual", None) is None
+        )
+        if legacy_shac_to_ahac:
+            if (
+                not allow_resume_ahac_change
+                or bool((resumed_hparams or {}).get("ahac", False))
+            ):
+                raise ValueError(
+                    "AHAC checkpoint state is missing horizon or dual leaves"
+                )
+            source_critic = resumed_state.critic_params
+            source_target = resumed_state.target_critic_params
+            migrated_critic = duplicate_single_critic_params(source_critic)
+            migrated_target = duplicate_single_critic_params(
+                source_critic if paper_ahac else source_target
+            )
+            source_critic_hash = parameter_tree_sha256(source_critic["params"])
+            source_target_hash = parameter_tree_sha256(source_target["params"])
+            expected_target_hash = (
+                source_critic_hash if paper_ahac else source_target_hash
+            )
+            critic_head_hashes = [
+                parameter_tree_sha256(migrated_critic["params"][name])
+                for name in ("critic_0", "critic_1")
+            ]
+            target_head_hashes = [
+                parameter_tree_sha256(migrated_target["params"][name])
+                for name in ("critic_0", "critic_1")
+            ]
+            resumed_state = resumed_state.replace(
+                critic_params=migrated_critic,
+                target_critic_params=migrated_target,
+                critic_opt=critic_opt.init(migrated_critic),
+                ahac_horizon=initialized_state.ahac_horizon,
+                ahac_dual=initialized_state.ahac_dual,
+            )
+            ahac_resume_migration_report = {
+                "protocol": "legacy-shac-to-ahac-v1",
+                "valid": bool(
+                    critic_head_hashes
+                    == [source_critic_hash, source_critic_hash]
+                    and target_head_hashes
+                    == [expected_target_hash, expected_target_hash]
+                    and float(np.asarray(resumed_state.ahac_horizon))
+                    == float(ahac_horizon_min)
+                    and np.array_equal(
+                        np.asarray(resumed_state.ahac_dual),
+                        np.zeros((ahac_horizon_max,), dtype=np.float32),
+                    )
+                ),
+                "source_step": int(resumed_step),
+                "source_critic_sha256": source_critic_hash,
+                "source_target_critic_sha256": source_target_hash,
+                "critic_head_sha256": critic_head_hashes,
+                "target_critic_head_sha256": target_head_hashes,
+                "critic_optimizer_reset": True,
+                "actor_and_actor_optimizer_preserved": True,
+                "ahac_semantics": ahac_semantics,
+                "uses_delayed_target_critic": not paper_ahac,
+                "legacy_target_discarded": paper_ahac,
+                "horizon": float(np.asarray(resumed_state.ahac_horizon)),
+                "dual_shape": list(np.asarray(resumed_state.ahac_dual).shape),
+                "dual_all_zero": bool(
+                    np.all(np.asarray(resumed_state.ahac_dual) == 0.0)
+                ),
+                "contact_metric": ahac_contact_metric,
+            }
+            persist_ahac_resume_migration_report(
+                save_dir, ahac_resume_migration_report
+            )
         if reference_path_migration_report is not None:
             resumed_state = resumed_state.replace(
                 env_state=initialized_state.env_state
@@ -8653,7 +8824,14 @@ def train(
         "ahac_dual_lr": ahac_dual_lr,
         "ahac_critic_max_iterations": ahac_critic_max_iterations,
         "ahac_critic_tolerance": ahac_critic_tolerance,
+        "ahac_contact_metric": ahac_contact_metric,
+        "ahac_semantics": ahac_semantics,
         "allow_resume_ahac_change": allow_resume_ahac_change,
+        "ahac_resume_migration_artifact": (
+            "ahac_resume_migration.json"
+            if ahac_resume_migration_report is not None
+            else None
+        ),
         "xml_path": xml_path,
         "action_scale": action_scale,
         "cmd_vel_x_range": list(cmd_vel_x_range),

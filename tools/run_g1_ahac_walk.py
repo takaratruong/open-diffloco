@@ -45,6 +45,8 @@ AHAC_CHANGED_FIELDS = (
     "ahac_dual_lr",
     "ahac_critic_max_iterations",
     "ahac_critic_tolerance",
+    "ahac_contact_metric",
+    "ahac_semantics",
     "actor_bootstrap_scale",
 )
 
@@ -68,6 +70,8 @@ def build_ahac_walk_kwargs(
         ahac_dual_lr=5e-4,
         ahac_critic_max_iterations=64,
         ahac_critic_tolerance=0.2,
+        ahac_contact_metric="root_generalized",
+        ahac_semantics="legacy_horizon_only_target",
         actor_bootstrap_scale=1.0,
     )
     return kwargs

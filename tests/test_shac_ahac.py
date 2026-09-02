@@ -31,6 +31,48 @@ def test_contact_stiffness_rejects_wrong_or_nonfinite_inputs() -> None:
     assert not bool(jp.isfinite(actual))
 
 
+def test_all_body_spatial_contact_stiffness_matches_official_normalization() -> None:
+    from src.core.contact import all_body_spatial_contact_stiffness
+
+    contact_force = jp.asarray(
+        [
+            [3.0, 4.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 12.0, 0.0, 0.0, 0.0],
+        ]
+    )
+    spatial_acceleration = jp.asarray(
+        [
+            [-2.0, 4.0, 0.5, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 3.0, 1.0, 1.0, 1.0],
+        ]
+    )
+
+    # Official source uses max(acceleration, 1) elementwise, not abs.
+    np.testing.assert_allclose(
+        all_body_spatial_contact_stiffness(
+            contact_force, spatial_acceleration
+        ),
+        np.sqrt(3.0**2 + 1.0**2 + 4.0**2),
+        rtol=0.0,
+        atol=1e-6,
+    )
+
+
+def test_all_body_spatial_contact_stiffness_validates_body_spatial_layout() -> None:
+    from src.core.contact import all_body_spatial_contact_stiffness
+
+    with np.testing.assert_raises_regex(ValueError, "matching"):
+        all_body_spatial_contact_stiffness(
+            jp.ones((2, 6)), jp.ones((3, 6))
+        )
+    with np.testing.assert_raises_regex(ValueError, "body-by-spatial"):
+        all_body_spatial_contact_stiffness(jp.ones((6,)), jp.ones((6,)))
+    with np.testing.assert_raises_regex(ValueError, "six"):
+        all_body_spatial_contact_stiffness(
+            jp.ones((2, 5)), jp.ones((2, 5))
+        )
+
+
 def test_active_horizon_mask_rounds_and_preserves_exact_bounds() -> None:
     from src.algorithms.shac.ahac import active_horizon_mask
 
@@ -54,6 +96,55 @@ def test_masked_mean_excludes_inactive_slots() -> None:
     values = jp.asarray([1.0, 3.0, 1_000_000.0])
     mask = jp.asarray([True, True, False])
     np.testing.assert_allclose(masked_mean(values, mask), 2.0)
+
+
+def test_equation_10_contact_penalty_keeps_policy_gradient_and_stops_dual() -> None:
+    import jax
+
+    from src.algorithms.shac.ahac import adaptive_contact_penalty
+
+    contact = jp.asarray([12.0, 8.0, 1_000.0])
+    dual = jp.asarray([2.0, 3.0, 999.0])
+    active = jp.asarray([True, True, False])
+
+    penalty = adaptive_contact_penalty(
+        contact_by_step=contact,
+        dual=dual,
+        active_mask=active,
+        threshold=10.0,
+    )
+    contact_gradient = jax.grad(
+        lambda values: adaptive_contact_penalty(
+            contact_by_step=values,
+            dual=dual,
+            active_mask=active,
+            threshold=10.0,
+        )
+    )(contact)
+    dual_gradient = jax.grad(
+        lambda values: adaptive_contact_penalty(
+            contact_by_step=contact,
+            dual=values,
+            active_mask=active,
+            threshold=10.0,
+        )
+    )(dual)
+
+    np.testing.assert_allclose(penalty, -1.0)
+    np.testing.assert_allclose(contact_gradient, [1.0, 1.5, 0.0])
+    np.testing.assert_allclose(dual_gradient, [0.0, 0.0, 0.0])
+
+
+def test_equation_10_contact_penalty_validates_vector_layout() -> None:
+    from src.algorithms.shac.ahac import adaptive_contact_penalty
+
+    with np.testing.assert_raises_regex(ValueError, "matching vectors"):
+        adaptive_contact_penalty(
+            contact_by_step=jp.ones((2,)),
+            dual=jp.ones((3,)),
+            active_mask=jp.ones((2,), dtype=bool),
+            threshold=1.0,
+        )
 
 
 def test_dual_update_is_projected_and_only_active_slots_change() -> None:
