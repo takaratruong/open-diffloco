@@ -71,6 +71,35 @@ def test_unwrap_base_actor_requires_preview_base_and_reports_depth() -> None:
         unwrap_base_actor({"params": {}})
 
 
+def test_e005_scan_carrier_uses_retained_rollout_shapes_without_noise() -> None:
+    from experiments.g1_e002_critic_representation_audit.run import (
+        e005_scan_carrier,
+    )
+
+    source = {
+        "carried_reward": np.zeros((5, 7), dtype=np.float64),
+        "repeated_current_reward": np.ones((5, 7), dtype=np.float64),
+    }
+
+    carrier = e005_scan_carrier(
+        source,
+        horizon=5,
+        population=7,
+        action_dim=3,
+    )
+
+    assert carrier.shape == (5, 7, 3)
+    assert carrier.dtype == jnp.float64
+    np.testing.assert_array_equal(carrier, 0.0)
+    with pytest.raises(ValueError, match="rollout shape"):
+        e005_scan_carrier(
+            {**source, "repeated_current_reward": np.ones((4, 7))},
+            horizon=5,
+            population=7,
+            action_dim=3,
+        )
+
+
 def test_environment_group_splits_are_disjoint_complete_and_deterministic() -> None:
     from experiments.g1_e002_critic_representation_audit.run import (
         environment_group_splits,

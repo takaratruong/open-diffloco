@@ -135,6 +135,30 @@ def unwrap_base_actor(
     return current, depth
 
 
+def e005_scan_carrier(
+    source: Mapping[str, np.ndarray],
+    *,
+    horizon: int,
+    population: int,
+    action_dim: int,
+):
+    """Build an unused deterministic scan carrier from E005's retained shape."""
+
+    if horizon < 1 or population < 1 or action_dim < 1:
+        raise ValueError("E005 scan carrier dimensions are invalid")
+    expected = (horizon, population)
+    try:
+        shapes = {
+            name: np.asarray(source[name]).shape
+            for name in ("carried_reward", "repeated_current_reward")
+        }
+    except KeyError as error:
+        raise ValueError("E005 trace is missing a rollout shape") from error
+    if any(shape != expected for shape in shapes.values()):
+        raise ValueError("E005 retained rollout shape drifted")
+    return jnp.zeros((horizon, population, action_dim), dtype=jnp.float64)
+
+
 def environment_group_splits(population: int, *, seed: int) -> dict[str, np.ndarray]:
     """Split paired environment identities once for fit/validation/final test."""
 
@@ -649,9 +673,12 @@ def collect_representation_audit(
 
     with np.load(alias_trace, allow_pickle=False) as archive:
         source = {name: np.asarray(archive[name]) for name in archive.files}
-    scan_noise = jnp.asarray(np.swapaxes(np.asarray(source["action_noise"]), 0, 1))
-    if scan_noise.shape != (horizon, EFFECTIVE_NUM_ENVS, ACTION_DIM):
-        raise ValueError("E005 prospective tape shape drifted")
+    scan_noise = e005_scan_carrier(
+        source,
+        horizon=horizon,
+        population=EFFECTIVE_NUM_ENVS,
+        action_dim=ACTION_DIM,
+    )
 
     def make_rollout():
         def rollout(initial_state, noise):
