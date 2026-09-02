@@ -60,6 +60,10 @@ from src.algorithms.shac.gradients import (
     rollout_terminal_mode_indices,
     support_contact_mode_indices,
 )
+from src.algorithms.shac.actor_returns import (
+    discounted_actor_return,
+    resolve_actor_return_semantics,
+)
 from src.algorithms.shac.ahac import (
     AHAC_CONTACT_METRICS,
     AHAC_SEMANTICS,
@@ -381,7 +385,7 @@ def run_determinism_probe(compiled_step, state) -> dict[str, object]:
         and full_state_exact
         and metrics_exact
     )
-    return {
+    report = {
         "protocol": "shac-compiled-update-determinism-v9",
         "valid": valid,
         "boundaries": boundaries,
@@ -402,6 +406,44 @@ def run_determinism_probe(compiled_step, state) -> dict[str, object]:
         "first_metrics_sha256": first_metrics_sha256,
         "second_metrics_sha256": second_metrics_sha256,
     }
+    if "actor_return_mean" in first_metrics:
+        scalar_names = (
+            "actor_loss",
+            "actor_return_mean",
+            "actor_return_done_env_count",
+            "actor_return_done_event_count",
+            "actor_return_included_transition_count",
+            "actor_return_post_first_done_transition_count",
+            "actor_return_post_first_done_env_count",
+            "actor_return_post_first_done_reward_sum",
+            "actor_return_post_first_done_reward_mean",
+            "actor_grad",
+            "actor_update_norm",
+            "actor_grad_population_mean_norm",
+            "actor_grad_population_rms_norm",
+            "actor_grad_population_variance_trace",
+            "actor_grad_population_cancellation_ratio",
+            "actor_grad_population_noise_scale",
+            "actor_grad_population_esnr",
+        )
+        report["actor_update_summary"] = {
+            name: float(np.asarray(first_metrics[name]))
+            for name in scalar_names
+        }
+        if "actor_cagrad_weights" in first_metrics:
+            report["actor_update_summary"].update(
+                {
+                    name: np.asarray(first_metrics[name]).tolist()
+                    for name in (
+                        "actor_cagrad_bin_counts",
+                        "actor_cagrad_bin_gradient_norms",
+                        "actor_cagrad_bin_losses",
+                        "actor_cagrad_weights",
+                        "actor_cagrad_cosine_matrix",
+                    )
+                }
+            )
+    return report
 
 
 def load_checkpoint(path: str):
@@ -747,6 +789,42 @@ def build_checkpoint_cagrad_telemetry(metrics) -> dict[str, object]:
                 metrics, group=group
             ).items()
         },
+    }
+
+
+def build_actor_return_telemetry(
+    metrics, *, semantics: str
+) -> dict[str, object]:
+    """Serialize the fixed-rollout episode-boundary evidence."""
+
+    counts = {
+        name: int(metrics[f"actor_return_{name}"])
+        for name in (
+            "done_env_count",
+            "done_event_count",
+            "included_transition_count",
+            "post_first_done_transition_count",
+            "post_first_done_env_count",
+        )
+    }
+    values = {
+        name: float(metrics[f"actor_return_{name}"])
+        for name in (
+            "mean",
+            "post_first_done_reward_sum",
+            "post_first_done_reward_mean",
+        )
+    }
+    if (
+        semantics not in {"multi_episode", "first_terminal"}
+        or any(count < 0 for count in counts.values())
+        or not all(math.isfinite(value) for value in values.values())
+    ):
+        raise ValueError("actor return telemetry is invalid")
+    return {
+        "actor_return_semantics": semantics,
+        **{f"actor_return_{name}": count for name, count in counts.items()},
+        **{f"actor_return_{name}": value for name, value in values.items()},
     }
 
 
@@ -2899,6 +2977,8 @@ def train(
     actor_bootstrap_scale: float = 1.0,
     actor_bootstrap_delay_steps: int = 0,
     allow_resume_actor_bootstrap_scale_change: bool = False,
+    actor_return_semantics: str = "multi_episode",
+    allow_resume_actor_return_semantics_change: bool = False,
     ahac: bool = False,
     ahac_horizon_min: int = 8,
     ahac_horizon_max: int = 24,
@@ -3088,6 +3168,10 @@ def train(
             actor terminal-value scale when resuming a checkpoint.
         actor_bootstrap_delay_steps: Environment steps before the actor uses
             target-critic terminal value estimates.
+        actor_return_semantics: Whether a fixed rollout accumulates every reset
+            episode or only the prefix through its first done.
+        allow_resume_actor_return_semantics_change: Explicitly permit changing
+            the actor return boundary when resuming a checkpoint.
         determinism_probe_output: Optional create-only JSON path. When set,
             compile one update, invoke that same callable twice from the same
             input state, publish exact boundary comparisons, and return without
@@ -3301,6 +3385,12 @@ def train(
         raise ValueError(
             "allow_resume_actor_bootstrap_scale_change must be boolean"
         )
+    actor_return_semantics = resolve_actor_return_semantics(
+        None,
+        requested=actor_return_semantics,
+        is_resume=False,
+        allow_change=allow_resume_actor_return_semantics_change,
+    )
     if (
         isinstance(actor_bootstrap_delay_steps, bool)
         or not isinstance(actor_bootstrap_delay_steps, int)
@@ -3666,6 +3756,12 @@ def train(
             resumed_hparams,
             requested_scale=actor_bootstrap_scale,
             allow_change=allow_resume_actor_bootstrap_scale_change,
+        )
+        actor_return_semantics = resolve_actor_return_semantics(
+            resumed_hparams,
+            requested=actor_return_semantics,
+            is_resume=True,
+            allow_change=allow_resume_actor_return_semantics_change,
         )
         (
             actor_reference_lookahead_steps,
@@ -5885,36 +5981,6 @@ def train(
             double=ahac,
         )
 
-        # Accumulate discounted returns, handling episode boundaries. Time-limit
-        # truncations bootstrap from the pre-reset observation stored by env.step.
-        def accum_return(carry, x):
-            total, running, discount = carry
-            r, done, terminal, v_next, active = x
-            next_discount = jp.where(active, discount * gamma, discount)
-            running = running + discount * r
-            trunc_bootstrap = (
-                current_actor_bootstrap_scale
-                * (1.0 - terminal)
-                * next_discount
-                * v_next
-            )
-            total = total + jp.where(done, running + trunc_bootstrap, 0.0)
-            running = jp.where(done, 0.0, running)
-            discount = jp.where(done, 1.0, next_discount)
-            return (total, running, discount), None
-
-        (total_ret, running, final_discount), _ = jax.lax.scan(
-            accum_return,
-            (0.0, 0.0, 1.0),
-            (
-                traj["reward"],
-                traj["done"],
-                traj["terminal"],
-                bootstrap_v,
-                traj["ahac_active"],
-            ),
-        )
-
         final_obs = critic_norm.normalize(
             critic_norm_state,
             env._get_critic_obs(final_state.data, final_state.info),
@@ -5923,13 +5989,26 @@ def train(
             critic.apply(bootstrap_critic_params, final_obs),
             double=ahac,
         )
-        final_bootstrap = jp.where(
-            traj["done"][-1],
-            0.0,
-            current_actor_bootstrap_scale * final_discount * final_v,
+        actor_return = discounted_actor_return(
+            rewards=traj["reward"],
+            dones=traj["done"],
+            terminals=traj["terminal"],
+            bootstrap_values=bootstrap_v,
+            active=traj["ahac_active"],
+            final_value=final_v,
+            gamma=gamma,
+            bootstrap_scale=current_actor_bootstrap_scale,
+            semantics=actor_return_semantics,
         )
-
-        total_ret = total_ret + running + final_bootstrap
+        total_ret = actor_return.total
+        traj = {
+            **traj,
+            "actor_discounted_return": total_ret,
+            "actor_return_reward_mask": actor_return.reward_mask,
+            "actor_return_post_first_done_mask": (
+                actor_return.post_first_done_mask
+            ),
+        }
 
         active_count = jp.maximum(jp.sum(traj["ahac_active"]), 1)
         anchor_loss = (
@@ -6835,7 +6914,15 @@ def train(
             first_env_step_fingerprint = tree_bit_fingerprint(
                 trajs["determinism_env_step_fingerprint"][:, 0]
             )
-            rollout_fingerprint = tree_bit_fingerprint((trajs, final_states))
+            physical_trajs = {
+                name: value
+                for name, value in trajs.items()
+                if not name.startswith("actor_return_")
+                and name != "actor_discounted_return"
+            }
+            rollout_fingerprint = tree_bit_fingerprint(
+                (physical_trajs, final_states)
+            )
             actor_cagrad_fingerprint = tree_bit_fingerprint(
                 (grads, updates, new_actor_params, new_actor_opt)
             )
@@ -7478,6 +7565,46 @@ def train(
             ],
             "critic_grad_raw_max": critic_update_metrics["raw_norm_max"][-1],
             "actor_loss": jp.mean(losses),
+            "actor_return_mean": jp.mean(
+                trajs["actor_discounted_return"]
+            ),
+            "actor_return_done_env_count": jp.sum(
+                jp.any(trajs["done"] & trajs["ahac_active"], axis=1)
+            ),
+            "actor_return_done_event_count": jp.sum(
+                trajs["done"] & trajs["ahac_active"]
+            ),
+            "actor_return_included_transition_count": jp.sum(
+                trajs["actor_return_reward_mask"]
+            ),
+            "actor_return_post_first_done_transition_count": jp.sum(
+                trajs["actor_return_post_first_done_mask"]
+            ),
+            "actor_return_post_first_done_env_count": jp.sum(
+                jp.any(
+                    trajs["actor_return_post_first_done_mask"], axis=1
+                )
+            ),
+            "actor_return_post_first_done_reward_sum": jp.sum(
+                jp.where(
+                    trajs["actor_return_post_first_done_mask"],
+                    trajs["reward"],
+                    0.0,
+                )
+            ),
+            "actor_return_post_first_done_reward_mean": (
+                jp.sum(
+                    jp.where(
+                        trajs["actor_return_post_first_done_mask"],
+                        trajs["reward"],
+                        0.0,
+                    )
+                )
+                / jp.maximum(
+                    jp.sum(trajs["actor_return_post_first_done_mask"]),
+                    1,
+                )
+            ),
             "actor_policy_anchor_squared_error": jp.mean(
                 trajs["actor_policy_anchor_squared_error"]
             ),
@@ -9206,6 +9333,10 @@ def train(
         "allow_resume_actor_bootstrap_scale_change": (
             allow_resume_actor_bootstrap_scale_change
         ),
+        "actor_return_semantics": actor_return_semantics,
+        "allow_resume_actor_return_semantics_change": (
+            allow_resume_actor_return_semantics_change
+        ),
         "actor_hidden": list(actor_hidden),
         "actor_layer_norm": actor_layer_norm,
         "actor_zero_output": actor_zero_output,
@@ -9428,6 +9559,9 @@ def train(
                     ),
                     "actor_bootstrap_scale_current": float(
                         metrics["actor_bootstrap_scale_current"]
+                    ),
+                    **build_actor_return_telemetry(
+                        metrics, semantics=actor_return_semantics
                     ),
                     "actor_grad_raw_median": float(
                         metrics["actor_grad_raw_median"]
@@ -9844,6 +9978,9 @@ def train(
                 "step": int(current_step),
                 "action_noise_current": action_noise_std_hparam(
                     np.asarray(metrics["action_noise_current"])
+                ),
+                **build_actor_return_telemetry(
+                    metrics, semantics=actor_return_semantics
                 ),
                 "actor_grad_population_mean_norm": float(
                     metrics["actor_grad_population_mean_norm"]
