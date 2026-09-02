@@ -274,7 +274,7 @@ def inspect_upstream_double_critic(source_text: str) -> dict[str, object]:
         spread = next(
             (
                 argument.value.id
-                for argument in node.value.args
+                for argument in ast.walk(node.value)
                 if isinstance(argument, ast.Starred)
                 and isinstance(argument.value, ast.Name)
             ),

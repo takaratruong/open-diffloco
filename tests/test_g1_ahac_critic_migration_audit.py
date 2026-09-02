@@ -104,8 +104,8 @@ def test_upstream_double_critic_audit_detects_shared_module_objects() -> None:
 class DoubleCriticMLP(nn.Module):
     def __init__(self):
         modules = [nn.Linear(3, 1)]
-        self.critic_1 = nn.Sequential(*modules)
-        self.critic_2 = nn.Sequential(*modules)
+        self.critic_1 = nn.Sequential(*modules).to(device)
+        self.critic_2 = nn.Sequential(*modules).to(device)
 """
     audit = inspect_upstream_double_critic(source)
 
