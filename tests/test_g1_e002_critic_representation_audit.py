@@ -15,10 +15,15 @@ from src.algorithms.shac.residual_preview_adapter import (
 from src.core.networks import Actor, Critic
 
 
-def _metrics(*, rank: float, nrmse: float) -> dict[str, dict[str, float]]:
+def _metrics(
+    *,
+    rank: float,
+    nrmse: float,
+    boundaries: tuple[str, ...] = ("aggregate", "h24"),
+) -> dict[str, dict[str, float]]:
     row = {"rank_correlation": rank, "nrmse": nrmse}
     return {
-        group: {boundary: dict(row) for boundary in ("aggregate", "h24")}
+        group: {boundary: dict(row) for boundary in boundaries}
         for group in ("combined", "carried", "repeated_current")
     }
 
@@ -215,6 +220,39 @@ def test_representation_summary_keeps_arm_and_h24_gates_separate() -> None:
     assert not representation_adequate(changed)
 
 
+def test_representation_summary_can_add_h0_as_a_required_gate() -> None:
+    from experiments.g1_e002_critic_representation_audit.run import (
+        representation_adequate,
+        summarize_representation_metrics,
+    )
+
+    targets = np.tile(np.asarray([1.0, 2.0, 3.0]), 4)
+    predictions = targets.copy()
+    arms = np.repeat(np.asarray([0, 0, 1, 1]), 3)
+    times = np.repeat(np.asarray([0, 24, 0, 24]), 3)
+    boundary_indices = {"h0": 0, "h24": 24}
+
+    summary = summarize_representation_metrics(
+        predictions,
+        targets,
+        arms,
+        times,
+        np.ones(targets.shape, dtype=bool),
+        boundary_indices=boundary_indices,
+    )
+
+    assert tuple(summary["combined"]) == ("aggregate", "h0", "h24")
+    assert representation_adequate(
+        summary,
+        required_boundaries=("aggregate", "h0", "h24"),
+    )
+    summary["carried"]["h0"]["nrmse"] = 0.26
+    assert not representation_adequate(
+        summary,
+        required_boundaries=("aggregate", "h0", "h24"),
+    )
+
+
 def test_representation_classification_prioritizes_latent_then_action() -> None:
     from experiments.g1_e002_critic_representation_audit.run import (
         classify_representations,
@@ -334,6 +372,7 @@ def test_critic_fit_selects_only_on_validation_and_runs_exact_budget() -> None:
         steps=4,
         evaluation_interval=2,
         optimizer=optimizer,
+        boundary_indices={"h0": 0, "h24": 24},
     )
 
     assert selected_params is not None
@@ -341,3 +380,28 @@ def test_critic_fit_selects_only_on_validation_and_runs_exact_budget() -> None:
     assert report["executed_steps"] == 4
     assert report["final_optimizer_count"] == report["initial_optimizer_count"] + 4
     assert report["selected"]["step"] in {0, 2, 4}
+    assert tuple(report["selected"]["metrics"]["combined"]) == (
+        "aggregate",
+        "h0",
+        "h24",
+    )
+
+
+def test_parser_makes_h0_an_explicit_opt_in() -> None:
+    from experiments.g1_e002_critic_representation_audit.run import build_parser
+
+    base = [
+        "--checkpoint",
+        "checkpoint.pkl",
+        "--reference-path",
+        "reference.npz",
+        "--alias-trace",
+        "trace.npz",
+        "--output-root",
+        "output",
+        "--code-commit",
+        "0" * 40,
+    ]
+
+    assert build_parser().parse_args(base).include_h0 is False
+    assert build_parser().parse_args([*base, "--include-h0"]).include_h0 is True

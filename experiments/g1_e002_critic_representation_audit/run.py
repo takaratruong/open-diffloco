@@ -233,8 +233,10 @@ def summarize_representation_metrics(
     arm: np.ndarray,
     time_index: np.ndarray,
     selected: np.ndarray,
+    *,
+    boundary_indices: Mapping[str, int] | None = None,
 ) -> dict[str, dict[str, dict[str, float]]]:
-    """Evaluate aggregate and H24 calibration for both arms and combined."""
+    """Evaluate aggregate and registered boundary calibration by arm."""
 
     values = np.asarray(predictions, dtype=np.float64)
     targets = np.asarray(realized_returns, dtype=np.float64)
@@ -257,15 +259,40 @@ def summarize_representation_metrics(
         "carried": base_mask & (arms == 0),
         "repeated_current": base_mask & (arms == 1),
     }
+    if boundary_indices is None:
+        boundary_indices = {"h24": BOUNDARY_INDEX}
+    else:
+        boundary_indices = dict(boundary_indices)
+    if (
+        not boundary_indices
+        or "aggregate" in boundary_indices
+        or any(
+            not isinstance(name, str)
+            or not name
+            or isinstance(index, bool)
+            or not isinstance(index, int)
+            or index < 0
+            for name, index in boundary_indices.items()
+        )
+    ):
+        raise ValueError("representation boundary indices are invalid")
     result: dict[str, dict[str, dict[str, float]]] = {}
     for name in METRIC_GROUPS:
         aggregate = group_masks[name]
-        h24 = aggregate & (times == 24)
-        if np.sum(aggregate) < 2 or np.sum(h24) < 2:
+        boundary_masks = {
+            boundary: aggregate & (times == index)
+            for boundary, index in boundary_indices.items()
+        }
+        if np.sum(aggregate) < 2 or any(
+            np.sum(mask) < 2 for mask in boundary_masks.values()
+        ):
             raise ValueError("representation metric group is too small")
         result[name] = {
             "aggregate": calibration_metrics(values[aggregate], targets[aggregate]),
-            "h24": calibration_metrics(values[h24], targets[h24]),
+            **{
+                boundary: calibration_metrics(values[mask], targets[mask])
+                for boundary, mask in boundary_masks.items()
+            },
         }
     return result
 
@@ -291,6 +318,7 @@ def fit_critic_with_validation(
     steps: int,
     evaluation_interval: int,
     optimizer,
+    boundary_indices: Mapping[str, int] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Fit one arm and select snapshots exclusively on validation rows."""
 
@@ -323,6 +351,11 @@ def fit_critic_with_validation(
     validation_targets = targets[validating]
     validation_arms = arms[validating]
     validation_times = times[validating]
+    if boundary_indices is None:
+        boundary_indices = {"h24": BOUNDARY_INDEX}
+    else:
+        boundary_indices = dict(boundary_indices)
+    required_boundaries = ("aggregate", *boundary_indices)
 
     @jax.jit
     def update(current_params, current_opt_state):
@@ -354,13 +387,18 @@ def fit_critic_with_validation(
             validation_arms,
             validation_times,
             np.ones(validation_targets.shape, dtype=bool),
+            boundary_indices=boundary_indices,
         )
         return {"step": step, "fit_loss": loss, "metrics": metrics}
 
     initial_count = _optimizer_count(opt_state)
     first = candidate(0, None)
     candidates = [first]
-    best_key = validation_candidate_key(first["metrics"], step=0)
+    best_key = validation_candidate_key(
+        first["metrics"],
+        step=0,
+        required_boundaries=required_boundaries,
+    )
     best_params = params
     selected = first
     last_loss = None
@@ -370,7 +408,11 @@ def fit_critic_with_validation(
         last_loss = float(loss)
         row = candidate(step, last_loss)
         candidates.append(row)
-        key = validation_candidate_key(row["metrics"], step=step)
+        key = validation_candidate_key(
+            row["metrics"],
+            step=step,
+            required_boundaries=required_boundaries,
+        )
         if key > best_key:
             best_key = key
             best_params = params
@@ -393,7 +435,16 @@ def fit_critic_with_validation(
 
 def _metric_values(
     metrics: Mapping[str, Any],
+    *,
+    required_boundaries: Sequence[str] = METRIC_BOUNDARIES,
 ) -> tuple[list[float], list[float]]:
+    boundaries = tuple(required_boundaries)
+    if (
+        not boundaries
+        or len(set(boundaries)) != len(boundaries)
+        or boundaries[0] != "aggregate"
+    ):
+        raise ValueError("representation metric boundaries are invalid")
     if set(metrics) != set(METRIC_GROUPS):
         raise ValueError("representation metrics are incomplete")
     ranks: list[float] = []
@@ -401,9 +452,9 @@ def _metric_values(
     try:
         for group in METRIC_GROUPS:
             group_metrics = metrics[group]
-            if set(group_metrics) != set(METRIC_BOUNDARIES):
+            if set(group_metrics) != set(boundaries):
                 raise ValueError("representation metrics are incomplete")
-            for boundary in METRIC_BOUNDARIES:
+            for boundary in boundaries:
                 record = group_metrics[boundary]
                 rank = float(record["rank_correlation"])
                 nrmse = float(record["nrmse"])
@@ -416,55 +467,98 @@ def _metric_values(
     return ranks, errors
 
 
-def representation_adequate(metrics: Mapping[str, Any]) -> bool:
-    """Require every arm population and H24 held-out gate to pass."""
+def representation_adequate(
+    metrics: Mapping[str, Any],
+    *,
+    required_boundaries: Sequence[str] = METRIC_BOUNDARIES,
+) -> bool:
+    """Require every registered population/boundary held-out gate to pass."""
 
     try:
-        ranks, errors = _metric_values(metrics)
+        ranks, errors = _metric_values(
+            metrics,
+            required_boundaries=required_boundaries,
+        )
     except ValueError as error:
         raise ValueError("representation metrics are invalid") from error
     return bool(min(ranks) >= MIN_RANK_CORRELATION and max(errors) <= MAX_NRMSE)
 
 
 def validation_candidate_key(
-    metrics: Mapping[str, Any], *, step: int
+    metrics: Mapping[str, Any],
+    *,
+    step: int,
+    required_boundaries: Sequence[str] = METRIC_BOUNDARIES,
 ) -> tuple[bool, float, float, int]:
     """Select only on validation: pass, worst NRMSE, worst rank, earlier."""
 
     if isinstance(step, bool) or not isinstance(step, int) or step < 0:
         raise ValueError("validation candidate step is invalid")
-    ranks, errors = _metric_values(metrics)
+    ranks, errors = _metric_values(
+        metrics,
+        required_boundaries=required_boundaries,
+    )
     return (
-        representation_adequate(metrics),
+        representation_adequate(
+            metrics,
+            required_boundaries=required_boundaries,
+        ),
         -max(errors),
         min(ranks),
         -step,
     )
 
 
-def _quality(metrics: Mapping[str, Any]) -> tuple[float, float]:
-    ranks, errors = _metric_values(metrics)
+def _quality(
+    metrics: Mapping[str, Any],
+    *,
+    required_boundaries: Sequence[str] = METRIC_BOUNDARIES,
+) -> tuple[float, float]:
+    ranks, errors = _metric_values(
+        metrics,
+        required_boundaries=required_boundaries,
+    )
     return (-max(errors), min(ranks))
 
 
 def classify_representations(
     final_test: Mapping[str, Mapping[str, Any]],
+    *,
+    required_boundaries: Sequence[str] = METRIC_BOUNDARIES,
 ) -> str:
     """Classify the frozen final-test metrics without selecting on them."""
 
     if set(final_test) != set(REPRESENTATION_NAMES):
         raise ValueError("representation test arms are incomplete")
-    if representation_adequate(final_test["current_plus_actor_latent"]):
+    if representation_adequate(
+        final_test["current_plus_actor_latent"],
+        required_boundaries=required_boundaries,
+    ):
         return "actor-latent-representation-adequate"
-    if representation_adequate(final_test["current_plus_action"]):
+    if representation_adequate(
+        final_test["current_plus_action"],
+        required_boundaries=required_boundaries,
+    ):
         return "policy-action-representation-adequate"
-    if representation_adequate(final_test["current_only"]):
+    if representation_adequate(
+        final_test["current_only"],
+        required_boundaries=required_boundaries,
+    ):
         return "current-only-refit-adequate"
-    baseline_quality = _quality(final_test["current_only"])
+    baseline_quality = _quality(
+        final_test["current_only"],
+        required_boundaries=required_boundaries,
+    )
     if (
         max(
-            _quality(final_test["current_plus_action"]),
-            _quality(final_test["current_plus_actor_latent"]),
+            _quality(
+                final_test["current_plus_action"],
+                required_boundaries=required_boundaries,
+            ),
+            _quality(
+                final_test["current_plus_actor_latent"],
+                required_boundaries=required_boundaries,
+            ),
         )
         > baseline_quality
     ):
@@ -593,10 +687,18 @@ def _phase_split_summary(
 
 
 def collect_representation_audit(
-    *, checkpoint: Path, reference: Path, alias_trace: Path
+    *,
+    checkpoint: Path,
+    reference: Path,
+    alias_trace: Path,
+    include_h0: bool = False,
 ) -> tuple[dict[str, np.ndarray], dict[str, object]]:
     """Capture paired policy contexts and fit three matched critic arms."""
 
+    boundary_indices = (
+        {"h0": 0, "h24": BOUNDARY_INDEX} if include_h0 else {"h24": BOUNDARY_INDEX}
+    )
+    required_boundaries = ("aggregate", *boundary_indices)
     hparams = json.loads(
         checkpoint.with_name("hparams.json").read_text(encoding="utf-8")
     )
@@ -943,6 +1045,7 @@ def collect_representation_audit(
             steps=FIT_STEPS,
             evaluation_interval=EVALUATION_INTERVAL,
             optimizer=optimizer,
+            boundary_indices=boundary_indices,
         )
 
     predictions = {
@@ -956,6 +1059,7 @@ def collect_representation_audit(
             dataset["arm"],
             dataset["time_index"],
             test_mask,
+            boundary_indices=boundary_indices,
         )
         for name in REPRESENTATION_NAMES
     }
@@ -965,8 +1069,12 @@ def collect_representation_audit(
         dataset["arm"],
         dataset["time_index"],
         test_mask,
+        boundary_indices=boundary_indices,
     )
-    classification = classify_representations(final_test)
+    classification = classify_representations(
+        final_test,
+        required_boundaries=required_boundaries,
+    )
 
     split_code = np.full(row_count, -1, dtype=np.int8)
     split_code[fit_group_mask] = 0
@@ -993,7 +1101,12 @@ def collect_representation_audit(
         },
     }
     result = {
-        "protocol": "g1-e002-critic-representation-audit-v1",
+        "protocol": (
+            "g1-e002-critic-representation-h0-audit-v1"
+            if include_h0
+            else "g1-e002-critic-representation-audit-v1"
+        ),
+        "include_h0": include_h0,
         "valid": True,
         "classification": classification,
         "actor_optimizer_updates": 0,
@@ -1072,8 +1185,9 @@ def collect_representation_audit(
             "minimum_rank_correlation": MIN_RANK_CORRELATION,
             "maximum_nrmse": MAX_NRMSE,
             "required_groups": list(METRIC_GROUPS),
-            "required_boundaries": list(METRIC_BOUNDARIES),
-            "all_six_gates_must_pass": True,
+            "required_boundaries": list(required_boundaries),
+            "required_gate_count": len(METRIC_GROUPS) * len(required_boundaries),
+            "all_required_gates_must_pass": True,
         },
         "interpretation_boundary": (
             "This critic-only paired audit tests held-out scalar return "
@@ -1095,6 +1209,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--code-commit", required=True)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--include-h0",
+        action="store_true",
+        help="add the exact common-input H0 boundary to selection and final gates",
+    )
     return parser
 
 
@@ -1119,13 +1238,18 @@ def main() -> None:
     if not alias_trace.is_file() or sha256_file(alias_trace) != E005_ALIAS_TRACE_SHA256:
         raise ValueError("E005 alias trace SHA-256 mismatch")
     preflight.update(
-        protocol="g1-e002-critic-representation-preflight-v1",
+        protocol=(
+            "g1-e002-critic-representation-h0-preflight-v1"
+            if args.include_h0
+            else "g1-e002-critic-representation-preflight-v1"
+        ),
         runtime=runtime,
         alias_trace_path=str(alias_trace),
         alias_trace_sha256=E005_ALIAS_TRACE_SHA256,
         actor_optimizer_updates=0,
         critic_optimizer_updates_per_arm=FIT_STEPS,
         environment_steps_retained=0,
+        include_h0=args.include_h0,
     )
     preflight_path = output_root / "preflight.json"
     _write_json_atomically(preflight_path, preflight)
@@ -1134,6 +1258,7 @@ def main() -> None:
         checkpoint=checkpoint,
         reference=reference,
         alias_trace=alias_trace,
+        include_h0=args.include_h0,
     )
     dataset_path = output_root / "critic_representation_dataset.npz"
     result_path = output_root / "critic_representation_audit.json"
@@ -1141,7 +1266,11 @@ def main() -> None:
     result["dataset_sha256"] = sha256_file(dataset_path)
     _write_json_atomically(result_path, result)
     completion = {
-        "protocol": "g1-e002-critic-representation-completion-v1",
+        "protocol": (
+            "g1-e002-critic-representation-h0-completion-v1"
+            if args.include_h0
+            else "g1-e002-critic-representation-completion-v1"
+        ),
         "valid": True,
         "classification": result["classification"],
         "actor_optimizer_updates": 0,
