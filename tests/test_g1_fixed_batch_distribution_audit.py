@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -40,6 +41,46 @@ def _depth_two_params() -> FrozenControllerResidualParams:
     return FrozenControllerResidualParams(
         parent=depth_one,
         adapter=_adapter(6.0),
+    )
+
+
+class _AddressReprAux:
+    def __eq__(self, other):
+        return isinstance(other, _AddressReprAux)
+
+    def __hash__(self):
+        return 1
+
+
+@jax.tree_util.register_pytree_node_class
+class _AddressReprTree:
+    def __init__(self, value):
+        self.value = value
+
+    def tree_flatten(self):
+        return (self.value,), _AddressReprAux()
+
+    @classmethod
+    def tree_unflatten(cls, auxiliary, children):
+        del auxiliary
+        return cls(children[0])
+
+
+def test_stable_tree_hash_ignores_addresses_in_custom_node_aux_repr():
+    from experiments.g1_fixed_batch_distribution_audit.run import (
+        stable_path_leaf_tree_sha256,
+    )
+
+    tree = _AddressReprTree(jnp.array([1.0, 2.0]))
+    _, first_structure = jax.tree_util.tree_flatten_with_path(tree)
+    _, second_structure = jax.tree_util.tree_flatten_with_path(tree)
+
+    assert repr(first_structure) != repr(second_structure)
+    assert stable_path_leaf_tree_sha256(tree) == stable_path_leaf_tree_sha256(
+        tree
+    )
+    assert stable_path_leaf_tree_sha256(tree) != stable_path_leaf_tree_sha256(
+        _AddressReprTree(jnp.array([1.0, 3.0]))
     )
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
 import math
 import os
@@ -328,17 +329,34 @@ def _load_arm_row(run_directory: Path) -> dict[str, object]:
     return row
 
 
+def stable_path_leaf_tree_sha256(tree: object) -> str:
+    """Hash tree leaf identity without unstable custom-node auxiliary reprs."""
+    digest = hashlib.sha256()
+    digest.update(
+        f"{type(tree).__module__}.{type(tree).__qualname__}".encode("utf-8")
+    )
+    paths_and_leaves, _ = jax.tree_util.tree_flatten_with_path(tree)
+    digest.update(str(len(paths_and_leaves)).encode("ascii"))
+    for path, value in paths_and_leaves:
+        digest.update(repr(path).encode("utf-8"))
+        array = np.ascontiguousarray(np.asarray(value))
+        digest.update(str(array.dtype).encode("ascii"))
+        digest.update(repr(array.shape).encode("ascii"))
+        digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
 def _state_lineage_hashes(state: object) -> dict[str, str]:
     return {
-        "key": parameter_tree_sha256(state.key),
-        "env_state": parameter_tree_sha256(state.env_state),
-        "critic_params": parameter_tree_sha256(state.critic_params),
-        "target_critic_params": parameter_tree_sha256(
+        "key": stable_path_leaf_tree_sha256(state.key),
+        "env_state": stable_path_leaf_tree_sha256(state.env_state),
+        "critic_params": stable_path_leaf_tree_sha256(state.critic_params),
+        "target_critic_params": stable_path_leaf_tree_sha256(
             state.target_critic_params
         ),
-        "normalizer": parameter_tree_sha256(state.normalizer),
-        "actor_optimizer": parameter_tree_sha256(state.actor_opt),
-        "critic_optimizer": parameter_tree_sha256(state.critic_opt),
+        "normalizer": stable_path_leaf_tree_sha256(state.normalizer),
+        "actor_optimizer": stable_path_leaf_tree_sha256(state.actor_opt),
+        "critic_optimizer": stable_path_leaf_tree_sha256(state.critic_opt),
     }
 
 
