@@ -61,6 +61,7 @@ from src.algorithms.shac.gradients import (
     support_contact_mode_indices,
 )
 from src.algorithms.shac.actor_returns import (
+    actor_return_rollout_metrics,
     discounted_actor_return,
     resolve_actor_return_semantics,
 )
@@ -7565,45 +7566,15 @@ def train(
             ],
             "critic_grad_raw_max": critic_update_metrics["raw_norm_max"][-1],
             "actor_loss": jp.mean(losses),
-            "actor_return_mean": jp.mean(
-                trajs["actor_discounted_return"]
-            ),
-            "actor_return_done_env_count": jp.sum(
-                jp.any(trajs["done"] & trajs["ahac_active"], axis=1)
-            ),
-            "actor_return_done_event_count": jp.sum(
-                trajs["done"] & trajs["ahac_active"]
-            ),
-            "actor_return_included_transition_count": jp.sum(
-                trajs["actor_return_reward_mask"]
-            ),
-            "actor_return_post_first_done_transition_count": jp.sum(
-                trajs["actor_return_post_first_done_mask"]
-            ),
-            "actor_return_post_first_done_env_count": jp.sum(
-                jp.any(
-                    trajs["actor_return_post_first_done_mask"], axis=1
-                )
-            ),
-            "actor_return_post_first_done_reward_sum": jp.sum(
-                jp.where(
-                    trajs["actor_return_post_first_done_mask"],
-                    trajs["reward"],
-                    0.0,
-                )
-            ),
-            "actor_return_post_first_done_reward_mean": (
-                jp.sum(
-                    jp.where(
-                        trajs["actor_return_post_first_done_mask"],
-                        trajs["reward"],
-                        0.0,
-                    )
-                )
-                / jp.maximum(
-                    jp.sum(trajs["actor_return_post_first_done_mask"]),
-                    1,
-                )
+            **actor_return_rollout_metrics(
+                dones=trajs["done"],
+                active=trajs["ahac_active"],
+                discounted_returns=trajs["actor_discounted_return"],
+                reward_masks=trajs["actor_return_reward_mask"],
+                post_first_done_masks=trajs[
+                    "actor_return_post_first_done_mask"
+                ],
+                rewards=trajs["reward"],
             ),
             "actor_policy_anchor_squared_error": jp.mean(
                 trajs["actor_policy_anchor_squared_error"]

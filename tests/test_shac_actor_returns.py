@@ -5,12 +5,36 @@ import jax.numpy as jnp
 import numpy as np
 
 from src.algorithms.shac.actor_returns import (
+    actor_return_rollout_metrics,
     discounted_actor_return,
     resolve_actor_return_semantics,
 )
 
 
 class ActorReturnSemanticsTest(unittest.TestCase):
+    def test_rollout_metrics_accept_numeric_environment_done_flags(self):
+        metrics = actor_return_rollout_metrics(
+            dones=jnp.array([[0.0, 1.0, 0.0], [0.0, 0.0, 0.0]]),
+            active=jnp.ones((2, 3), dtype=bool),
+            discounted_returns=jnp.array([2.0, 3.0]),
+            reward_masks=jnp.array([[True, True, False], [True, True, True]]),
+            post_first_done_masks=jnp.array(
+                [[False, False, True], [False, False, False]]
+            ),
+            rewards=jnp.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]),
+        )
+
+        self.assertEqual(int(metrics["actor_return_done_env_count"]), 1)
+        self.assertEqual(int(metrics["actor_return_done_event_count"]), 1)
+        self.assertEqual(int(metrics["actor_return_included_transition_count"]), 5)
+        self.assertEqual(
+            int(metrics["actor_return_post_first_done_transition_count"]), 1
+        )
+        self.assertAlmostEqual(float(metrics["actor_return_mean"]), 2.5)
+        self.assertAlmostEqual(
+            float(metrics["actor_return_post_first_done_reward_sum"]), 0.3
+        )
+
     def test_multi_episode_is_bit_exact_with_the_legacy_accumulator(self):
         rewards = jnp.array([0.13, -0.2, 0.7, 0.11], dtype=jnp.float64)
         dones = jnp.array([False, True, False, False])
