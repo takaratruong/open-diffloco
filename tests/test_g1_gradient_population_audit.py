@@ -1,3 +1,4 @@
+import json
 import math
 
 
@@ -53,3 +54,30 @@ def test_gradient_distribution_summary_reconstructs_batch_esnr() -> None:
     assert math.isclose(summary["estimated_batch_esnr"]["8"], 8.0 / 3.0)
     assert math.isclose(summary["estimated_batch_esnr"]["512"], 512.0 / 3.0)
     assert summary["classification"] == "population-mean-has-material-cancellation"
+
+
+def test_capture_row_joins_checkpoint_and_diagnostic_telemetry(tmp_path) -> None:
+    from experiments.g1_gradient_population_audit.run import (
+        load_gradient_capture_row,
+    )
+
+    checkpoint_row = {
+        "step": 1_880_064,
+        "actor_cagrad_valid": True,
+        "actor_grad_population_mean_norm": 0.5,
+    }
+    diagnostic_row = {
+        **checkpoint_row,
+        "actor_grad_finite_fraction": 1.0,
+    }
+    (tmp_path / "checkpoint_phase_metrics.json").write_text(
+        json.dumps([checkpoint_row]), encoding="utf-8"
+    )
+    (tmp_path / "diag_log.json").write_text(
+        json.dumps([diagnostic_row]), encoding="utf-8"
+    )
+
+    row = load_gradient_capture_row(tmp_path, expected_step=1_880_064)
+
+    assert row["actor_grad_finite_fraction"] == 1.0
+    assert row["actor_grad_population_mean_norm"] == 0.5

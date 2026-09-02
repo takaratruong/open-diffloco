@@ -81,6 +81,37 @@ def _close(actual: float, expected: float) -> bool:
     return math.isclose(actual, expected, rel_tol=2e-4, abs_tol=2e-7)
 
 
+def _load_single_metric_row(path: Path) -> dict[str, object]:
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise ValueError(f"{path.name} must contain exactly one metric row")
+    return rows[0]
+
+
+def load_gradient_capture_row(
+    run_directory: Path, *, expected_step: int
+) -> dict[str, object]:
+    """Join checkpoint and diagnostic telemetry at one exact update step."""
+
+    checkpoint_row = _load_single_metric_row(
+        run_directory / "checkpoint_phase_metrics.json"
+    )
+    diagnostic_row = _load_single_metric_row(run_directory / "diag_log.json")
+    if (
+        checkpoint_row.get("step") != expected_step
+        or diagnostic_row.get("step") != expected_step
+    ):
+        raise ValueError("checkpoint and diagnostic telemetry steps do not match")
+    for name in ("actor_cagrad_valid", *METRIC_KEYS):
+        if checkpoint_row.get(name) != diagnostic_row.get(name):
+            raise ValueError(f"checkpoint and diagnostic {name} do not match")
+    joined = dict(checkpoint_row)
+    joined["actor_grad_finite_fraction"] = diagnostic_row.get(
+        "actor_grad_finite_fraction"
+    )
+    return joined
+
+
 def summarize_gradient_distribution(
     row: Mapping[str, object], *, expected_step: int
 ) -> dict[str, object]:
@@ -163,6 +194,7 @@ def validate_training_artifacts(
 
     hparams_path = run_directory / "hparams.json"
     metrics_path = run_directory / "checkpoint_phase_metrics.json"
+    diagnostic_path = run_directory / "diag_log.json"
     checkpoint_path = run_directory / f"checkpoint_step_{END_STEP}.pkl"
     hparams = json.loads(hparams_path.read_text(encoding="utf-8"))
     required_hparams = {
@@ -182,10 +214,8 @@ def validate_training_artifacts(
     if any(hparams.get(name) != value for name, value in required_hparams.items()):
         raise ValueError("gradient audit hparams do not preserve exact E002")
 
-    rows = json.loads(metrics_path.read_text(encoding="utf-8"))
-    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
-        raise ValueError("gradient audit requires one checkpoint metric row")
-    summary = summarize_gradient_distribution(rows[0], expected_step=END_STEP)
+    row = load_gradient_capture_row(run_directory, expected_step=END_STEP)
+    summary = summarize_gradient_distribution(row, expected_step=END_STEP)
 
     with source_checkpoint.open("rb") as stream:
         source = pickle.load(stream)
@@ -204,6 +234,7 @@ def validate_training_artifacts(
         "diagnostic_checkpoint_sha256": sha256_file(checkpoint_path),
         "hparams_sha256": sha256_file(hparams_path),
         "checkpoint_metrics_sha256": sha256_file(metrics_path),
+        "diagnostic_log_sha256": sha256_file(diagnostic_path),
         "run_directory": str(run_directory.resolve()),
         "distribution": summary,
     }
@@ -280,6 +311,7 @@ def main() -> None:
             "checkpoint_phase_metrics.json": validation[
                 "checkpoint_metrics_sha256"
             ],
+            "diag_log.json": validation["diagnostic_log_sha256"],
             "diagnostic_checkpoint": validation[
                 "diagnostic_checkpoint_sha256"
             ],
