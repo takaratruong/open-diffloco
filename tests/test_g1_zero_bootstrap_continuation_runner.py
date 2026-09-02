@@ -173,7 +173,42 @@ def test_checkpoint_telemetry_builder_persists_bootstrap_and_cagrad_contract():
         "actor_cagrad_uniform_combined_cosine": 0.5,
         "actor_cagrad_combined_norm": 1.0,
         "actor_cagrad_valid": True,
+        "actor_grad_phase_bin_counts": np.ones(5),
+        "actor_grad_phase_bin_mean_norms": np.arange(5.0),
+        "actor_grad_phase_bin_rms_norms": np.arange(5.0) + 1.0,
+        "actor_grad_phase_bin_variance_traces": np.arange(5.0) + 2.0,
+        "actor_grad_phase_bin_cancellation_ratios": np.full(5, 0.25),
+        "actor_grad_phase_bin_noise_scales": np.arange(5.0) + 3.0,
+        "actor_grad_phase_bin_esnr": np.arange(5.0) + 4.0,
+        "actor_grad_phase_bin_cosine_matrix": np.eye(5),
+        "actor_grad_phase_within_variance_trace": 6.0,
+        "actor_grad_phase_between_variance_trace": 2.0,
+        "actor_grad_phase_total_variance_trace": 8.0,
+        "actor_grad_phase_within_variance_fraction": 0.75,
+        "actor_grad_phase_between_variance_fraction": 0.25,
     }
+    for group in ("support", "terminal"):
+        metrics.update(
+            {
+                f"actor_grad_{group}_bin_counts": np.ones(4),
+                f"actor_grad_{group}_bin_mean_norms": np.arange(4.0),
+                f"actor_grad_{group}_bin_rms_norms": np.arange(4.0) + 1.0,
+                f"actor_grad_{group}_bin_variance_traces": (
+                    np.arange(4.0) + 2.0
+                ),
+                f"actor_grad_{group}_bin_cancellation_ratios": np.full(
+                    4, 0.25
+                ),
+                f"actor_grad_{group}_bin_noise_scales": np.arange(4.0) + 3.0,
+                f"actor_grad_{group}_bin_esnr": np.arange(4.0) + 4.0,
+                f"actor_grad_{group}_bin_cosine_matrix": np.eye(4),
+                f"actor_grad_{group}_within_variance_trace": 6.0,
+                f"actor_grad_{group}_between_variance_trace": 2.0,
+                f"actor_grad_{group}_total_variance_trace": 8.0,
+                f"actor_grad_{group}_within_variance_fraction": 0.75,
+                f"actor_grad_{group}_between_variance_fraction": 0.25,
+            }
+        )
 
     row = build_checkpoint_cagrad_telemetry(metrics)
 
@@ -181,3 +216,9 @@ def test_checkpoint_telemetry_builder_persists_bootstrap_and_cagrad_contract():
     assert row["actor_cagrad_valid"] is True
     assert row["actor_cagrad_bin_counts"] == [1.0] * 5
     assert len(row["actor_cagrad_gram_matrix"]) == 5
+    assert row["actor_grad_phase_bin_counts"] == [1.0] * 5
+    assert row["actor_grad_phase_bin_mean_norms"] == list(np.arange(5.0))
+    assert row["actor_grad_phase_within_variance_trace"] == 6.0
+    assert row["actor_grad_phase_between_variance_fraction"] == 0.25
+    assert row["actor_grad_support_bin_counts"] == [1.0] * 4
+    assert row["actor_grad_terminal_bin_cosine_matrix"] == np.eye(4).tolist()

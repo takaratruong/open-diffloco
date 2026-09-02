@@ -6,6 +6,30 @@ import jax
 import jax.numpy as jp
 
 
+def support_contact_mode_indices(foot_support: jax.Array) -> jax.Array:
+    """Encode no, left, right, and double support as indices zero to three."""
+
+    support = jp.asarray(foot_support, dtype=jp.bool_)
+    if support.ndim != 2 or support.shape[1] != 2:
+        raise ValueError("foot_support must have shape (population, 2)")
+    return support[:, 0].astype(jp.int32) + 2 * support[:, 1].astype(
+        jp.int32
+    )
+
+
+def rollout_terminal_mode_indices(terminals: jax.Array) -> jax.Array:
+    """Encode survival or terminal occurrence in the early, middle, or late third."""
+
+    terminal = jp.asarray(terminals, dtype=jp.bool_)
+    if terminal.ndim != 2 or terminal.shape[1] < 1:
+        raise ValueError("terminals must have shape (population, horizon)")
+    horizon = terminal.shape[1]
+    terminated = jp.any(terminal, axis=1)
+    first_terminal = jp.argmax(terminal, axis=1)
+    terminal_third = jp.minimum((first_terminal * 3) // horizon, 2)
+    return jp.where(terminated, terminal_third + 1, 0).astype(jp.int32)
+
+
 def gradient_population_statistics(
     population_mean_gradient: Any,
     effective_norm_by_env: jax.Array,
@@ -49,6 +73,96 @@ def gradient_population_statistics(
             norms.shape[0]
             * population_mean_squared_norm
             / jp.maximum(population_variance_trace, epsilon)
+        ),
+    }
+
+
+def grouped_gradient_population_statistics(
+    *,
+    group_mean_gradients: Any,
+    population_mean_gradient: Any,
+    effective_norm_by_env: jax.Array,
+    group_indices: jax.Array,
+    group_count: int,
+) -> dict[str, jax.Array]:
+    """Partition gradient trace variance into fixed categorical groups."""
+
+    group_leaves = jax.tree_util.tree_leaves(group_mean_gradients)
+    population_leaves = jax.tree_util.tree_leaves(population_mean_gradient)
+    norms = jp.asarray(effective_norm_by_env, dtype=jp.float32)
+    indices = jp.asarray(group_indices, dtype=jp.int32)
+    if not group_leaves or not population_leaves:
+        raise ValueError("group and population gradients must be nonempty")
+    if isinstance(group_count, bool) or not isinstance(group_count, int) or group_count < 1:
+        raise ValueError("group_count must be a positive integer")
+    if norms.ndim != 1 or indices.shape != norms.shape:
+        raise ValueError("gradient norms and group indices must be matching vectors")
+    if any(leaf.ndim < 1 or leaf.shape[0] != group_count for leaf in group_leaves):
+        raise ValueError("group gradient leaves must share the complete group axis")
+
+    group_mean_squared_norms = jp.zeros((group_count,), dtype=jp.float32)
+    for leaf in group_leaves:
+        axes = tuple(range(1, leaf.ndim))
+        group_mean_squared_norms = group_mean_squared_norms + jp.sum(
+            jp.square(jp.asarray(leaf, dtype=jp.float32)), axis=axes
+        )
+    population_mean_squared_norm = jp.asarray(0.0, dtype=jp.float32)
+    for leaf in population_leaves:
+        population_mean_squared_norm = population_mean_squared_norm + jp.sum(
+            jp.square(jp.asarray(leaf, dtype=jp.float32))
+        )
+
+    group_counts = jp.zeros((group_count,), dtype=jp.int32).at[indices].add(1)
+    group_squared_norm_sums = jp.zeros((group_count,), dtype=jp.float32).at[
+        indices
+    ].add(jp.square(norms))
+    safe_counts = jp.maximum(group_counts, 1).astype(jp.float32)
+    group_second_moments = group_squared_norm_sums / safe_counts
+    group_variance_traces = jp.maximum(
+        group_second_moments - group_mean_squared_norms, 0.0
+    )
+    total_count = jp.maximum(jp.sum(group_counts), 1).astype(jp.float32)
+    group_weights = group_counts.astype(jp.float32) / total_count
+    within_group_variance_trace = jp.sum(
+        group_weights * group_variance_traces
+    )
+    between_group_variance_trace = jp.maximum(
+        jp.sum(group_weights * group_mean_squared_norms)
+        - population_mean_squared_norm,
+        0.0,
+    )
+    total_variance_trace = (
+        within_group_variance_trace + between_group_variance_trace
+    )
+    epsilon = jp.asarray(1e-12, dtype=jp.float32)
+    return {
+        "group_counts": group_counts,
+        "group_mean_norms": jp.sqrt(jp.maximum(group_mean_squared_norms, 0.0)),
+        "group_rms_norms": jp.sqrt(jp.maximum(group_second_moments, 0.0)),
+        "group_variance_traces": group_variance_traces,
+        "group_cancellation_ratios": jp.sqrt(
+            group_mean_squared_norms
+            / jp.maximum(group_second_moments, epsilon)
+        ),
+        "group_gradient_noise_scales": (
+            group_variance_traces
+            / jp.maximum(group_mean_squared_norms, epsilon)
+        ),
+        "group_esnr": (
+            group_counts.astype(jp.float32)
+            * group_mean_squared_norms
+            / jp.maximum(group_variance_traces, epsilon)
+        ),
+        "within_group_variance_trace": within_group_variance_trace,
+        "between_group_variance_trace": between_group_variance_trace,
+        "total_variance_trace": total_variance_trace,
+        "within_group_variance_fraction": (
+            within_group_variance_trace
+            / jp.maximum(total_variance_trace, epsilon)
+        ),
+        "between_group_variance_fraction": (
+            between_group_variance_trace
+            / jp.maximum(total_variance_trace, epsilon)
         ),
     }
 

@@ -50,7 +50,10 @@ from src.core.utils import compute_grad_norm, tree_bit_fingerprint
 from src.algorithms.shac.gradients import (
     aggregate_per_env_gradients,
     gradient_population_statistics,
+    grouped_gradient_population_statistics,
     per_env_gradient_statistics,
+    rollout_terminal_mode_indices,
+    support_contact_mode_indices,
 )
 from src.algorithms.shac.ahac import (
     active_horizon_mask,
@@ -589,6 +592,89 @@ def persist_checkpoint_phase_metric(
     return path
 
 
+GRADIENT_GROUP_NAMES = ("phase", "support", "terminal")
+
+
+def gradient_group_metrics(
+    group: str,
+    distribution: dict[str, jax.Array],
+    cosine_matrix: jax.Array,
+) -> dict[str, jax.Array]:
+    """Give one categorical gradient decomposition stable metric names."""
+    if group not in GRADIENT_GROUP_NAMES:
+        raise ValueError("gradient group name is not registered")
+    prefix = f"actor_grad_{group}"
+    return {
+        f"{prefix}_bin_counts": distribution["group_counts"],
+        f"{prefix}_bin_mean_norms": distribution["group_mean_norms"],
+        f"{prefix}_bin_rms_norms": distribution["group_rms_norms"],
+        f"{prefix}_bin_variance_traces": distribution[
+            "group_variance_traces"
+        ],
+        f"{prefix}_bin_cancellation_ratios": distribution[
+            "group_cancellation_ratios"
+        ],
+        f"{prefix}_bin_noise_scales": distribution[
+            "group_gradient_noise_scales"
+        ],
+        f"{prefix}_bin_esnr": distribution["group_esnr"],
+        f"{prefix}_bin_cosine_matrix": cosine_matrix,
+        f"{prefix}_within_variance_trace": distribution[
+            "within_group_variance_trace"
+        ],
+        f"{prefix}_between_variance_trace": distribution[
+            "between_group_variance_trace"
+        ],
+        f"{prefix}_total_variance_trace": distribution[
+            "total_variance_trace"
+        ],
+        f"{prefix}_within_variance_fraction": distribution[
+            "within_group_variance_fraction"
+        ],
+        f"{prefix}_between_variance_fraction": distribution[
+            "between_group_variance_fraction"
+        ],
+    }
+
+
+def build_checkpoint_gradient_group_telemetry(
+    metrics, *, group: str
+) -> dict[str, object]:
+    """Serialize one checkpoint-aligned categorical gradient decomposition."""
+    if group not in GRADIENT_GROUP_NAMES:
+        raise ValueError("gradient group name is not registered")
+    prefix = f"actor_grad_{group}"
+    array_suffixes = (
+        "bin_counts",
+        "bin_mean_norms",
+        "bin_rms_norms",
+        "bin_variance_traces",
+        "bin_cancellation_ratios",
+        "bin_noise_scales",
+        "bin_esnr",
+        "bin_cosine_matrix",
+    )
+    scalar_suffixes = (
+        "within_variance_trace",
+        "between_variance_trace",
+        "total_variance_trace",
+        "within_variance_fraction",
+        "between_variance_fraction",
+    )
+    return {
+        **{
+            f"{prefix}_{suffix}": np.asarray(
+                metrics[f"{prefix}_{suffix}"]
+            ).tolist()
+            for suffix in array_suffixes
+        },
+        **{
+            f"{prefix}_{suffix}": float(metrics[f"{prefix}_{suffix}"])
+            for suffix in scalar_suffixes
+        },
+    }
+
+
 def build_checkpoint_cagrad_telemetry(metrics) -> dict[str, object]:
     """Serialize the complete checkpoint-aligned CAGrad validity contract."""
     return {
@@ -622,6 +708,13 @@ def build_checkpoint_cagrad_telemetry(metrics) -> dict[str, object]:
             metrics["actor_cagrad_combined_norm"]
         ),
         "actor_cagrad_valid": bool(metrics["actor_cagrad_valid"]),
+        **{
+            key: value
+            for group in GRADIENT_GROUP_NAMES
+            for key, value in build_checkpoint_gradient_group_telemetry(
+                metrics, group=group
+            ).items()
+        },
     }
 
 
@@ -5932,6 +6025,14 @@ def train(
             actor_start_phases = jax.lax.stop_gradient(
                 updated_env_state.info["phase"]
             )
+        if actor_cagrad:
+            actor_start_support_modes = jax.lax.stop_gradient(
+                support_contact_mode_indices(
+                    jax.vmap(env.foot_support_signature)(
+                        updated_env_state.data
+                    )
+                )
+            )
 
         # Pre-sample all stochastic inputs (reparameterization)
         all_action_noise = jax.random.normal(
@@ -6084,10 +6185,16 @@ def train(
                     accumulation_steps=gradient_accumulation_steps,
                     microbatch_size=num_envs,
                 )
+                sharded_actor_start_support_modes = reshape_population(
+                    actor_start_support_modes,
+                    accumulation_steps=gradient_accumulation_steps,
+                    microbatch_size=num_envs,
+                )
                 actor_shard_inputs = (
                     sharded_env_state,
                     sharded_randomization,
                     sharded_actor_start_phases,
+                    sharded_actor_start_support_modes,
                 )
             else:
                 actor_shard_inputs = (
@@ -6139,13 +6246,31 @@ def train(
                         shard_per_env_grads,
                         max_norm=actor_per_env_grad_clip,
                     )
-                    shard_reduction = accumulate_phase_gradients(
-                        shard_per_env_grads,
-                        inputs[2],
-                        phase_count=int(env.reference_transitions),
-                        bin_count=actor_phase_bin_count,
-                        per_env_max_norm=actor_per_env_grad_clip,
-                    )
+                    shard_reduction = {
+                        "phase": accumulate_phase_gradients(
+                            shard_per_env_grads,
+                            inputs[2],
+                            phase_count=int(env.reference_transitions),
+                            bin_count=actor_phase_bin_count,
+                            per_env_max_norm=actor_per_env_grad_clip,
+                        ),
+                        "support": accumulate_phase_gradients(
+                            shard_per_env_grads,
+                            inputs[3],
+                            phase_count=4,
+                            bin_count=4,
+                            per_env_max_norm=actor_per_env_grad_clip,
+                        ),
+                        "terminal": accumulate_phase_gradients(
+                            shard_per_env_grads,
+                            rollout_terminal_mode_indices(
+                                shard_trajs["terminal"]
+                            ),
+                            phase_count=4,
+                            bin_count=4,
+                            per_env_max_norm=actor_per_env_grad_clip,
+                        ),
+                    }
                 else:
                     shard_reduction, shard_grad_stats = (
                         aggregate_env_gradients(
@@ -6187,9 +6312,23 @@ def train(
             final_states = flatten_population(shard_final_states)
             if actor_cagrad:
                 cagrad_reduction = reduce_cagrad_shard_accumulators(
-                    shard_reductions,
+                    shard_reductions["phase"],
                     alpha=actor_cagrad_alpha,
                     iterations=actor_cagrad_iterations,
+                )
+                support_gradient_reduction = (
+                    reduce_cagrad_shard_accumulators(
+                        shard_reductions["support"],
+                        alpha=actor_cagrad_alpha,
+                        iterations=actor_cagrad_iterations,
+                    )
+                )
+                terminal_gradient_reduction = (
+                    reduce_cagrad_shard_accumulators(
+                        shard_reductions["terminal"],
+                        alpha=actor_cagrad_alpha,
+                        iterations=actor_cagrad_iterations,
+                    )
                 )
                 grads = cagrad_reduction["result"].combined_gradient
             else:
@@ -6217,6 +6356,51 @@ def train(
         )
 
         if actor_cagrad:
+            actor_gradient_phase_distribution = (
+                grouped_gradient_population_statistics(
+                    group_mean_gradients=cagrad_reduction[
+                        "task_gradients"
+                    ],
+                    population_mean_gradient=population_mean_gradient,
+                    effective_norm_by_env=actor_grad_stats[
+                        "effective_norm_by_env"
+                    ],
+                    group_indices=phase_bin_indices(
+                        actor_start_phases,
+                        phase_count=int(env.reference_transitions),
+                        bin_count=actor_phase_bin_count,
+                    ),
+                    group_count=actor_phase_bin_count,
+                )
+            )
+            actor_gradient_support_distribution = (
+                grouped_gradient_population_statistics(
+                    group_mean_gradients=support_gradient_reduction[
+                        "task_gradients"
+                    ],
+                    population_mean_gradient=population_mean_gradient,
+                    effective_norm_by_env=actor_grad_stats[
+                        "effective_norm_by_env"
+                    ],
+                    group_indices=actor_start_support_modes,
+                    group_count=4,
+                )
+            )
+            actor_gradient_terminal_distribution = (
+                grouped_gradient_population_statistics(
+                    group_mean_gradients=terminal_gradient_reduction[
+                        "task_gradients"
+                    ],
+                    population_mean_gradient=population_mean_gradient,
+                    effective_norm_by_env=actor_grad_stats[
+                        "effective_norm_by_env"
+                    ],
+                    group_indices=rollout_terminal_mode_indices(
+                        trajs["terminal"]
+                    ),
+                    group_count=4,
+                )
+            )
             cagrad_loss_diagnostics = cagrad_phase_loss_diagnostics(
                 losses=losses,
                 phases=actor_start_phases,
@@ -7390,6 +7574,25 @@ def train(
                         cagrad_result.uniform_combined_cosine
                     ),
                     "actor_cagrad_combined_norm": physics_actor_grad_norm,
+                    **gradient_group_metrics(
+                        "phase",
+                        actor_gradient_phase_distribution,
+                        cagrad_result.cosine_matrix,
+                    ),
+                    **gradient_group_metrics(
+                        "support",
+                        actor_gradient_support_distribution,
+                        support_gradient_reduction[
+                            "result"
+                        ].cosine_matrix,
+                    ),
+                    **gradient_group_metrics(
+                        "terminal",
+                        actor_gradient_terminal_distribution,
+                        terminal_gradient_reduction[
+                            "result"
+                        ].cosine_matrix,
+                    ),
                     "actor_cagrad_valid": (
                         cagrad_reduction["valid"]
                         & cagrad_loss_diagnostics["valid"]
@@ -8954,43 +9157,7 @@ def train(
                     )
                 if actor_cagrad:
                     diag_entry.update(
-                        {
-                            "actor_cagrad_bin_counts": np.asarray(
-                                metrics["actor_cagrad_bin_counts"]
-                            ).tolist(),
-                            "actor_cagrad_bin_gradient_norms": np.asarray(
-                                metrics["actor_cagrad_bin_gradient_norms"]
-                            ).tolist(),
-                            "actor_cagrad_bin_losses": np.asarray(
-                                metrics["actor_cagrad_bin_losses"]
-                            ).tolist(),
-                            "actor_cagrad_weights": np.asarray(
-                                metrics["actor_cagrad_weights"]
-                            ).tolist(),
-                            "actor_cagrad_gram_matrix": np.asarray(
-                                metrics["actor_cagrad_gram_matrix"]
-                            ).tolist(),
-                            "actor_cagrad_cosine_matrix": np.asarray(
-                                metrics["actor_cagrad_cosine_matrix"]
-                            ).tolist(),
-                            "actor_cagrad_objective": float(
-                                metrics["actor_cagrad_objective"]
-                            ),
-                            "actor_cagrad_dual_gap": float(
-                                metrics["actor_cagrad_dual_gap"]
-                            ),
-                            "actor_cagrad_uniform_combined_cosine": float(
-                                metrics[
-                                    "actor_cagrad_uniform_combined_cosine"
-                                ]
-                            ),
-                            "actor_cagrad_combined_norm": float(
-                                metrics["actor_cagrad_combined_norm"]
-                            ),
-                            "actor_cagrad_valid": bool(
-                                metrics["actor_cagrad_valid"]
-                            ),
-                        }
+                        build_checkpoint_cagrad_telemetry(metrics)
                     )
                 if demonstration_replay_threshold is not None:
                     diag_entry.update(
