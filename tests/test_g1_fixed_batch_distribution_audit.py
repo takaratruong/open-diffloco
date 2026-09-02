@@ -84,6 +84,21 @@ def test_stable_tree_hash_ignores_addresses_in_custom_node_aux_repr():
     )
 
 
+def test_atomic_sidecar_copy_preserves_exact_bytes(tmp_path):
+    from experiments.g1_fixed_batch_distribution_audit.run import (
+        copy_file_atomically_exact,
+    )
+
+    source = tmp_path / "source.json"
+    destination = tmp_path / "control" / "hparams.json"
+    source.write_bytes(b'{"z":1, "a": 2}\n')
+    destination.parent.mkdir()
+
+    copy_file_atomically_exact(source, destination)
+
+    assert destination.read_bytes() == source.read_bytes()
+
+
 def test_zero_head_control_preserves_everything_except_newest_output_head():
     from experiments.g1_fixed_batch_distribution_audit.run import (
         zero_newest_residual_output_head,

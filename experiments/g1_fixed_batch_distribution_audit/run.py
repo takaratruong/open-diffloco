@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import pickle
+import shutil
 from typing import Any, Mapping
 
 import jax
@@ -368,6 +369,16 @@ def _write_pickle_atomically(path: Path, value: object) -> None:
     os.replace(temporary, path)
 
 
+def copy_file_atomically_exact(source: Path, destination: Path) -> None:
+    """Publish an exact-byte sidecar without JSON reserialization drift."""
+    if destination.exists():
+        raise FileExistsError(f"destination already exists: {destination}")
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    with source.open("rb") as input_stream, temporary.open("xb") as output_stream:
+        shutil.copyfileobj(input_stream, output_stream)
+    os.replace(temporary, destination)
+
+
 def create_common_state_control(
     *, candidate_checkpoint: Path, output_root: Path
 ) -> tuple[Path, dict[str, object]]:
@@ -392,9 +403,8 @@ def create_common_state_control(
     output = output_root / "common_state_control" / candidate_checkpoint.name
     _write_pickle_atomically(output, control)
     hparams_source = candidate_checkpoint.with_name("hparams.json")
-    hparams = json.loads(hparams_source.read_text(encoding="utf-8"))
     hparams_output = output.with_name("hparams.json")
-    _write_json_atomically(hparams_output, hparams)
+    copy_file_atomically_exact(hparams_source, hparams_output)
     report = {
         "protocol": "g1-common-state-zero-head-control-v1",
         "valid": True,
