@@ -143,6 +143,36 @@ def test_contact_action_gradient_summary_closes_population_moments() -> None:
     )
 
 
+def test_metric_scans_compile_as_two_independent_graphs() -> None:
+    from experiments.g1_ahac_fidelity_audit.run import (
+        execute_separately_compiled_metric_scans,
+    )
+
+    compiled = []
+
+    def fake_jit(function):
+        compiled.append(function)
+        return function
+
+    def root_scan(initial, noise):
+        return initial + noise, {"contact": initial - noise}
+
+    def spatial_scan(initial, noise):
+        return initial * noise, {"contact": initial + noise}
+
+    root_result, spatial_result = execute_separately_compiled_metric_scans(
+        root_scan,
+        spatial_scan,
+        3,
+        2,
+        compile_fn=fake_jit,
+    )
+
+    assert compiled == [root_scan, spatial_scan]
+    assert root_result == (5, {"contact": 1})
+    assert spatial_result == (6, {"contact": 5})
+
+
 def test_upstream_semantics_audit_detects_missing_equation_10_actor_term() -> None:
     from experiments.g1_ahac_fidelity_audit.run import (
         inspect_upstream_ahac_semantics,

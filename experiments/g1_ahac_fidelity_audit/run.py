@@ -13,9 +13,9 @@ import ast
 import json
 import math
 import os
-from pathlib import Path
 import pickle
-from typing import Mapping
+from collections.abc import Mapping
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -26,6 +26,7 @@ from src.algorithms.shac.counterfactual_wrench_distillation import (
     parameter_tree_sha256,
 )
 from src.core.data_structures import Normalizer
+from src.core.utils import tree_bit_fingerprint
 from src.envs.g1_tracking.solver_profiles import (
     get_solver_profile,
     solver_context,
@@ -46,7 +47,6 @@ from tools.run_g1_dual_scale_root_position import (
 )
 from tools.run_g1_tracking_shac import configure_jax
 from tools.run_g1_zero_assistance_consolidation import _write_json_atomically
-
 
 START_STEP = 1_867_776
 EFFECTIVE_NUM_ENVS = 512
@@ -71,6 +71,30 @@ DETERMINISTIC_XLA_FLAG = "--xla_gpu_exclude_nondeterministic_ops"
 REWARD_PARITY_ATOL = 1e-12
 GRADIENT_PROBE_ENVS = 8
 CONTACT_VALUE_PARITY_ATOL = 1e-10
+
+
+def execute_separately_compiled_metric_scans(
+    root_scan,
+    spatial_scan,
+    initial_state,
+    noise,
+    *,
+    compile_fn=jax.jit,
+):
+    """Execute paired inputs without placing both metrics in one XLA graph.
+
+    MJX contact telemetry is sensitive to the surrounding compiled graph even
+    when the carried dynamics are bit-identical.  AHAC training contains only
+    the selected metric, so the audit must compile the root and spatial
+    rollouts independently and compare their returned traces afterward.
+    """
+
+    compiled_root_scan = compile_fn(root_scan)
+    compiled_spatial_scan = compile_fn(spatial_scan)
+    return (
+        compiled_root_scan(initial_state, noise),
+        compiled_spatial_scan(initial_state, noise),
+    )
 
 
 def _percentiles(values: np.ndarray) -> dict[str, float]:
@@ -420,6 +444,8 @@ def summarize_contact_population(
         "retained_policy": None,
         "population_shape": list(root.shape),
         "population_reduction": "mean-over-environments-for-each-rollout-step",
+        "metric_execution_graphs": "separately-compiled-single-metric-rollouts",
+        "observation_parity_evidence": "matching-128-bit-exact-bit-fingerprints",
         "paired_physical_trajectory_exact": True,
         "paired_reward_bit_exact": bool(np.all(exact["reward_exact"])),
         "paired_reward_parity_atol": REWARD_PARITY_ATOL,
@@ -682,68 +708,38 @@ def collect_paired_contact_trace(
             noisy_action = jnp.clip(noisy_action, -1.0, 1.0)
         return env_state, noisy_action
 
-    def scan_step(carry, epsilon):
-        root_state, spatial_state = carry
-        root_state, root_action = prepare_action(
-            root_env, root_state, epsilon
-        )
-        spatial_state, spatial_action = prepare_action(
-            spatial_env, spatial_state, epsilon
-        )
-        next_root = jax.vmap(root_env.step)(root_state, root_action)
-        next_spatial = jax.vmap(spatial_env.step)(
-            spatial_state, spatial_action
-        )
+    def make_metric_scan(environment):
+        def scan_step(env_state, epsilon):
+            env_state, action = prepare_action(
+                environment, env_state, epsilon
+            )
+            next_state = jax.vmap(environment.step)(env_state, action)
+            row = {
+                "contact_stiffness": next_state.info[
+                    "transition_contact_stiffness"
+                ],
+                "action": action,
+                "qpos": next_state.data.qpos,
+                "qvel": next_state.data.qvel,
+                "observation_fingerprint": tree_bit_fingerprint(
+                    next_state.obs
+                ),
+                "reward": next_state.reward,
+                "done": next_state.done,
+                "phase": next_state.info["phase"],
+                "rng": next_state.info["rng"],
+            }
+            return next_state, row
 
-        def exact(left, right):
-            return jnp.all(left == right)
-
-        def max_delta(left, right):
-            return jnp.max(jnp.abs(left - right))
-
-        row = {
-            "root_contact_stiffness": next_root.info[
-                "transition_contact_stiffness"
-            ],
-            "all_body_spatial_contact_stiffness": next_spatial.info[
-                "transition_contact_stiffness"
-            ],
-            "action_exact": exact(root_action, spatial_action),
-            "qpos_exact": exact(next_root.data.qpos, next_spatial.data.qpos),
-            "qvel_exact": exact(next_root.data.qvel, next_spatial.data.qvel),
-            "obs_exact": exact(next_root.obs, next_spatial.obs),
-            "reward_exact": exact(next_root.reward, next_spatial.reward),
-            "done_exact": exact(next_root.done, next_spatial.done),
-            "phase_exact": exact(
-                next_root.info["phase"], next_spatial.info["phase"]
-            ),
-            "rng_exact": exact(
-                next_root.info["rng"], next_spatial.info["rng"]
-            ),
-            "action_max_abs_delta": max_delta(root_action, spatial_action),
-            "qpos_max_abs_delta": max_delta(
-                next_root.data.qpos, next_spatial.data.qpos
-            ),
-            "qvel_max_abs_delta": max_delta(
-                next_root.data.qvel, next_spatial.data.qvel
-            ),
-            "obs_max_abs_delta": max_delta(
-                next_root.obs, next_spatial.obs
-            ),
-            "reward_max_abs_delta": max_delta(
-                next_root.reward, next_spatial.reward
-            ),
-        }
-        return (next_root, next_spatial), row
-
-    paired_scan = jax.jit(
-        lambda initial, noise: jax.lax.scan(
+        return lambda initial, noise: jax.lax.scan(
             scan_step,
-            (initial, initial),
+            initial,
             noise,
             length=MEASURED_STEPS,
         )
-    )
+
+    root_scan = make_metric_scan(root_env)
+    spatial_scan = make_metric_scan(spatial_env)
     spatial_probe_state, spatial_probe_action = prepare_action(
         spatial_env,
         state.env_state,
@@ -771,7 +767,14 @@ def collect_paired_contact_trace(
     )
     profile = get_solver_profile(str(hparams["solver_profile"]))
     with solver_context(profile):
-        (_, _), trace = paired_scan(state.env_state, scan_noise)
+        (_, root_trace), (_, spatial_trace) = (
+            execute_separately_compiled_metric_scans(
+                root_scan,
+                spatial_scan,
+                state.env_state,
+                scan_noise,
+            )
+        )
         (
             spatial_gradient_values,
             spatial_action_gradients,
@@ -783,9 +786,72 @@ def collect_paired_contact_trace(
             spatial_probe_state,
             spatial_probe_action,
         )
-    trace = jax.tree_util.tree_map(lambda value: np.asarray(value), trace)
+    root_trace = jax.tree.map(lambda value: np.asarray(value), root_trace)
+    spatial_trace = jax.tree.map(
+        lambda value: np.asarray(value), spatial_trace
+    )
+
+    def exact_rows(left, right):
+        equal = np.asarray(left) == np.asarray(right)
+        return np.all(equal.reshape((equal.shape[0], -1)), axis=1)
+
+    def max_delta_rows(left, right):
+        delta = np.abs(
+            np.asarray(left, dtype=np.float64)
+            - np.asarray(right, dtype=np.float64)
+        )
+        return np.max(delta.reshape((delta.shape[0], -1)), axis=1)
+
+    obs_exact = exact_rows(
+        root_trace["observation_fingerprint"],
+        spatial_trace["observation_fingerprint"],
+    )
     arrays = {
-        **trace,
+        "root_contact_stiffness": root_trace["contact_stiffness"],
+        "all_body_spatial_contact_stiffness": spatial_trace[
+            "contact_stiffness"
+        ],
+        "action_exact": exact_rows(
+            root_trace["action"], spatial_trace["action"]
+        ),
+        "qpos_exact": exact_rows(
+            root_trace["qpos"], spatial_trace["qpos"]
+        ),
+        "qvel_exact": exact_rows(
+            root_trace["qvel"], spatial_trace["qvel"]
+        ),
+        "obs_exact": obs_exact,
+        "reward_exact": exact_rows(
+            root_trace["reward"], spatial_trace["reward"]
+        ),
+        "done_exact": exact_rows(
+            root_trace["done"], spatial_trace["done"]
+        ),
+        "phase_exact": exact_rows(
+            root_trace["phase"], spatial_trace["phase"]
+        ),
+        "rng_exact": exact_rows(
+            root_trace["rng"], spatial_trace["rng"]
+        ),
+        "action_max_abs_delta": max_delta_rows(
+            root_trace["action"], spatial_trace["action"]
+        ),
+        "qpos_max_abs_delta": max_delta_rows(
+            root_trace["qpos"], spatial_trace["qpos"]
+        ),
+        "qvel_max_abs_delta": max_delta_rows(
+            root_trace["qvel"], spatial_trace["qvel"]
+        ),
+        "obs_max_abs_delta": np.where(obs_exact, 0.0, np.inf),
+        "reward_max_abs_delta": max_delta_rows(
+            root_trace["reward"], spatial_trace["reward"]
+        ),
+        "root_observation_fingerprint": root_trace[
+            "observation_fingerprint"
+        ],
+        "spatial_observation_fingerprint": spatial_trace[
+            "observation_fingerprint"
+        ],
         "spatial_gradient_probe_contact": np.asarray(
             spatial_gradient_values
         ),
