@@ -19,6 +19,69 @@ class _EnvState:
 
 
 class ShacExactResumeTest(unittest.TestCase):
+    def test_core_optimizer_resume_contract_is_exact_and_fail_closed(self):
+        from src.algorithms.shac.algorithm import (
+            resolve_core_optimizer_resume_settings,
+        )
+
+        requested = {
+            "actor_lr": 1e-3,
+            "critic_lr": 5e-4,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "target_update_rate": 0.01,
+            "critic_iterations": 16,
+            "use_lr_decay": False,
+        }
+        # Historical checkpoints omit use_lr_decay and unambiguously used the
+        # false default.
+        historical = {
+            key: value for key, value in requested.items() if key != "use_lr_decay"
+        }
+
+        self.assertEqual(
+            resolve_core_optimizer_resume_settings(
+                requested=requested,
+                resumed_hparams=historical,
+                is_resume=True,
+                allow_change=False,
+            ),
+            requested,
+        )
+        with self.assertRaisesRegex(ValueError, "core optimizer settings"):
+            resolve_core_optimizer_resume_settings(
+                requested={**requested, "actor_lr": 5e-3},
+                resumed_hparams=historical,
+                is_resume=True,
+                allow_change=False,
+            )
+        with self.assertRaisesRegex(ValueError, "metadata"):
+            resolve_core_optimizer_resume_settings(
+                requested=requested,
+                resumed_hparams={"actor_lr": 1e-3},
+                is_resume=True,
+                allow_change=False,
+            )
+        self.assertEqual(
+            resolve_core_optimizer_resume_settings(
+                requested={**requested, "actor_lr": 5e-3},
+                resumed_hparams=historical,
+                is_resume=True,
+                allow_change=True,
+            )["actor_lr"],
+            5e-3,
+        )
+        from src.algorithms.shac.algorithm import train
+
+        parameters = inspect.signature(train).parameters
+        self.assertIs(
+            parameters["allow_resume_core_optimizer_change"].default,
+            False,
+        )
+        source = inspect.getsource(train)
+        self.assertIn("resolve_core_optimizer_resume_settings(", source)
+        self.assertIn('"use_lr_decay": use_lr_decay', source)
+
     def test_root_velocity_weight_resume_is_explicit_and_fail_closed(self):
         from src.algorithms.shac.algorithm import (
             resolve_tracking_root_velocity_resume_weight,

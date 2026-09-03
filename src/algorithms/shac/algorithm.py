@@ -1185,6 +1185,79 @@ def resolve_action_noise_schedule_steps(
     return schedule_steps
 
 
+CORE_OPTIMIZER_RESUME_KEYS = (
+    "actor_lr",
+    "critic_lr",
+    "gamma",
+    "gae_lambda",
+    "target_update_rate",
+    "critic_iterations",
+    "use_lr_decay",
+)
+
+
+def resolve_core_optimizer_resume_settings(
+    *,
+    requested: dict[str, object],
+    resumed_hparams: dict[str, object] | None,
+    is_resume: bool,
+    allow_change: bool,
+) -> dict[str, object]:
+    """Fail closed when reconstructing a resumed optimizer/objective contract."""
+
+    if not isinstance(is_resume, bool) or not isinstance(allow_change, bool):
+        raise ValueError("core optimizer resume flags must be boolean")
+    if set(requested) != set(CORE_OPTIMIZER_RESUME_KEYS):
+        raise ValueError("requested core optimizer settings are incomplete")
+
+    resolved = {key: requested[key] for key in CORE_OPTIMIZER_RESUME_KEYS}
+    for key in (
+        "actor_lr",
+        "critic_lr",
+        "gamma",
+        "gae_lambda",
+        "target_update_rate",
+    ):
+        value = resolved[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"core optimizer setting {key} must be numeric")
+        if not math.isfinite(float(value)):
+            raise ValueError(f"core optimizer setting {key} must be finite")
+    if (
+        isinstance(resolved["critic_iterations"], bool)
+        or not isinstance(resolved["critic_iterations"], int)
+        or resolved["critic_iterations"] < 1
+    ):
+        raise ValueError("core optimizer setting critic_iterations must be positive")
+    if not isinstance(resolved["use_lr_decay"], bool):
+        raise ValueError("core optimizer setting use_lr_decay must be boolean")
+
+    if not is_resume:
+        return resolved
+    if resumed_hparams is None:
+        if allow_change:
+            return resolved
+        raise ValueError("core optimizer resume metadata is missing")
+
+    saved = dict(resumed_hparams)
+    # Checkpoints predating persistence of this flag used the false default.
+    saved.setdefault("use_lr_decay", False)
+    missing = [key for key in CORE_OPTIMIZER_RESUME_KEYS if key not in saved]
+    if missing:
+        if allow_change:
+            return resolved
+        raise ValueError(f"core optimizer resume metadata is missing {missing}")
+    mismatched = [
+        key for key in CORE_OPTIMIZER_RESUME_KEYS if saved[key] != resolved[key]
+    ]
+    if mismatched and not allow_change:
+        raise ValueError(
+            "core optimizer settings must match the checkpoint: "
+            f"{mismatched}"
+        )
+    return resolved
+
+
 def resolve_future_reference_resume_settings(
     resumed_hparams: dict[str, object] | None,
     *,
@@ -3062,6 +3135,7 @@ def train(
     allow_resume_reference_path_change: bool = False,
     reference_stride: int | None = None,
     determinism_probe_output: str | None = None,
+    allow_resume_core_optimizer_change: bool = False,
 ):
     """
     Train a quadruped locomotion policy using SHAC.
@@ -3077,6 +3151,8 @@ def train(
         target_update_rate: Soft update rate for target critic (1-alpha)
         critic_iterations: Number of critic gradient steps per actor update
         use_lr_decay: Linear LR decay to 62.5% over training
+        allow_resume_core_optimizer_change: Explicitly permit changing the
+            reconstructed optimizer/objective contract on resume.
         action_scale: Scale factor for actions
         cmd_vel_x_range: (min, max) for forward velocity command (m/s)
         cmd_vel_y_range: (min, max) for lateral velocity command (m/s)
@@ -3710,6 +3786,20 @@ def train(
 
     if resume_from:
         resumed_state, resumed_hparams, resumed_step = load_checkpoint(resume_from)
+        resolve_core_optimizer_resume_settings(
+            requested={
+                "actor_lr": actor_lr,
+                "critic_lr": critic_lr,
+                "gamma": gamma,
+                "gae_lambda": gae_lambda,
+                "target_update_rate": target_update_rate,
+                "critic_iterations": critic_iterations,
+                "use_lr_decay": use_lr_decay,
+            },
+            resumed_hparams=resumed_hparams,
+            is_resume=True,
+            allow_change=allow_resume_core_optimizer_change,
+        )
         tracking_velocity_kernel = (
             resolve_tracking_velocity_kernel_resume_setting(
                 resumed_hparams,
@@ -8915,6 +9005,10 @@ def train(
         "gae_lambda": gae_lambda,
         "target_update_rate": target_update_rate,
         "critic_iterations": critic_iterations,
+        "use_lr_decay": use_lr_decay,
+        "allow_resume_core_optimizer_change": (
+            allow_resume_core_optimizer_change
+        ),
         "ahac": ahac,
         "ahac_horizon_min": ahac_horizon_min,
         "ahac_horizon_max": ahac_horizon_max,
