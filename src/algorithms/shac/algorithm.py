@@ -530,6 +530,265 @@ def persist_determinism_probe_report(
     return path
 
 
+def _json_safe_numeric(value):
+    """Convert numeric telemetry to strict-JSON values, mapping nonfinite to null."""
+
+    array = np.asarray(value)
+    if array.ndim:
+        return [_json_safe_numeric(item) for item in array]
+    item = array.item()
+    if isinstance(item, (bool, np.bool_)):
+        return bool(item)
+    if isinstance(item, (int, np.integer)):
+        return int(item)
+    number = float(item)
+    return number if math.isfinite(number) else None
+
+
+def build_cagrad_failure_report(
+    metrics,
+    *,
+    input_step: int,
+    computed_output_step: int,
+) -> dict[str, object]:
+    """Localize a rejected CAGrad update without retaining its candidate state."""
+
+    if bool(metrics["actor_cagrad_valid"]):
+        raise ValueError("CAGrad failure report requires an invalid aggregation")
+    if input_step < 0 or computed_output_step <= input_step:
+        raise ValueError("CAGrad failure report requires increasing steps")
+
+    gradient_counts = np.asarray(
+        metrics["actor_cagrad_bin_counts"], dtype=np.int64
+    )
+    loss_counts = np.asarray(
+        metrics["actor_cagrad_loss_bin_counts"], dtype=np.int64
+    )
+    if (
+        gradient_counts.ndim != 1
+        or loss_counts.shape != gradient_counts.shape
+        or gradient_counts.size < 1
+        or np.any(gradient_counts < 0)
+        or np.any(loss_counts < 0)
+    ):
+        raise ValueError("CAGrad failure count vectors are invalid")
+    missing_contributors = loss_counts - gradient_counts
+    if np.any(missing_contributors < 0):
+        raise ValueError("CAGrad gradient counts exceed loss counts")
+
+    gradient_finite_by_env = np.asarray(
+        metrics["actor_cagrad_gradient_finite_by_env"], dtype=bool
+    )
+    loss_finite_by_env = np.asarray(
+        metrics["actor_cagrad_loss_finite_by_env"], dtype=bool
+    )
+    start_phases = np.asarray(
+        metrics["actor_cagrad_start_phases"], dtype=np.int64
+    )
+    start_support_modes = np.asarray(
+        metrics["actor_cagrad_start_support_modes"], dtype=np.int64
+    )
+    terminal_modes = np.asarray(
+        metrics["actor_cagrad_terminal_modes"], dtype=np.int64
+    )
+    losses_by_env = np.asarray(
+        metrics["actor_cagrad_losses_by_env"], dtype=np.float64
+    )
+    population_size = gradient_finite_by_env.size
+    if (
+        gradient_finite_by_env.ndim != 1
+        or population_size < 1
+        or any(
+            value.shape != gradient_finite_by_env.shape
+            for value in (
+                loss_finite_by_env,
+                start_phases,
+                start_support_modes,
+                terminal_modes,
+                losses_by_env,
+            )
+        )
+        or int(np.sum(loss_counts)) != population_size
+        or int(np.sum(gradient_counts))
+        != int(np.sum(gradient_finite_by_env))
+    ):
+        raise ValueError("CAGrad per-environment diagnostics are inconsistent")
+
+    loss_bins_occupied = bool(metrics["actor_cagrad_loss_bins_occupied"])
+    losses_finite = bool(metrics["actor_cagrad_losses_finite"])
+    loss_valid = bool(metrics["actor_cagrad_loss_valid"])
+    gradient_bins_occupied = bool(
+        metrics["actor_cagrad_gradient_bins_occupied"]
+    )
+    gradient_norms_finite = bool(
+        metrics["actor_cagrad_bin_gradient_norms_finite"]
+    )
+    solver_valid = bool(metrics["actor_cagrad_solver_valid"])
+    reduction_valid = bool(metrics["actor_cagrad_reduction_valid"])
+    counts_match = bool(metrics["actor_cagrad_counts_match"])
+    gradient_finite_fraction = float(metrics["actor_grad_finite_fraction"])
+    expected_finite_fraction = float(np.mean(gradient_finite_by_env))
+    if (
+        abs(gradient_finite_fraction - expected_finite_fraction) > 1e-6
+        or losses_finite != bool(np.all(loss_finite_by_env))
+        or counts_match != bool(np.array_equal(gradient_counts, loss_counts))
+        or gradient_bins_occupied != bool(np.all(gradient_counts > 0))
+        or loss_bins_occupied != bool(np.all(loss_counts > 0))
+    ):
+        raise ValueError("CAGrad validity sub-gates are inconsistent")
+
+    if not loss_bins_occupied:
+        failure_class = "empty-loss-phase-bin"
+    elif not losses_finite or not loss_valid:
+        failure_class = "nonfinite-actor-losses"
+    elif not gradient_bins_occupied:
+        failure_class = "empty-gradient-phase-bin"
+    elif not counts_match or gradient_finite_fraction < 1.0:
+        failure_class = "nonfinite-per-environment-gradients"
+    elif not gradient_norms_finite:
+        failure_class = "nonfinite-bin-gradient-norms"
+    elif not solver_valid:
+        failure_class = "cagrad-solver-invalid"
+    elif not reduction_valid:
+        failure_class = "cagrad-reduction-inconsistent"
+    else:
+        failure_class = "cagrad-validity-inconsistent"
+
+    weights = np.asarray(metrics["actor_cagrad_weights"], dtype=np.float64)
+    gram_matrix = np.asarray(
+        metrics["actor_cagrad_gram_matrix"], dtype=np.float64
+    )
+    cosine_matrix = np.asarray(
+        metrics["actor_cagrad_cosine_matrix"], dtype=np.float64
+    )
+    weights_finite = bool(np.all(np.isfinite(weights)))
+    weights_simplex = bool(
+        weights_finite
+        and np.all(weights >= 0.0)
+        and np.all(weights <= 1.0)
+        and abs(float(np.sum(weights)) - 1.0) <= 1e-6
+    )
+    nonfinite_gradient_indices = np.flatnonzero(~gradient_finite_by_env)
+    nonfinite_loss_indices = np.flatnonzero(~loss_finite_by_env)
+
+    def environment_rows(indices: np.ndarray) -> list[dict[str, object]]:
+        return [
+            {
+                "index": int(index),
+                "phase": int(start_phases[index]),
+                "start_support_mode": int(start_support_modes[index]),
+                "terminal_mode": int(terminal_modes[index]),
+                "loss": _json_safe_numeric(losses_by_env[index]),
+                "loss_finite": bool(loss_finite_by_env[index]),
+            }
+            for index in indices
+        ]
+
+    ahac_names = (
+        "actor_bootstrap_scale_current",
+        "ahac_horizon_before_update",
+        "ahac_horizon",
+        "ahac_actor_constraint_penalty",
+        "ahac_critic_head_disagreement",
+        "ahac_horizon_valid",
+    )
+    return {
+        "protocol": "shac-cagrad-failure-v1",
+        "report_valid": True,
+        "actor_cagrad_valid": False,
+        "failure_class": failure_class,
+        "input_step": int(input_step),
+        "computed_output_step": int(computed_output_step),
+        "computed_candidate_state_persisted": False,
+        "subgates": {
+            "loss_bins_occupied": loss_bins_occupied,
+            "losses_finite": losses_finite,
+            "loss_valid": loss_valid,
+            "gradient_bins_occupied": gradient_bins_occupied,
+            "gradient_norms_finite": gradient_norms_finite,
+            "counts_match": counts_match,
+            "solver_valid": solver_valid,
+            "reduction_valid": reduction_valid,
+        },
+        "phase_bins": {
+            "gradient_counts": gradient_counts.tolist(),
+            "loss_counts": loss_counts.tolist(),
+            "missing_gradient_contributors": missing_contributors.tolist(),
+            "gradient_norms": _json_safe_numeric(
+                metrics["actor_cagrad_bin_gradient_norms"]
+            ),
+            "losses": _json_safe_numeric(metrics["actor_cagrad_bin_losses"]),
+        },
+        "actor_gradient": {
+            "finite_fraction": _json_safe_numeric(gradient_finite_fraction),
+            "raw_norm_median": _json_safe_numeric(
+                metrics["actor_grad_raw_median"]
+            ),
+            "raw_norm_max": _json_safe_numeric(metrics["actor_grad_raw_max"]),
+        },
+        "population": {
+            "size": population_size,
+            "finite_gradient_count": int(np.sum(gradient_finite_by_env)),
+            "finite_loss_count": int(np.sum(loss_finite_by_env)),
+            "nonfinite_gradient_environments": environment_rows(
+                nonfinite_gradient_indices
+            ),
+            "nonfinite_loss_environments": environment_rows(
+                nonfinite_loss_indices
+            ),
+        },
+        "solver": {
+            "weights": _json_safe_numeric(weights),
+            "weights_finite": weights_finite,
+            "weights_simplex": weights_simplex,
+            "gram_matrix": _json_safe_numeric(gram_matrix),
+            "gram_matrix_finite": bool(np.all(np.isfinite(gram_matrix))),
+            "cosine_matrix": _json_safe_numeric(cosine_matrix),
+            "cosine_matrix_finite": bool(
+                np.all(np.isfinite(cosine_matrix))
+            ),
+            "objective": _json_safe_numeric(
+                metrics["actor_cagrad_objective"]
+            ),
+            "dual_gap": _json_safe_numeric(metrics["actor_cagrad_dual_gap"]),
+            "uniform_combined_cosine": _json_safe_numeric(
+                metrics["actor_cagrad_uniform_combined_cosine"]
+            ),
+            "combined_norm": _json_safe_numeric(
+                metrics["actor_cagrad_combined_norm"]
+            ),
+        },
+        "ahac": {
+            name: _json_safe_numeric(metrics[name])
+            for name in ahac_names
+            if name in metrics
+        },
+    }
+
+
+def persist_cagrad_failure_report(
+    save_dir: str | Path, report: dict[str, object]
+) -> Path:
+    """Atomically publish one create-only strict-JSON CAGrad failure report."""
+
+    if (
+        report.get("protocol") != "shac-cagrad-failure-v1"
+        or report.get("report_valid") is not True
+        or report.get("actor_cagrad_valid") is not False
+        or report.get("computed_candidate_state_persisted") is not False
+    ):
+        raise ValueError("CAGrad failure report contract is invalid")
+    path = Path(save_dir) / "cagrad_failure.json"
+    if path.exists():
+        raise FileExistsError(f"CAGrad failure report already exists: {path}")
+    temp_path = path.with_name(f".{path.name}.tmp")
+    with temp_path.open("x", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2, sort_keys=True, allow_nan=False)
+        stream.write("\n")
+    os.replace(temp_path, path)
+    return path
+
+
 def persist_future_reference_migration_report(
     save_dir: str | Path, report: dict[str, object]
 ) -> Path:
@@ -2105,13 +2364,17 @@ def reduce_cagrad_shard_accumulators(
             else bin_squared_norms + leaf_squared_norms
         )
     bin_gradient_norms = jp.sqrt(jp.maximum(bin_squared_norms, 0.0))
-    valid = bins_valid & result.valid & jp.all(jp.isfinite(bin_gradient_norms))
+    bin_gradient_norms_finite = jp.all(jp.isfinite(bin_gradient_norms))
+    valid = bins_valid & result.valid & bin_gradient_norms_finite
     return {
         "accumulator": accumulator,
         "task_gradients": task_gradients,
         "bin_counts": bin_counts,
         "bin_gradient_norms": bin_gradient_norms,
         "result": result,
+        "bins_occupied": bins_valid,
+        "solver_valid": result.valid,
+        "bin_gradient_norms_finite": bin_gradient_norms_finite,
         "valid": valid,
     }
 
@@ -2143,14 +2406,14 @@ def cagrad_phase_loss_diagnostics(
         sums / jp.maximum(bin_counts, 1),
         jp.nan,
     )
-    valid = (
-        jp.all(bin_counts > 0)
-        & jp.all(finite_losses)
-        & jp.all(jp.isfinite(bin_losses))
-    )
+    bins_occupied = jp.all(bin_counts > 0)
+    losses_finite = jp.all(finite_losses)
+    valid = bins_occupied & losses_finite & jp.all(jp.isfinite(bin_losses))
     return {
         "bin_counts": bin_counts,
         "bin_losses": bin_losses,
+        "bins_occupied": bins_occupied,
+        "losses_finite": losses_finite,
         "valid": valid,
     }
 
@@ -8006,6 +8269,9 @@ def train(
                     "actor_cagrad_bin_counts": cagrad_reduction[
                         "bin_counts"
                     ],
+                    "actor_cagrad_loss_bin_counts": (
+                        cagrad_loss_diagnostics["bin_counts"]
+                    ),
                     "actor_cagrad_bin_gradient_norms": cagrad_reduction[
                         "bin_gradient_norms"
                     ],
@@ -8021,6 +8287,40 @@ def train(
                         cagrad_result.uniform_combined_cosine
                     ),
                     "actor_cagrad_combined_norm": physics_actor_grad_norm,
+                    "actor_cagrad_gradient_bins_occupied": (
+                        cagrad_reduction["bins_occupied"]
+                    ),
+                    "actor_cagrad_solver_valid": cagrad_reduction[
+                        "solver_valid"
+                    ],
+                    "actor_cagrad_bin_gradient_norms_finite": (
+                        cagrad_reduction["bin_gradient_norms_finite"]
+                    ),
+                    "actor_cagrad_reduction_valid": cagrad_reduction[
+                        "valid"
+                    ],
+                    "actor_cagrad_loss_bins_occupied": (
+                        cagrad_loss_diagnostics["bins_occupied"]
+                    ),
+                    "actor_cagrad_losses_finite": cagrad_loss_diagnostics[
+                        "losses_finite"
+                    ],
+                    "actor_cagrad_loss_valid": cagrad_loss_diagnostics[
+                        "valid"
+                    ],
+                    "actor_cagrad_counts_match": cagrad_counts_match,
+                    "actor_cagrad_gradient_finite_by_env": actor_grad_stats[
+                        "finite_by_env"
+                    ],
+                    "actor_cagrad_loss_finite_by_env": jp.isfinite(losses),
+                    "actor_cagrad_start_phases": actor_start_phases,
+                    "actor_cagrad_start_support_modes": (
+                        actor_start_support_modes
+                    ),
+                    "actor_cagrad_terminal_modes": (
+                        rollout_terminal_mode_indices(trajs["terminal"])
+                    ),
+                    "actor_cagrad_losses_by_env": losses,
                     **gradient_group_metrics(
                         "phase",
                         actor_gradient_phase_distribution,
@@ -9466,6 +9766,16 @@ def train(
         state, metrics = train_step(state)
 
         if actor_cagrad and not bool(metrics["actor_cagrad_valid"]):
+            output_step = int(np.asarray(state.step))
+            failure_report = build_cagrad_failure_report(
+                metrics,
+                input_step=output_step - steps_per_iter,
+                computed_output_step=output_step,
+            )
+            failure_path = persist_cagrad_failure_report(
+                save_dir, failure_report
+            )
+            print(f"CAGrad failure report written to {failure_path}")
             raise RuntimeError("actor CAGrad aggregation is invalid")
         if recovery_teacher_enabled and not bool(
             metrics["actor_recovery_teacher_valid"]

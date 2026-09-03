@@ -391,6 +391,8 @@ def test_cagrad_phase_loss_diagnostics_use_full_population_bins():
     np.testing.assert_allclose(
         diagnostics["bin_losses"], np.array([2.0, 2.0, 4.0, 8.0, 10.0])
     )
+    assert bool(diagnostics["bins_occupied"])
+    assert bool(diagnostics["losses_finite"])
     assert bool(diagnostics["valid"])
 
     invalid = cagrad_phase_loss_diagnostics(
@@ -399,6 +401,8 @@ def test_cagrad_phase_loss_diagnostics_use_full_population_bins():
         phase_count=499,
         bin_count=5,
     )
+    assert bool(invalid["bins_occupied"])
+    assert not bool(invalid["losses_finite"])
     assert not bool(invalid["valid"])
 
 
@@ -508,4 +512,7 @@ def test_two_shard_reducer_matches_concatenated_population():
         strict=True,
     ):
         np.testing.assert_allclose(actual, wanted, rtol=1e-6, atol=1e-6)
+    assert bool(sharded["bins_occupied"])
+    assert bool(sharded["solver_valid"])
+    assert bool(sharded["bin_gradient_norms_finite"])
     assert bool(sharded["valid"])
