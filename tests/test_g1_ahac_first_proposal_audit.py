@@ -4,6 +4,7 @@ import json
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from src.algorithms.shac.frozen_controller_residual import (
     FrozenControllerResidualParams,
@@ -127,6 +128,30 @@ def test_json_array_loader_accepts_checkpoint_metric_rows(tmp_path) -> None:
     path.write_text(json.dumps([{"step": 1_880_064}]), encoding="utf-8")
 
     assert _read_json_array(path) == [{"step": 1_880_064}]
+
+
+def test_double_critic_calibration_uses_conservative_exact_heads() -> None:
+    from experiments.g1_ahac_first_proposal_audit.run import (
+        summarize_double_critic_calibration,
+    )
+
+    realized = np.asarray([[4.0, 5.0], [2.0, 3.0], [1.0, 2.0]])
+    alive = np.ones_like(realized, dtype=bool)
+    values = np.stack((realized, realized), axis=-1)
+
+    summary = summarize_double_critic_calibration(
+        values, realized, alive, boundary_index=1
+    )
+
+    assert summary["heads_exact"] is True
+    assert summary["aggregate"]["nrmse"] == 0.0
+    assert summary["horizon_boundary"]["nrmse"] == 0.0
+
+    values[0, 0, 1] += 1.0
+    with pytest.raises(ValueError, match="exactly equal"):
+        summarize_double_critic_calibration(
+            values, realized, alive, boundary_index=1
+        )
 
 
 def test_proposal_kwargs_change_only_explicit_ahac_contract() -> None:

@@ -37,6 +37,7 @@ from src.algorithms.shac.frozen_controller_residual import (
     FrozenControllerResidualParams,
 )
 from src.core.data_structures import Normalizer
+from src.core.networks import DoubleCritic
 from src.envs.g1_tracking.solver_profiles import (
     get_solver_profile,
     solver_context,
@@ -47,6 +48,7 @@ from tools.evaluate_g1_flax_phase_grid import (
     load_checkpoint_environment_contract,
 )
 from tools.evaluate_g1_rmr_phase_grid import build_phase_grid_summary
+from tools.evaluate_g1_terminal_value_calibration import calibration_metrics
 from tools.evaluate_g1_tracking import (
     _load_policy,
     build_compiled_step,
@@ -324,6 +326,46 @@ def _read_json_array(path: Path) -> list[Any]:
     if not isinstance(payload, list):
         raise ValueError(f"{path.name} must contain a JSON array")
     return payload
+
+
+def summarize_double_critic_calibration(
+    values: np.ndarray,
+    realized_returns: np.ndarray,
+    alive: np.ndarray,
+    *,
+    boundary_index: int = 24,
+) -> dict[str, Any]:
+    """Measure the post-update conservative value on paired complete returns."""
+
+    critic_values = np.asarray(values, dtype=np.float64)
+    realized = np.asarray(realized_returns, dtype=np.float64)
+    active = np.asarray(alive, dtype=bool)
+    if (
+        critic_values.shape != (*realized.shape, 2)
+        or active.shape != realized.shape
+        or not np.isfinite(critic_values).all()
+        or not np.isfinite(realized).all()
+        or boundary_index < 0
+        or boundary_index >= realized.shape[0]
+        or int(np.sum(active)) < 2
+        or int(np.sum(active[boundary_index])) < 2
+    ):
+        raise ValueError("double-critic calibration arrays are invalid")
+    if not np.array_equal(critic_values[..., 0], critic_values[..., 1]):
+        raise ValueError("migrated double-critic predictions are not exactly equal")
+    conservative = np.min(critic_values, axis=-1)
+    return {
+        "protocol": "g1-e002-post-proposal-critic-calibration-v1",
+        "heads_exact": True,
+        "boundary_index": boundary_index,
+        "aggregate": calibration_metrics(
+            conservative[active], realized[active]
+        ),
+        "horizon_boundary": calibration_metrics(
+            conservative[boundary_index][active[boundary_index]],
+            realized[boundary_index][active[boundary_index]],
+        ),
+    }
 
 
 def validate_preflight(
@@ -657,6 +699,7 @@ def evaluate_phase_grid(
 def evaluate_carried_population(
     *,
     checkpoint: Path,
+    proposal_checkpoint: Path,
     reference: Path,
     actor_params: Sequence[FrozenControllerResidualParams],
     alphas: Sequence[float],
@@ -666,18 +709,32 @@ def evaluate_carried_population(
     hparams = _read_json(checkpoint.with_name("hparams.json"))
     with checkpoint.open("rb") as stream:
         source_state = pickle.load(stream)
+    with proposal_checkpoint.open("rb") as stream:
+        proposal_state = pickle.load(stream)
     environment = _make_environment(hparams, reference)
     actor, source_params, normalizer_state = _load_policy(environment, checkpoint, 0)
     if (
         not _tree_exact(source_params, actor_params[0])
         or np.asarray(source_state.env_state.obs).shape[0] != 512
+        or int(proposal_state.step) != END_STEP
     ):
         raise ValueError("carried source state does not match retained E002")
     normalizer = Normalizer(environment.actor_frame_obs_dim)
+    critic_normalizer = Normalizer(environment.critic_obs_dim)
+    critic = DoubleCritic()
     horizon = int(environment.max_episode_length)
 
     def carried_rollout(params, initial_state):
         def step(env_state, _):
+            critic_obs = jax.vmap(environment._get_critic_obs)(
+                env_state.data, env_state.info
+            )
+            normalized_critic_obs = critic_normalizer.normalize(
+                proposal_state.critic_normalizer, critic_obs
+            ).astype(jnp.float32)
+            critic_values = critic.apply(
+                proposal_state.critic_params, normalized_critic_obs
+            )
             rng_pairs = jax.vmap(lambda key: jax.random.split(key, 2))(
                 env_state.info["rng"]
             )
@@ -701,6 +758,7 @@ def evaluate_carried_population(
                 "reward": next_state.reward,
                 "done": next_state.done,
                 "terminal": next_state.info["terminal"],
+                "post_update_critic_value": critic_values,
                 "xfrc_max": jnp.max(jnp.abs(env_state.data.xfrc_applied)),
             }
 
@@ -712,6 +770,7 @@ def evaluate_carried_population(
     return_rows: list[np.ndarray] = []
     terminal_rows: list[np.ndarray] = []
     first_action_rows: list[np.ndarray] = []
+    critic_value_rows: list[np.ndarray] = []
     profile = get_solver_profile(str(hparams["solver_profile"]))
     with solver_context(profile):
         for alpha, params in zip(alphas, actor_params, strict=True):
@@ -734,6 +793,9 @@ def evaluate_carried_population(
                 trace["reward"], done, gamma=0.99
             )
             survival_distribution = _distribution(first_done)
+            critic_calibration = summarize_double_critic_calibration(
+                trace["post_update_critic_value"], realized, alive
+            )
             summaries.append(
                 {
                     "alpha": float(alpha),
@@ -747,12 +809,14 @@ def evaluate_carried_population(
                     "truncation_count": int(np.sum(~terminal)),
                     "alive_transition_count": int(np.sum(alive)),
                     "mean_alive_reward": float(np.mean(trace["reward"][alive])),
+                    "post_update_critic_calibration": critic_calibration,
                 }
             )
             first_done_rows.append(first_done)
             return_rows.append(realized[0])
             terminal_rows.append(terminal)
             first_action_rows.append(trace["action"][0])
+            critic_value_rows.append(trace["post_update_critic_value"])
 
     first_actions = np.stack(first_action_rows)
     source_action = first_actions[0]
@@ -780,6 +844,7 @@ def evaluate_carried_population(
             "return_from_start": np.stack(return_rows),
             "first_done_terminal": np.stack(terminal_rows),
             "first_action": first_actions,
+            "post_update_critic_value": np.stack(critic_value_rows),
         },
     )
 
@@ -896,6 +961,7 @@ def run_evaluation(args: argparse.Namespace) -> None:
 
     carried, carried_arrays = evaluate_carried_population(
         checkpoint=args.checkpoint.resolve(),
+        proposal_checkpoint=proposal_checkpoint,
         reference=args.reference_path.resolve(),
         actor_params=params,
         alphas=alphas,
@@ -955,6 +1021,14 @@ def run_evaluation(args: argparse.Namespace) -> None:
             "initial_actor_constraint_penalty"
         ],
         proposal_critic_heads_exact=training["critic_heads_exact"],
+        post_update_critic_calibration={
+            "source_actor": carried_by_alpha[0.0][
+                "post_update_critic_calibration"
+            ],
+            "full_proposal_actor": carried_by_alpha[1.0][
+                "post_update_critic_calibration"
+            ],
+        },
         interpretation_boundary=(
             "This is a one-proposal reject-by-default discriminator. It tests "
             "the current migrated first update; it neither validates later "
