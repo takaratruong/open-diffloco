@@ -14,11 +14,13 @@ JOINT_NAMES = tuple(f"joint_{index}" for index in range(29))
 def make_rmr_fixture(frames: int = 4) -> dict[str, np.ndarray]:
     identity = np.zeros((frames, 2, 4), dtype=np.float32)
     identity[..., 0] = 1.0
+    body_pos = np.zeros((frames, 2, 3), dtype=np.float32)
+    body_pos[:, 1, 0] = 0.1
     return {
         "fps": np.asarray([50], dtype=np.int32),
         "joint_pos": np.arange(frames * 29, dtype=np.float32).reshape(frames, 29),
         "joint_vel": np.zeros((frames, 29), dtype=np.float32),
-        "body_pos_w": np.zeros((frames, 2, 3), dtype=np.float32),
+        "body_pos_w": body_pos,
         "body_quat_w": identity,
         "body_lin_vel_w": np.zeros((frames, 2, 3), dtype=np.float32),
         "body_ang_vel_w": np.zeros((frames, 2, 3), dtype=np.float32),
@@ -76,6 +78,22 @@ class PrepareReferenceTest(unittest.TestCase):
         np.savez(self.input_path, **source_arrays)
 
         with self.assertRaisesRegex(ValueError, "body_pos_w"):
+            prepare_reference(
+                self.input_path,
+                self.output_path,
+                joint_names=JOINT_NAMES,
+                source_metadata={},
+            )
+
+    def test_rejects_persistent_mjx_placeholder_body_suffix(self):
+        source_arrays = make_rmr_fixture()
+        source_arrays["body_pos_w"][2:, 1:] = source_arrays["body_pos_w"][2:, :1]
+        source_arrays["body_quat_w"][2:, 1:] = source_arrays["body_quat_w"][2:, :1]
+        source_arrays["body_lin_vel_w"][2:, 1:] = 0.0
+        source_arrays["body_ang_vel_w"][2:, 1:] = 0.0
+        np.savez(self.input_path, **source_arrays)
+
+        with self.assertRaisesRegex(ValueError, "placeholder rigid-body suffix"):
             prepare_reference(
                 self.input_path,
                 self.output_path,

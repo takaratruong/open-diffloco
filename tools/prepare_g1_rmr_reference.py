@@ -10,6 +10,8 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from tools.audit_g1_named_reference_contract import placeholder_diagnostics
+
 
 REQUIRED_ARRAYS = (
     "fps",
@@ -84,6 +86,14 @@ def _validate_source_arrays(
             raise ValueError(f"{key} must be numeric")
         if not np.all(np.isfinite(array)):
             raise ValueError(f"{key} must contain only finite values")
+    placeholder = placeholder_diagnostics(arrays, root_index=0)
+    suffix_start = placeholder["persistent_combined_suffix_start"]
+    if suffix_start is not None:
+        raise ValueError(
+            "RMR reference contains a persistent MJX placeholder rigid-body "
+            f"suffix starting at frame {suffix_start}; native RMR consumes "
+            "these fields directly"
+        )
     return frames, fps
 
 
