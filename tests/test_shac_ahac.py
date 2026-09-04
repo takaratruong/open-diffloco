@@ -133,6 +133,127 @@ def test_inactive_horizon_step_excises_an_undefined_zero_cotangent_pullback() ->
     assert bool(jp.isnan(active_gradient))
 
 
+def test_runtime_pullback_gate_shares_one_compiled_primal_and_skips_undefined_vjp() -> None:
+    from src.algorithms.shac.ahac import evaluate_with_runtime_pullback_gate
+
+    @jax.custom_vjp
+    def undefined_pullback(value):
+        return jp.square(value)
+
+    def forward(value):
+        return jp.square(value), None
+
+    def backward(_, cotangent):
+        return (jp.full_like(cotangent, jp.nan),)
+
+    undefined_pullback.defvjp(forward, backward)
+
+    compiled = jax.jit(
+        jax.value_and_grad(
+            lambda value, pullback_active: evaluate_with_runtime_pullback_gate(
+                undefined_pullback,
+                value,
+                pullback_active=pullback_active,
+            )
+        )
+    ).lower(jp.asarray(2.0), jp.asarray(False)).compile()
+
+    inactive_value, inactive_gradient = compiled(
+        jp.asarray(2.0), jp.asarray(False)
+    )
+    active_value, active_gradient = compiled(
+        jp.asarray(2.0), jp.asarray(True)
+    )
+
+    np.testing.assert_array_equal(inactive_value, active_value)
+    np.testing.assert_allclose(inactive_value, 4.0)
+    np.testing.assert_allclose(inactive_gradient, 0.0)
+    assert bool(jp.isnan(active_gradient))
+
+
+def test_runtime_pullback_gate_returns_float0_for_integer_pytree_leaves() -> None:
+    from src.algorithms.shac.ahac import evaluate_with_runtime_pullback_gate
+
+    def mixed_tree_step(tree):
+        return {
+            "count": tree["count"] + 1,
+            "position": jp.square(tree["position"]),
+        }
+
+    def loss(position, pullback_active):
+        result = evaluate_with_runtime_pullback_gate(
+            mixed_tree_step,
+            {
+                "count": jp.asarray(3, dtype=jp.int32),
+                "position": position,
+            },
+            pullback_active=pullback_active,
+        )
+        return result["position"]
+
+    compiled = jax.jit(jax.value_and_grad(loss)).lower(
+        jp.asarray(2.0), jp.asarray(False)
+    ).compile()
+
+    inactive_value, inactive_gradient = compiled(
+        jp.asarray(2.0), jp.asarray(False)
+    )
+    active_value, active_gradient = compiled(
+        jp.asarray(2.0), jp.asarray(True)
+    )
+
+    np.testing.assert_array_equal(inactive_value, active_value)
+    np.testing.assert_allclose(inactive_gradient, 0.0)
+    np.testing.assert_allclose(active_gradient, 4.0)
+
+
+def test_runtime_pullback_gate_removes_only_inactive_scan_transposes() -> None:
+    from src.algorithms.shac.ahac import evaluate_with_runtime_pullback_gate
+
+    @jax.custom_vjp
+    def zero_cotangent_unsafe_square(value):
+        return jp.square(value)
+
+    def forward(value):
+        return jp.square(value), value
+
+    def backward(value, cotangent):
+        derivative = 2.0 * value * cotangent
+        return (jp.where(cotangent == 0.0, jp.nan, derivative),)
+
+    zero_cotangent_unsafe_square.defvjp(forward, backward)
+
+    def rollout_loss(parameter, excise_inactive):
+        def step(state, index):
+            active = index < 1
+            candidate = evaluate_with_runtime_pullback_gate(
+                zero_cotangent_unsafe_square,
+                state,
+                pullback_active=(~excise_inactive) | active,
+            )
+            next_state = jp.where(active, candidate, state)
+            reward = jp.where(active, candidate, 0.0)
+            return next_state, reward
+
+        _, rewards = jax.lax.scan(step, parameter, jp.arange(3))
+        return jp.sum(rewards)
+
+    compiled = jax.jit(jax.value_and_grad(rollout_loss)).lower(
+        jp.asarray(2.0), jp.asarray(False)
+    ).compile()
+    connected_value, connected_gradient = compiled(
+        jp.asarray(2.0), jp.asarray(False)
+    )
+    excised_value, excised_gradient = compiled(
+        jp.asarray(2.0), jp.asarray(True)
+    )
+
+    np.testing.assert_array_equal(connected_value, excised_value)
+    np.testing.assert_allclose(connected_value, 4.0)
+    assert bool(jp.isnan(connected_gradient))
+    np.testing.assert_allclose(excised_gradient, 4.0)
+
+
 def test_masked_mean_excludes_inactive_slots() -> None:
     from src.algorithms.shac.ahac import masked_mean
 

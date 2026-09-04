@@ -75,6 +75,7 @@ from src.algorithms.shac.ahac import (
     critic_value_loss,
     duplicate_single_critic_params,
     evaluate_with_inactive_gradient_excision,
+    evaluate_with_runtime_pullback_gate,
     resolve_ahac_resume_settings,
     select_critic_bootstrap_params,
     select_active_tree,
@@ -609,6 +610,41 @@ def run_determinism_probe(compiled_step, state) -> dict[str, object]:
         report["actor_forward_jvp"] = forward_jvp
         report["valid"] = bool(report["valid"] and forward_jvp["valid"])
     return report
+
+
+def run_runtime_pullback_pair_probe(compiled_step, state) -> dict[str, object]:
+    """Evaluate connected and excised flags through one compiled callable."""
+
+    input_state_sha256 = numeric_tree_sha256(state)
+    input_step = int(np.asarray(getattr(state, "step", state)))
+    arms = {}
+    for name, excise_inactive in (("connected", False), ("excised", True)):
+        flag = jp.asarray(excise_inactive, dtype=jp.bool_)
+
+        def selected_step(current_state, *, _flag=flag):
+            return compiled_step(current_state, _flag)
+
+        arm_report = run_determinism_probe(selected_step, state)
+        arm_report.update(
+            {
+                "runtime_excise_inactive": excise_inactive,
+                "input_state_sha256": input_state_sha256,
+                "input_step": input_step,
+                "compiled_callable_reused": True,
+                "ordinary_training_loop_entered": False,
+            }
+        )
+        arms[name] = arm_report
+
+    return {
+        "protocol": "shac-runtime-pullback-pair-v1",
+        "valid": all(report["valid"] for report in arms.values()),
+        "arms": arms,
+        "input_state_sha256": input_state_sha256,
+        "input_step": input_step,
+        "compiled_callable_reused": True,
+        "ordinary_training_loop_entered": False,
+    }
 
 
 def load_checkpoint(path: str):
@@ -2716,10 +2752,8 @@ def validate_actor_inactive_horizon_gradient_contract(
 ) -> None:
     """Confine inactive AHAC physics-pullback excision to diagnostics."""
 
-    if mode not in {"connected", "excised"}:
-        raise ValueError(
-            "inactive horizon gradient mode must be connected or excised"
-        )
+    if mode not in {"connected", "excised", "runtime-paired"}:
+        raise ValueError("inactive horizon gradient mode is invalid")
     if mode == "connected":
         return
     if not ahac:
@@ -3798,7 +3832,9 @@ def train(
             ordinary per-environment reverse gradients.
         actor_inactive_horizon_gradient_mode: Keep inactive static-scan MJX
             pullbacks connected, or structurally excise them in a probe while
-            preserving their forward telemetry.
+            preserving their forward telemetry. ``runtime-paired`` evaluates
+            connected and excised pullbacks through one shared custom-VJP
+            primal and one compiled callable.
         actor_bootstrap_delay_steps: Environment steps before the actor uses
             target-critic terminal value estimates.
         actor_return_semantics: Whether a fixed rollout accumulates every reset
@@ -3808,7 +3844,8 @@ def train(
         determinism_probe_output: Optional create-only JSON path. When set,
             compile one update, invoke that same callable twice from the same
             input state, publish exact boundary comparisons, and return without
-            entering the ordinary training loop.
+            entering the ordinary training loop. A runtime-paired probe invokes
+            each dynamic pullback flag twice.
 
     Returns:
         Tuple of (final_state, save_directory)
@@ -5688,6 +5725,7 @@ def train(
         current_ahac_horizon,
         current_ahac_dual,
         current_learned_wrench_scale,
+        current_inactive_horizon_pullback_excision,
     ):
         """Short-horizon actor objective with sampled perturbations."""
         (
@@ -6031,7 +6069,18 @@ def train(
                     reference_stride=env.reference_stride,
                     reference_length=env.reference_length,
                 )
-            if actor_inactive_horizon_gradient_mode == "excised":
+            if actor_inactive_horizon_gradient_mode == "runtime-paired":
+                candidate_unreplayed_state = (
+                    evaluate_with_runtime_pullback_gate(
+                        lambda operands: env.step(*operands),
+                        (state, noisy_action),
+                        pullback_active=(
+                            (~current_inactive_horizon_pullback_excision)
+                            | active
+                        ),
+                    )
+                )
+            elif actor_inactive_horizon_gradient_mode == "excised":
                 candidate_unreplayed_state = (
                     evaluate_with_inactive_gradient_excision(
                         lambda operands: env.step(*operands),
@@ -6861,7 +6910,12 @@ def train(
         return grads, per_env_gradient_statistics(per_env_grads)
 
     @jax.jit
-    def train_step(state: TrainState):
+    def compiled_train_step(
+        state: TrainState, runtime_excise_inactive: jax.Array
+    ):
+        runtime_excise_inactive = jp.asarray(
+            runtime_excise_inactive, dtype=jp.bool_
+        )
         (
             key,
             noise_key,
@@ -7104,6 +7158,7 @@ def train(
                     None,
                     None,
                     None,
+                    None,
                 ),
             )(
                 candidate_params,
@@ -7117,6 +7172,7 @@ def train(
                 current_ahac_horizon,
                 current_ahac_dual,
                 current_learned_wrench_scale,
+                runtime_excise_inactive,
             )
             return objectives
 
@@ -7148,6 +7204,7 @@ def train(
                     None,
                     None,
                     None,
+                    None,
                 ),
             )(
                 state.actor_params,
@@ -7161,6 +7218,7 @@ def train(
                 current_ahac_horizon,
                 current_ahac_dual,
                 current_learned_wrench_scale,
+                runtime_excise_inactive,
             )
             if actor_forward_jvp_probe:
                 (
@@ -7261,6 +7319,7 @@ def train(
                         None,
                         None,
                         None,
+                        None,
                     ),
                 )(
                     state.actor_params,
@@ -7274,6 +7333,7 @@ def train(
                     current_ahac_horizon,
                     current_ahac_dual,
                     current_learned_wrench_scale,
+                    runtime_excise_inactive,
                 )
                 if actor_forward_jvp_probe:
                     (
@@ -9070,6 +9130,9 @@ def train(
 
         return new_state, metrics
 
+    def train_step(state: TrainState):
+        return compiled_train_step(state, jp.asarray(False))
+
     initialized_state = TrainState(
         key=key,
         env_state=env_state,
@@ -10199,7 +10262,12 @@ def train(
     total_iters = total_steps // steps_per_iter
 
     if determinism_probe_output is not None:
-        probe_report = run_determinism_probe(train_step, state)
+        if actor_inactive_horizon_gradient_mode == "runtime-paired":
+            probe_report = run_runtime_pullback_pair_probe(
+                compiled_train_step, state
+            )
+        else:
+            probe_report = run_determinism_probe(train_step, state)
         probe_report.update(
             {
                 "input_state_sha256": numeric_tree_sha256(state),

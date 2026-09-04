@@ -73,6 +73,65 @@ def evaluate_with_inactive_gradient_excision(
     )
 
 
+def evaluate_with_runtime_pullback_gate(
+    function, operand, *, pullback_active: jax.Array
+):
+    """Evaluate one shared primal and select its pullback at runtime.
+
+    Unlike :func:`evaluate_with_inactive_gradient_excision`, ``function`` is
+    present exactly once in the custom forward rule.  The dynamic predicate is
+    consulted only by the backward rule: an active call recomputes and applies
+    the ordinary VJP, while an inactive call returns a structural zero without
+    invoking that VJP.  This makes two calls to one compiled executable a valid
+    exact-primal comparison even when a primitive's zero-cotangent transpose is
+    undefined.
+    """
+
+    predicate = jp.asarray(pullback_active, dtype=jp.bool_)
+    if predicate.ndim != 0:
+        raise ValueError("pullback-active predicate must be scalar")
+
+    @jax.custom_vjp
+    def gated(value, current_predicate):
+        del current_predicate
+        return function(value)
+
+    def forward(value, current_predicate):
+        return function(value), (value, current_predicate)
+
+    def backward(residual, cotangent):
+        value, current_predicate = residual
+
+        def apply_pullback(inputs):
+            current_value, current_cotangent = inputs
+            _, pullback = jax.vjp(function, current_value)
+            return pullback(current_cotangent)[0]
+
+        def zero_pullback(inputs):
+            current_value, _ = inputs
+
+            def zero_cotangent_like(leaf):
+                array = jp.asarray(leaf)
+                if jp.issubdtype(array.dtype, jp.inexact):
+                    return jp.zeros_like(array)
+                return jp.zeros(array.shape, dtype=jax.dtypes.float0)
+
+            return jax.tree_util.tree_map(
+                zero_cotangent_like, current_value
+            )
+
+        operand_cotangent = jax.lax.cond(
+            current_predicate,
+            apply_pullback,
+            zero_pullback,
+            (value, cotangent),
+        )
+        return operand_cotangent, None
+
+    gated.defvjp(forward, backward)
+    return gated(operand, predicate)
+
+
 def masked_mean(values: jax.Array, mask: jax.Array) -> jax.Array:
     """Mean over active leading-axis entries without inactive contamination."""
 

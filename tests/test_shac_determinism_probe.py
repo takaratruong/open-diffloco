@@ -128,6 +128,42 @@ def test_probe_reuses_one_jitted_callable_and_accepts_exact_replay():
     )
 
 
+def test_runtime_pullback_pair_probe_reuses_one_compiled_callable() -> None:
+    from src.algorithms.shac.algorithm import (
+        run_runtime_pullback_pair_probe,
+    )
+
+    traces = []
+
+    @jax.jit
+    def step(state, excise_inactive):
+        traces.append(True)
+        value = jnp.asarray(7, dtype=jnp.uint32)
+        metrics = _metrics(value)
+        metrics["runtime_excise_inactive"] = excise_inactive
+        return state + 1.0, metrics
+
+    jax.block_until_ready(step(jnp.asarray(0.0), jnp.asarray(False)))
+    report = run_runtime_pullback_pair_probe(step, jnp.asarray(0.0))
+
+    assert len(traces) == 1
+    assert report["valid"] is True
+    assert report["protocol"] == "shac-runtime-pullback-pair-v1"
+    assert report["compiled_callable_reused"] is True
+    assert report["ordinary_training_loop_entered"] is False
+    assert set(report["arms"]) == {"connected", "excised"}
+    assert report["arms"]["connected"]["valid"] is True
+    assert report["arms"]["excised"]["valid"] is True
+    assert report["arms"]["connected"]["runtime_excise_inactive"] is False
+    assert report["arms"]["excised"]["runtime_excise_inactive"] is True
+    assert report["arms"]["connected"]["input_state_sha256"] == report[
+        "input_state_sha256"
+    ]
+    assert report["arms"]["excised"]["input_state_sha256"] == report[
+        "input_state_sha256"
+    ]
+
+
 def test_probe_reports_the_first_mismatching_boundary():
     from src.algorithms.shac.algorithm import run_determinism_probe
 

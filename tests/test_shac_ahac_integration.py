@@ -216,7 +216,9 @@ def test_train_signature_and_source_wire_all_ahac_contracts() -> None:
     assert "update_horizon_dual" in source
     assert "adaptive_contact_penalty" in source
     assert "evaluate_with_inactive_gradient_excision" in source
+    assert "evaluate_with_runtime_pullback_gate" in source
     assert 'actor_inactive_horizon_gradient_mode == "excised"' in source
+    assert 'actor_inactive_horizon_gradient_mode == "runtime-paired"' in source
     assert 'paper_ahac = ahac and ahac_semantics ==' in source
     assert "bootstrap_critic_params" in source
     assert "critic_convergence" in source
@@ -239,7 +241,12 @@ def test_inactive_horizon_gradient_excision_is_probe_only() -> None:
         mode="excised",
         determinism_probe_output="probe.json",
     )
-    with pytest.raises(ValueError, match="connected or excised"):
+    validate_actor_inactive_horizon_gradient_contract(
+        ahac=True,
+        mode="runtime-paired",
+        determinism_probe_output="probe.json",
+    )
+    with pytest.raises(ValueError, match="invalid"):
         validate_actor_inactive_horizon_gradient_contract(
             ahac=True,
             mode="masked",
@@ -255,6 +262,12 @@ def test_inactive_horizon_gradient_excision_is_probe_only() -> None:
         validate_actor_inactive_horizon_gradient_contract(
             ahac=True,
             mode="excised",
+            determinism_probe_output=None,
+        )
+    with pytest.raises(ValueError, match="probe-only"):
+        validate_actor_inactive_horizon_gradient_contract(
+            ahac=True,
+            mode="runtime-paired",
             determinism_probe_output=None,
         )
 
