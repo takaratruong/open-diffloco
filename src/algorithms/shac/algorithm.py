@@ -214,6 +214,7 @@ from src.algorithms.shac.capture_point_objective import (
 
 # Set to True to enable per-foot normal force logging.
 DEBUG_FOOT_CONTACTS = False
+ACTOR_FORWARD_JVP_SEED = 20_260_904
 
 DETERMINISM_BOUNDARIES = (
     "random_inputs",
@@ -288,6 +289,151 @@ def numeric_tree_sha256(tree: object) -> str:
         digest.update(repr(array.shape).encode("ascii"))
         digest.update(array.tobytes())
     return digest.hexdigest()
+
+
+def build_masked_rademacher_direction(
+    params, mask, *, seed: int
+):
+    """Build one deterministic unit tangent over exactly the selected scalars."""
+
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        raise ValueError("Rademacher direction seed must be a non-negative integer")
+    param_leaves, param_structure = jax.tree_util.tree_flatten(params)
+    mask_leaves, mask_structure = jax.tree_util.tree_flatten(mask)
+    if param_structure != mask_structure or not param_leaves:
+        raise ValueError("parameter and tangent-mask trees must be nonempty and equal")
+    selected_count = 0
+    for param, selected in zip(param_leaves, mask_leaves, strict=True):
+        if param.shape != selected.shape or selected.dtype != jp.bool_:
+            raise ValueError("every tangent mask leaf must be boolean and shape-equal")
+        if not jp.issubdtype(param.dtype, jp.inexact):
+            raise ValueError("forward-JVP parameters must be floating point")
+        selected_count += int(np.count_nonzero(np.asarray(selected)))
+    if selected_count < 1:
+        raise ValueError("forward-JVP tangent mask must select at least one scalar")
+
+    keys = jax.random.split(jax.random.PRNGKey(seed), len(param_leaves))
+    inverse_norm = 1.0 / math.sqrt(selected_count)
+    direction_leaves = [
+        jp.where(
+            selected,
+            jax.random.rademacher(key, param.shape, dtype=param.dtype)
+            * jp.asarray(inverse_norm, dtype=param.dtype),
+            jp.zeros_like(param),
+        )
+        for param, selected, key in zip(
+            param_leaves, mask_leaves, keys, strict=True
+        )
+    ]
+    return jax.tree_util.tree_unflatten(param_structure, direction_leaves)
+
+
+def build_actor_forward_jvp_report(
+    first_metrics, second_metrics
+) -> dict[str, object]:
+    """Serialize a dense actor-tangent JVP without requiring it to be finite."""
+
+    required = (
+        "actor_forward_jvp_primal_by_env",
+        "actor_forward_jvp_tangent_by_env",
+        "actor_forward_jvp_direction_fingerprint",
+        "actor_forward_jvp_direction_norm",
+        "actor_forward_jvp_trainable_scalar_count",
+        "actor_cagrad_losses_by_env",
+        "actor_cagrad_gradient_finite_by_env",
+    )
+    if any(name not in first_metrics or name not in second_metrics for name in required):
+        raise ValueError("actor forward-JVP metrics are incomplete")
+
+    first_primal = np.asarray(
+        first_metrics["actor_forward_jvp_primal_by_env"], dtype=np.float64
+    )
+    second_primal = np.asarray(
+        second_metrics["actor_forward_jvp_primal_by_env"], dtype=np.float64
+    )
+    first_tangent = np.asarray(
+        first_metrics["actor_forward_jvp_tangent_by_env"], dtype=np.float64
+    )
+    second_tangent = np.asarray(
+        second_metrics["actor_forward_jvp_tangent_by_env"], dtype=np.float64
+    )
+    reverse_losses = np.asarray(
+        first_metrics["actor_cagrad_losses_by_env"], dtype=np.float64
+    )
+    reverse_finite = np.asarray(
+        first_metrics["actor_cagrad_gradient_finite_by_env"], dtype=bool
+    )
+    first_fingerprint = np.asarray(
+        first_metrics["actor_forward_jvp_direction_fingerprint"],
+        dtype=np.uint32,
+    )
+    second_fingerprint = np.asarray(
+        second_metrics["actor_forward_jvp_direction_fingerprint"],
+        dtype=np.uint32,
+    )
+    direction_norm = float(first_metrics["actor_forward_jvp_direction_norm"])
+    second_direction_norm = float(
+        second_metrics["actor_forward_jvp_direction_norm"]
+    )
+    trainable_count = int(
+        first_metrics["actor_forward_jvp_trainable_scalar_count"]
+    )
+    second_trainable_count = int(
+        second_metrics["actor_forward_jvp_trainable_scalar_count"]
+    )
+    if (
+        first_primal.ndim != 1
+        or first_primal.shape != second_primal.shape
+        or first_tangent.shape != first_primal.shape
+        or second_tangent.shape != first_primal.shape
+        or reverse_losses.shape != first_primal.shape
+        or reverse_finite.shape != first_primal.shape
+    ):
+        raise ValueError("actor forward-JVP population vectors are inconsistent")
+
+    repeat_primal_exact = bool(
+        np.array_equal(first_primal, second_primal, equal_nan=True)
+    )
+    repeat_tangent_exact = bool(
+        np.array_equal(first_tangent, second_tangent, equal_nan=True)
+    )
+    primal_matches_reverse = bool(np.array_equal(first_primal, reverse_losses))
+    direction_exact = bool(np.array_equal(first_fingerprint, second_fingerprint))
+    finite = np.isfinite(first_tangent)
+    nonzero = finite & (first_tangent != 0.0)
+    reverse_invalid = ~reverse_finite
+    valid = bool(
+        repeat_primal_exact
+        and repeat_tangent_exact
+        and primal_matches_reverse
+        and direction_exact
+        and math.isfinite(direction_norm)
+        and direction_norm > 0.0
+        and direction_norm == second_direction_norm
+        and trainable_count > 0
+        and trainable_count == second_trainable_count
+    )
+    return {
+        "protocol": "shac-actor-forward-jvp-population-v1",
+        "valid": valid,
+        "population_size": int(first_primal.size),
+        "direction_fingerprint": first_fingerprint.tolist(),
+        "direction_norm": direction_norm,
+        "trainable_scalar_count": trainable_count,
+        "primal_matches_reverse_losses": primal_matches_reverse,
+        "repeat_primal_exact": repeat_primal_exact,
+        "repeat_tangent_exact": repeat_tangent_exact,
+        "finite_count": int(np.sum(finite)),
+        "nonfinite_count": int(np.sum(~finite)),
+        "nonzero_count": int(np.sum(nonzero)),
+        "finite_by_env": finite.tolist(),
+        "nonzero_by_env": nonzero.tolist(),
+        "reverse_gradient_finite_by_env": reverse_finite.tolist(),
+        "finite_on_reverse_invalid_count": int(np.sum(finite & reverse_invalid)),
+        "reverse_invalid_count": int(np.sum(reverse_invalid)),
+        "primals_by_env": _json_safe_numeric(first_primal),
+        "directional_derivatives_by_env": _json_safe_numeric(first_tangent),
+    }
 
 
 def run_determinism_probe(compiled_step, state) -> dict[str, object]:
@@ -454,6 +600,12 @@ def run_determinism_probe(compiled_step, state) -> dict[str, object]:
             input_step=input_step,
             computed_output_step=computed_output_step,
         )
+    if "actor_forward_jvp_primal_by_env" in first_metrics:
+        forward_jvp = build_actor_forward_jvp_report(
+            first_metrics, second_metrics
+        )
+        report["actor_forward_jvp"] = forward_jvp
+        report["valid"] = bool(report["valid"] and forward_jvp["valid"])
     return report
 
 
@@ -2525,6 +2677,35 @@ def validate_ahac_actor_bootstrap_contract(
         raise ValueError("AHAC actor bootstrap ablation requires zero scale and delay")
 
 
+def validate_actor_derivative_probe_contract(
+    *,
+    ahac: bool,
+    actor_bootstrap_scale: float,
+    actor_bootstrap_delay_steps: int,
+    actor_bootstrap_graph_mode: str,
+    actor_forward_jvp_probe: bool,
+    determinism_probe_output: str | None,
+) -> None:
+    """Confine structural bootstrap and forward-JVP changes to diagnostics."""
+
+    if actor_bootstrap_graph_mode not in {"connected", "excised"}:
+        raise ValueError("actor bootstrap graph mode must be connected or excised")
+    if not isinstance(actor_forward_jvp_probe, bool):
+        raise TypeError("actor_forward_jvp_probe must be boolean")
+    if actor_bootstrap_graph_mode == "connected" and not actor_forward_jvp_probe:
+        return
+    if not ahac:
+        raise ValueError("actor derivative probe requires AHAC")
+    if determinism_probe_output is None:
+        raise ValueError("actor derivative intervention is probe-only")
+    if actor_forward_jvp_probe and actor_bootstrap_graph_mode != "excised":
+        raise ValueError("actor forward JVP probe requires an excised bootstrap graph")
+    if actor_bootstrap_graph_mode == "excised" and (
+        actor_bootstrap_scale != 0.0 or actor_bootstrap_delay_steps != 0
+    ):
+        raise ValueError("bootstrap graph excision requires zero bootstrap scale and delay")
+
+
 def resolve_actor_bootstrap_resume_scale(
     resumed_hparams: dict[str, object] | None,
     *,
@@ -3391,6 +3572,8 @@ def train(
     actor_bootstrap_delay_steps: int = 0,
     allow_resume_actor_bootstrap_scale_change: bool = False,
     allow_ahac_actor_bootstrap_ablation: bool = False,
+    actor_bootstrap_graph_mode: str = "connected",
+    actor_forward_jvp_probe: bool = False,
     actor_return_semantics: str = "multi_episode",
     allow_resume_actor_return_semantics_change: bool = False,
     ahac: bool = False,
@@ -3585,6 +3768,11 @@ def train(
             actor terminal-value scale when resuming a checkpoint.
         allow_ahac_actor_bootstrap_ablation: Permit scale-zero AHAC only when a
             determinism probe returns without entering the training loop.
+        actor_bootstrap_graph_mode: Keep the terminal critic graph connected,
+            or excise it only inside an authorized scale-zero probe.
+        actor_forward_jvp_probe: In an authorized structurally excised probe,
+            measure one deterministic dense actor-parameter JVP alongside the
+            ordinary per-environment reverse gradients.
         actor_bootstrap_delay_steps: Environment steps before the actor uses
             target-critic terminal value estimates.
         actor_return_semantics: Whether a fixed rollout accumulates every reset
@@ -3868,6 +4056,18 @@ def train(
         allow_ablation=allow_ahac_actor_bootstrap_ablation,
         determinism_probe_output=determinism_probe_output,
     )
+    validate_actor_derivative_probe_contract(
+        ahac=ahac,
+        actor_bootstrap_scale=actor_bootstrap_scale,
+        actor_bootstrap_delay_steps=actor_bootstrap_delay_steps,
+        actor_bootstrap_graph_mode=actor_bootstrap_graph_mode,
+        actor_forward_jvp_probe=actor_forward_jvp_probe,
+        determinism_probe_output=determinism_probe_output,
+    )
+    if actor_forward_jvp_probe and not actor_frozen_controller_residual:
+        raise ValueError(
+            "actor forward JVP probe requires a frozen-controller residual actor"
+        )
     if (
         isinstance(termination_margin_weight, bool)
         or not math.isfinite(termination_margin_weight)
@@ -6409,22 +6609,31 @@ def train(
                 "actor_capture_point_component_rms": component_rms,
             }
 
-        bootstrap_obs = critic_norm.normalize(
-            critic_norm_state, traj["bootstrap_critic_obs"]
-        ).astype(jp.float32)
-        bootstrap_v = conservative_value(
-            critic.apply(bootstrap_critic_params, bootstrap_obs),
-            double=ahac,
-        )
+        if actor_bootstrap_graph_mode == "excised":
+            # This static probe branch removes the complete critic-to-actor
+            # reverse graph.  Multiplying a connected value by zero is not
+            # equivalent when an undefined local transpose can emit NaN.
+            bootstrap_v = jp.zeros(
+                traj["reward"].shape, dtype=jp.float32
+            )
+            final_v = jp.asarray(0.0, dtype=jp.float32)
+        else:
+            bootstrap_obs = critic_norm.normalize(
+                critic_norm_state, traj["bootstrap_critic_obs"]
+            ).astype(jp.float32)
+            bootstrap_v = conservative_value(
+                critic.apply(bootstrap_critic_params, bootstrap_obs),
+                double=ahac,
+            )
 
-        final_obs = critic_norm.normalize(
-            critic_norm_state,
-            env._get_critic_obs(final_state.data, final_state.info),
-        ).astype(jp.float32)
-        final_v = conservative_value(
-            critic.apply(bootstrap_critic_params, final_obs),
-            double=ahac,
-        )
+            final_obs = critic_norm.normalize(
+                critic_norm_state,
+                env._get_critic_obs(final_state.data, final_state.info),
+            ).astype(jp.float32)
+            final_v = conservative_value(
+                critic.apply(bootstrap_critic_params, final_obs),
+                double=ahac,
+            )
         actor_return = discounted_actor_return(
             rewards=traj["reward"],
             dones=traj["done"],
@@ -6828,6 +7037,62 @@ def train(
 
         # Actor update
         actor_grad_fn = jax.value_and_grad(actor_loss, has_aux=True)
+        actor_forward_direction = (
+            build_masked_rademacher_direction(
+                state.actor_params,
+                preview_adapter_mask,
+                seed=ACTOR_FORWARD_JVP_SEED,
+            )
+            if actor_forward_jvp_probe
+            else None
+        )
+
+        def actor_population_objectives(
+            candidate_params, population_state, population_randomization
+        ):
+            objectives, _ = jax.vmap(
+                actor_loss,
+                in_axes=(
+                    None,
+                    None,
+                    None,
+                    None,
+                    0,
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            )(
+                candidate_params,
+                bootstrap_critic_params,
+                state.normalizer,
+                state.critic_normalizer,
+                population_state,
+                population_randomization,
+                current_noise_std,
+                current_actor_bootstrap_scale,
+                current_ahac_horizon,
+                current_ahac_dual,
+                current_learned_wrench_scale,
+            )
+            return objectives
+
+        def actor_population_directional_jvp(
+            population_state, population_randomization
+        ):
+            return jax.jvp(
+                lambda candidate: actor_population_objectives(
+                    candidate,
+                    population_state,
+                    population_randomization,
+                ),
+                (state.actor_params,),
+                (actor_forward_direction,),
+            )
+
         if gradient_accumulation_steps == 1:
             (losses, (trajs, final_states)), per_env_grads = jax.vmap(
                 actor_grad_fn,
@@ -6857,6 +7122,16 @@ def train(
                 current_ahac_dual,
                 current_learned_wrench_scale,
             )
+            if actor_forward_jvp_probe:
+                (
+                    actor_forward_jvp_primals,
+                    actor_forward_jvp_tangents,
+                ) = actor_population_directional_jvp(
+                    updated_env_state, all_randomization
+                )
+            else:
+                actor_forward_jvp_primals = jp.zeros_like(losses)
+                actor_forward_jvp_tangents = jp.zeros_like(losses)
             if actor_learned_torso_wrench:
                 per_env_grads = jax.tree_util.tree_map(
                     lambda gradient, selected: jp.where(
@@ -6960,6 +7235,16 @@ def train(
                     current_ahac_dual,
                     current_learned_wrench_scale,
                 )
+                if actor_forward_jvp_probe:
+                    (
+                        shard_forward_jvp_primals,
+                        shard_forward_jvp_tangents,
+                    ) = actor_population_directional_jvp(
+                        shard_env_state, shard_randomization
+                    )
+                else:
+                    shard_forward_jvp_primals = jp.zeros_like(shard_losses)
+                    shard_forward_jvp_tangents = jp.zeros_like(shard_losses)
                 if actor_learned_torso_wrench:
                     shard_per_env_grads = jax.tree_util.tree_map(
                         lambda gradient, selected: jp.where(
@@ -7030,6 +7315,8 @@ def train(
                             "effective_norm_by_env"
                         ],
                     },
+                    shard_forward_jvp_primals,
+                    shard_forward_jvp_tangents,
                 )
 
             _, actor_shard_outputs = jax.lax.scan(
@@ -7043,10 +7330,18 @@ def train(
                 shard_final_states,
                 shard_reductions,
                 shard_grad_stats,
+                shard_forward_jvp_primals,
+                shard_forward_jvp_tangents,
             ) = actor_shard_outputs
             losses = flatten_population(shard_losses)
             trajs = flatten_population(shard_trajs)
             final_states = flatten_population(shard_final_states)
+            actor_forward_jvp_primals = flatten_population(
+                shard_forward_jvp_primals
+            )
+            actor_forward_jvp_tangents = flatten_population(
+                shard_forward_jvp_tangents
+            )
             if actor_cagrad:
                 cagrad_reduction = reduce_cagrad_shard_accumulators(
                     shard_reductions["phase"],
@@ -8056,6 +8351,29 @@ def train(
                 fresh_reference_phase_bin_counts
             ),
         }
+        if actor_forward_jvp_probe:
+            metrics.update(
+                {
+                    "actor_forward_jvp_primal_by_env": (
+                        actor_forward_jvp_primals
+                    ),
+                    "actor_forward_jvp_tangent_by_env": (
+                        actor_forward_jvp_tangents
+                    ),
+                    "actor_forward_jvp_direction_fingerprint": (
+                        tree_bit_fingerprint(actor_forward_direction)
+                    ),
+                    "actor_forward_jvp_direction_norm": compute_grad_norm(
+                        actor_forward_direction
+                    ),
+                    "actor_forward_jvp_trainable_scalar_count": sum(
+                        jp.sum(selected.astype(jp.int32))
+                        for selected in jax.tree_util.tree_leaves(
+                            preview_adapter_mask
+                        )
+                    ),
+                }
+            )
         if jave_enabled:
             metrics.update(
                 {
@@ -9782,6 +10100,11 @@ def train(
         ),
         "allow_ahac_actor_bootstrap_ablation": (
             allow_ahac_actor_bootstrap_ablation
+        ),
+        "actor_bootstrap_graph_mode": actor_bootstrap_graph_mode,
+        "actor_forward_jvp_probe": actor_forward_jvp_probe,
+        "actor_forward_jvp_seed": (
+            ACTOR_FORWARD_JVP_SEED if actor_forward_jvp_probe else None
         ),
         "actor_return_semantics": actor_return_semantics,
         "allow_resume_actor_return_semantics_change": (

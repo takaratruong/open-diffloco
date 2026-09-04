@@ -14,13 +14,63 @@ class ActorBootstrapScheduleTest(unittest.TestCase):
     def test_train_ablation_authority_defaults_disabled(self):
         from src.algorithms.shac.algorithm import train
 
-        parameter = inspect.signature(train).parameters[
-            "allow_ahac_actor_bootstrap_ablation"
-        ]
-        self.assertIs(parameter.default, False)
+        parameters = inspect.signature(train).parameters
+        self.assertIs(
+            parameters["allow_ahac_actor_bootstrap_ablation"].default,
+            False,
+        )
+        self.assertEqual(
+            parameters["actor_bootstrap_graph_mode"].default,
+            "connected",
+        )
+        self.assertIs(parameters["actor_forward_jvp_probe"].default, False)
         self.assertIn(
             "validate_ahac_actor_bootstrap_contract(", inspect.getsource(train)
         )
+
+    def test_structural_bootstrap_excision_and_forward_jvp_are_probe_only(self):
+        from src.algorithms.shac.algorithm import (
+            validate_actor_derivative_probe_contract,
+        )
+
+        validate_actor_derivative_probe_contract(
+            ahac=True,
+            actor_bootstrap_scale=0.0,
+            actor_bootstrap_delay_steps=0,
+            actor_bootstrap_graph_mode="excised",
+            actor_forward_jvp_probe=True,
+            determinism_probe_output="probe.json",
+        )
+        for changes, message in (
+            ({"determinism_probe_output": None}, "probe-only"),
+            ({"ahac": False}, "requires AHAC"),
+            ({"actor_bootstrap_scale": 1.0}, "zero bootstrap"),
+            ({"actor_bootstrap_delay_steps": 1}, "zero bootstrap"),
+            ({"actor_bootstrap_graph_mode": "connected"}, "excised"),
+        ):
+            kwargs = {
+                "ahac": True,
+                "actor_bootstrap_scale": 0.0,
+                "actor_bootstrap_delay_steps": 0,
+                "actor_bootstrap_graph_mode": "excised",
+                "actor_forward_jvp_probe": True,
+                "determinism_probe_output": "probe.json",
+            }
+            kwargs.update(changes)
+            with self.subTest(changes=changes), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                validate_actor_derivative_probe_contract(**kwargs)
+
+        with self.assertRaisesRegex(ValueError, "graph mode"):
+            validate_actor_derivative_probe_contract(
+                ahac=True,
+                actor_bootstrap_scale=0.0,
+                actor_bootstrap_delay_steps=0,
+                actor_bootstrap_graph_mode="unknown",
+                actor_forward_jvp_probe=False,
+                determinism_probe_output="probe.json",
+            )
 
     def test_ahac_zero_bootstrap_ablation_is_probe_only(self):
         from src.algorithms.shac.algorithm import (

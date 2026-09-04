@@ -175,6 +175,97 @@ def test_probe_serializes_the_complete_cagrad_population(monkeypatch):
     }
 
 
+def test_probe_serializes_exact_forward_jvp_population():
+    from src.algorithms.shac.algorithm import run_determinism_probe
+
+    def step(state):
+        metrics = _metrics(jnp.asarray(7, dtype=jnp.uint32))
+        metrics.update(
+            {
+                "actor_forward_jvp_primal_by_env": jnp.asarray(
+                    [1.0, 2.0, 3.0]
+                ),
+                "actor_forward_jvp_tangent_by_env": jnp.asarray(
+                    [0.25, -0.5, 0.0]
+                ),
+                "actor_forward_jvp_direction_fingerprint": jnp.asarray(
+                    [11, 12, 13, 14], dtype=jnp.uint32
+                ),
+                "actor_forward_jvp_direction_norm": jnp.asarray(1.0),
+                "actor_forward_jvp_trainable_scalar_count": jnp.asarray(
+                    17, dtype=jnp.int32
+                ),
+                "actor_cagrad_losses_by_env": jnp.asarray(
+                    [1.0, 2.0, 3.0]
+                ),
+                "actor_cagrad_gradient_finite_by_env": jnp.asarray(
+                    [False, True, False]
+                ),
+            }
+        )
+        return state + 1.0, metrics
+
+    report = run_determinism_probe(step, jnp.asarray(0.0))
+
+    assert report["valid"] is True
+    assert report["actor_forward_jvp"] == {
+        "protocol": "shac-actor-forward-jvp-population-v1",
+        "valid": True,
+        "population_size": 3,
+        "direction_fingerprint": [11, 12, 13, 14],
+        "direction_norm": 1.0,
+        "trainable_scalar_count": 17,
+        "primal_matches_reverse_losses": True,
+        "repeat_primal_exact": True,
+        "repeat_tangent_exact": True,
+        "finite_count": 3,
+        "nonfinite_count": 0,
+        "nonzero_count": 2,
+        "finite_by_env": [True, True, True],
+        "nonzero_by_env": [True, True, False],
+        "reverse_gradient_finite_by_env": [False, True, False],
+        "finite_on_reverse_invalid_count": 2,
+        "reverse_invalid_count": 2,
+        "primals_by_env": [1.0, 2.0, 3.0],
+        "directional_derivatives_by_env": [0.25, -0.5, 0.0],
+    }
+
+
+def test_masked_rademacher_direction_is_unit_trainable_and_repeatable():
+    from src.algorithms.shac.algorithm import build_masked_rademacher_direction
+
+    params = {
+        "frozen": jnp.arange(3.0),
+        "trainable": jnp.arange(4.0).reshape(2, 2),
+    }
+    mask = {
+        "frozen": jnp.zeros((3,), dtype=bool),
+        "trainable": jnp.ones((2, 2), dtype=bool),
+    }
+
+    first = build_masked_rademacher_direction(params, mask, seed=17)
+    second = build_masked_rademacher_direction(params, mask, seed=17)
+    changed = build_masked_rademacher_direction(params, mask, seed=18)
+
+    assert jnp.array_equal(first["frozen"], jnp.zeros((3,)))
+    assert jnp.isclose(
+        jnp.sqrt(sum(jnp.sum(jnp.square(x)) for x in jax.tree.leaves(first))),
+        1.0,
+    )
+    assert all(
+        jnp.array_equal(left, right)
+        for left, right in zip(
+            jax.tree.leaves(first), jax.tree.leaves(second), strict=True
+        )
+    )
+    assert any(
+        not jnp.array_equal(left, right)
+        for left, right in zip(
+            jax.tree.leaves(first), jax.tree.leaves(changed), strict=True
+        )
+    )
+
+
 def test_probe_reports_first_mjx_substep_components_without_causal_ordering():
     from src.algorithms.shac.algorithm import run_determinism_probe
 
