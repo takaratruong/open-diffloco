@@ -218,6 +218,8 @@ from src.algorithms.shac.capture_point_objective import (
 # Set to True to enable per-foot normal force logging.
 DEBUG_FOOT_CONTACTS = False
 ACTOR_FORWARD_JVP_SEED = 20_260_904
+H1_ACTION_DIRECTION_SEED = 20_260_905
+H1_ACTION_FINITE_DIFFERENCE_EPSILON = 1e-5
 
 DETERMINISM_BOUNDARIES = (
     "random_inputs",
@@ -331,6 +333,54 @@ def build_masked_rademacher_direction(
     return jax.tree_util.tree_unflatten(param_structure, direction_leaves)
 
 
+def compute_action_derivative_pair(
+    objective,
+    action: jax.Array,
+    *,
+    direction: jax.Array,
+    finite_difference_epsilon: float,
+) -> dict[str, jax.Array]:
+    """Evaluate reverse, coordinate-forward, and finite-difference action slopes."""
+
+    action = jp.asarray(action)
+    direction = jp.asarray(direction, dtype=action.dtype)
+    if action.ndim != 1 or action.shape != direction.shape:
+        raise ValueError("action and direction must be matching vectors")
+    if not jp.issubdtype(action.dtype, jp.inexact):
+        raise ValueError("action derivative probe requires floating-point actions")
+    if (
+        isinstance(finite_difference_epsilon, bool)
+        or not isinstance(finite_difference_epsilon, (int, float))
+        or not math.isfinite(finite_difference_epsilon)
+        or finite_difference_epsilon <= 0.0
+    ):
+        raise ValueError("finite-difference epsilon must be positive and finite")
+
+    reverse_primal, reverse_gradient = jax.value_and_grad(objective)(action)
+    forward_primal, pushforward = jax.linearize(objective, action)
+    coordinate_basis = jp.eye(action.shape[0], dtype=action.dtype)
+
+    def coordinate_step(_, coordinate_direction):
+        return None, pushforward(coordinate_direction)
+
+    _, forward_gradient = jax.lax.scan(
+        coordinate_step, None, coordinate_basis
+    )
+    forward_directional = jp.vdot(forward_gradient, direction)
+    epsilon = jp.asarray(finite_difference_epsilon, dtype=action.dtype)
+    plus = objective(action + epsilon * direction)
+    minus = objective(action - epsilon * direction)
+    finite_difference_directional = (plus - minus) / (2.0 * epsilon)
+    return {
+        "reverse_primal": reverse_primal,
+        "forward_primal": forward_primal,
+        "reverse_gradient": reverse_gradient,
+        "forward_gradient": forward_gradient,
+        "forward_directional": forward_directional,
+        "finite_difference_directional": finite_difference_directional,
+    }
+
+
 def build_actor_forward_jvp_report(
     first_metrics, second_metrics
 ) -> dict[str, object]:
@@ -436,6 +486,195 @@ def build_actor_forward_jvp_report(
         "reverse_invalid_count": int(np.sum(reverse_invalid)),
         "primals_by_env": _json_safe_numeric(first_primal),
         "directional_derivatives_by_env": _json_safe_numeric(first_tangent),
+    }
+
+
+def build_actor_h1_action_derivative_report(
+    first_metrics, second_metrics
+) -> dict[str, object]:
+    """Serialize a complete paired H1 reverse/forward action derivative probe."""
+
+    prefix = "actor_h1_action_"
+    required = (
+        "actor_cagrad_losses_by_env",
+        "actor_cagrad_gradient_finite_by_env",
+        f"{prefix}reverse_primal_by_env",
+        f"{prefix}forward_primal_by_env",
+        f"{prefix}reverse_gradient_by_env",
+        f"{prefix}forward_gradient_by_env",
+        f"{prefix}forward_directional_by_env",
+        f"{prefix}finite_difference_by_env",
+        f"{prefix}direction_fingerprint",
+        f"{prefix}direction_norm",
+        f"{prefix}finite_difference_epsilon",
+        f"{prefix}dimension",
+    )
+    if any(
+        name not in metrics
+        for metrics in (first_metrics, second_metrics)
+        for name in required
+    ):
+        raise ValueError("H1 action derivative metrics are incomplete")
+
+    def array(metrics, suffix, dtype=np.float64):
+        return np.asarray(metrics[f"{prefix}{suffix}"], dtype=dtype)
+
+    source = np.asarray(
+        first_metrics["actor_cagrad_losses_by_env"], dtype=np.float64
+    )
+    policy_reverse_finite = np.asarray(
+        first_metrics["actor_cagrad_gradient_finite_by_env"], dtype=bool
+    )
+    reverse_primal = array(first_metrics, "reverse_primal_by_env")
+    forward_primal = array(first_metrics, "forward_primal_by_env")
+    reverse_gradient = array(first_metrics, "reverse_gradient_by_env")
+    forward_gradient = array(first_metrics, "forward_gradient_by_env")
+    forward_directional = array(first_metrics, "forward_directional_by_env")
+    finite_difference = array(first_metrics, "finite_difference_by_env")
+    population_size = source.size
+    action_dimension = int(first_metrics[f"{prefix}dimension"])
+    if (
+        source.ndim != 1
+        or population_size < 1
+        or policy_reverse_finite.shape != source.shape
+        or reverse_primal.shape != source.shape
+        or forward_primal.shape != source.shape
+        or reverse_gradient.shape != (population_size, action_dimension)
+        or forward_gradient.shape != reverse_gradient.shape
+        or forward_directional.shape != source.shape
+        or finite_difference.shape != source.shape
+        or action_dimension < 1
+    ):
+        raise ValueError("H1 action derivative population shapes are inconsistent")
+
+    repeat_arrays = (
+        (
+            np.asarray(first_metrics["actor_cagrad_losses_by_env"]),
+            np.asarray(second_metrics["actor_cagrad_losses_by_env"]),
+        ),
+        (
+            np.asarray(first_metrics["actor_cagrad_gradient_finite_by_env"]),
+            np.asarray(second_metrics["actor_cagrad_gradient_finite_by_env"]),
+        ),
+        *(
+            (array(first_metrics, suffix), array(second_metrics, suffix))
+            for suffix in (
+                "reverse_primal_by_env",
+                "forward_primal_by_env",
+                "reverse_gradient_by_env",
+                "forward_gradient_by_env",
+                "forward_directional_by_env",
+                "finite_difference_by_env",
+            )
+        ),
+    )
+    repeat_exact = all(
+        np.array_equal(first, second, equal_nan=True)
+        for first, second in repeat_arrays
+    )
+    first_fingerprint = array(
+        first_metrics, "direction_fingerprint", dtype=np.uint32
+    )
+    second_fingerprint = array(
+        second_metrics, "direction_fingerprint", dtype=np.uint32
+    )
+    direction_norm = float(first_metrics[f"{prefix}direction_norm"])
+    second_direction_norm = float(second_metrics[f"{prefix}direction_norm"])
+    epsilon = float(first_metrics[f"{prefix}finite_difference_epsilon"])
+    second_epsilon = float(second_metrics[f"{prefix}finite_difference_epsilon"])
+    second_dimension = int(second_metrics[f"{prefix}dimension"])
+    metadata_exact = bool(
+        np.array_equal(first_fingerprint, second_fingerprint)
+        and direction_norm == second_direction_norm
+        and epsilon == second_epsilon
+        and action_dimension == second_dimension
+    )
+
+    source_matches_reverse = bool(np.array_equal(source, reverse_primal))
+    source_matches_forward = bool(np.array_equal(source, forward_primal))
+    reverse_finite = np.all(np.isfinite(reverse_gradient), axis=1)
+    forward_finite = np.all(np.isfinite(forward_gradient), axis=1)
+    jointly_finite = reverse_finite & forward_finite
+    close_coordinates = np.isclose(
+        reverse_gradient,
+        forward_gradient,
+        rtol=5e-5,
+        atol=1e-9,
+        equal_nan=False,
+    )
+    gradient_agreement = jointly_finite & np.all(close_coordinates, axis=1)
+    fd_finite = np.isfinite(finite_difference) & np.isfinite(
+        forward_directional
+    )
+    fd_agreement = fd_finite & np.isclose(
+        finite_difference,
+        forward_directional,
+        rtol=5e-3,
+        atol=5e-5,
+    )
+    valid = bool(
+        repeat_exact
+        and metadata_exact
+        and source_matches_reverse
+        and source_matches_forward
+        and np.all(np.isfinite(source))
+        and math.isfinite(direction_norm)
+        and direction_norm > 0.0
+        and math.isfinite(epsilon)
+        and epsilon > 0.0
+    )
+    return {
+        "protocol": "shac-h1-action-derivative-pair-v1",
+        "valid": valid,
+        "population_size": population_size,
+        "action_dimension": action_dimension,
+        "direction_fingerprint": first_fingerprint.tolist(),
+        "direction_norm": direction_norm,
+        "finite_difference_epsilon": epsilon,
+        "source_primal_matches_action_reverse": source_matches_reverse,
+        "source_primal_matches_action_forward": source_matches_forward,
+        "repeat_exact": repeat_exact,
+        "metadata_exact": metadata_exact,
+        "policy_reverse_finite_count": int(np.sum(policy_reverse_finite)),
+        "action_reverse_finite_count": int(np.sum(reverse_finite)),
+        "action_forward_finite_count": int(np.sum(forward_finite)),
+        "forward_recovers_action_reverse_count": int(
+            np.sum(forward_finite & ~reverse_finite)
+        ),
+        "forward_recovers_policy_reverse_count": int(
+            np.sum(forward_finite & ~policy_reverse_finite)
+        ),
+        "action_reverse_mask_matches_policy_reverse": bool(
+            np.array_equal(reverse_finite, policy_reverse_finite)
+        ),
+        "jointly_finite_count": int(np.sum(jointly_finite)),
+        "jointly_finite_gradient_agreement_count": int(
+            np.sum(gradient_agreement)
+        ),
+        "finite_difference_finite_count": int(np.sum(fd_finite)),
+        "finite_difference_agreement_count": int(np.sum(fd_agreement)),
+        "policy_reverse_finite_by_env": policy_reverse_finite.tolist(),
+        "action_reverse_finite_by_env": reverse_finite.tolist(),
+        "action_forward_finite_by_env": forward_finite.tolist(),
+        "jointly_finite_gradient_agreement_by_env": (
+            gradient_agreement.tolist()
+        ),
+        "finite_difference_agreement_by_env": fd_agreement.tolist(),
+        "source_primals_by_env": _json_safe_numeric(source),
+        "action_reverse_primals_by_env": _json_safe_numeric(reverse_primal),
+        "action_forward_primals_by_env": _json_safe_numeric(forward_primal),
+        "action_reverse_gradients_by_env": _json_safe_numeric(
+            reverse_gradient
+        ),
+        "action_forward_gradients_by_env": _json_safe_numeric(
+            forward_gradient
+        ),
+        "action_forward_directional_by_env": _json_safe_numeric(
+            forward_directional
+        ),
+        "finite_difference_directional_by_env": _json_safe_numeric(
+            finite_difference
+        ),
     }
 
 
@@ -609,6 +848,14 @@ def run_determinism_probe(compiled_step, state) -> dict[str, object]:
         )
         report["actor_forward_jvp"] = forward_jvp
         report["valid"] = bool(report["valid"] and forward_jvp["valid"])
+    if "actor_h1_action_reverse_primal_by_env" in first_metrics:
+        action_derivatives = build_actor_h1_action_derivative_report(
+            first_metrics, second_metrics
+        )
+        report["actor_h1_action_derivatives"] = action_derivatives
+        report["valid"] = bool(
+            report["valid"] and action_derivatives["valid"]
+        )
     return report
 
 
@@ -2744,6 +2991,60 @@ def validate_actor_derivative_probe_contract(
         raise ValueError("bootstrap graph excision requires zero bootstrap scale and delay")
 
 
+def validate_actor_h1_action_derivative_probe_contract(
+    *,
+    enabled: bool,
+    ahac: bool,
+    unroll_length: int,
+    ahac_horizon_min: int,
+    ahac_horizon_max: int,
+    ahac_semantics: str,
+    actor_bootstrap_scale: float,
+    actor_bootstrap_delay_steps: int,
+    actor_bootstrap_graph_mode: str,
+    actor_forward_jvp_probe: bool,
+    actor_cagrad: bool,
+    has_unfactorized_actor_terms: bool,
+    determinism_probe_output: str | None,
+) -> None:
+    """Restrict the materialized action derivative pair to its exact H1 seam."""
+
+    if not isinstance(enabled, bool):
+        raise TypeError("actor H1 action derivative probe flag must be boolean")
+    if not enabled:
+        return
+    if not ahac:
+        raise ValueError("actor H1 action derivative probe requires AHAC")
+    if ahac_semantics != "paper_equation_10_no_target":
+        raise ValueError(
+            "actor H1 action derivative probe requires paper AHAC semantics"
+        )
+    if determinism_probe_output is None:
+        raise ValueError("actor H1 action derivative probe is probe-only")
+    if (
+        unroll_length != 1
+        or ahac_horizon_min != 1
+        or ahac_horizon_max != 1
+    ):
+        raise ValueError("actor H1 action derivative probe requires one-step AHAC")
+    if actor_bootstrap_scale != 0.0 or actor_bootstrap_delay_steps != 0:
+        raise ValueError("actor H1 action derivative probe requires zero bootstrap")
+    if actor_bootstrap_graph_mode != "excised":
+        raise ValueError("actor H1 action derivative probe requires bootstrap excised")
+    if actor_forward_jvp_probe:
+        raise ValueError(
+            "actor parameter JVP and H1 action derivative probes are mutually exclusive"
+        )
+    if not actor_cagrad:
+        raise ValueError(
+            "actor H1 action derivative probe requires a CAGrad population"
+        )
+    if has_unfactorized_actor_terms:
+        raise ValueError(
+            "actor H1 action derivative probe requires a factorized objective"
+        )
+
+
 def validate_actor_inactive_horizon_gradient_contract(
     *,
     ahac: bool,
@@ -3630,6 +3931,7 @@ def train(
     allow_ahac_actor_bootstrap_ablation: bool = False,
     actor_bootstrap_graph_mode: str = "connected",
     actor_forward_jvp_probe: bool = False,
+    actor_h1_action_derivative_probe: bool = False,
     actor_inactive_horizon_gradient_mode: str = "connected",
     actor_return_semantics: str = "multi_episode",
     allow_resume_actor_return_semantics_change: bool = False,
@@ -3830,6 +4132,9 @@ def train(
         actor_forward_jvp_probe: In an authorized structurally excised probe,
             measure one deterministic dense actor-parameter JVP alongside the
             ordinary per-environment reverse gradients.
+        actor_h1_action_derivative_probe: In an authorized one-step, zero-
+            bootstrap probe, materialize the exact state/action boundary and
+            compare direct reverse and all-coordinate forward action slopes.
         actor_inactive_horizon_gradient_mode: Keep inactive static-scan MJX
             pullbacks connected, or structurally excise them in a probe while
             preserving their forward telemetry. ``runtime-paired`` evaluates
@@ -4125,6 +4430,31 @@ def train(
         actor_bootstrap_delay_steps=actor_bootstrap_delay_steps,
         actor_bootstrap_graph_mode=actor_bootstrap_graph_mode,
         actor_forward_jvp_probe=actor_forward_jvp_probe,
+        determinism_probe_output=determinism_probe_output,
+    )
+    validate_actor_h1_action_derivative_probe_contract(
+        enabled=actor_h1_action_derivative_probe,
+        ahac=ahac,
+        unroll_length=unroll_length,
+        ahac_horizon_min=ahac_horizon_min,
+        ahac_horizon_max=ahac_horizon_max,
+        ahac_semantics=ahac_semantics,
+        actor_bootstrap_scale=actor_bootstrap_scale,
+        actor_bootstrap_delay_steps=actor_bootstrap_delay_steps,
+        actor_bootstrap_graph_mode=actor_bootstrap_graph_mode,
+        actor_forward_jvp_probe=actor_forward_jvp_probe,
+        actor_cagrad=actor_cagrad,
+        has_unfactorized_actor_terms=bool(
+            actor_policy_anchor_weight != 0.0
+            or actor_counterfactual_wrench_distillation
+            or actor_centroidal_propulsion
+            or actor_support_aware_impulse
+            or actor_capture_point_tracking
+            or actor_learned_torso_wrench
+            or actor_recovery_teacher_dataset_path is not None
+            or actor_contact_topology_gradient_truncation
+            or demonstration_replay_threshold is not None
+        ),
         determinism_probe_output=determinism_probe_output,
     )
     validate_actor_inactive_horizon_gradient_contract(
@@ -5672,6 +6002,16 @@ def train(
     env_state = jax.vmap(env.reset)(
         env_keys, jp.zeros(effective_num_envs)
     )
+    h1_action_direction = (
+        jax.random.rademacher(
+            jax.random.PRNGKey(H1_ACTION_DIRECTION_SEED),
+            (env.action_dim,),
+            dtype=jp.float64,
+        )
+        / jp.sqrt(jp.asarray(env.action_dim, dtype=jp.float64))
+        if actor_h1_action_derivative_probe
+        else None
+    )
     actor_normalizer = canonicalize_normalizer_dtype(
         actor_normalizer, env_state.obs.dtype
     )
@@ -6344,6 +6684,17 @@ def train(
                     active, contact_topology_event, False
                 ),
             }
+            if actor_h1_action_derivative_probe:
+                transition.update(
+                    {
+                        "actor_h1_action_probe_state": jax.tree.map(
+                            jax.lax.stop_gradient, state
+                        ),
+                        "actor_h1_action_probe_action": (
+                            jax.lax.stop_gradient(noisy_action)
+                        ),
+                    }
+                )
             if determinism_probe_output is not None:
                 transition.update(
                     {
@@ -7189,6 +7540,65 @@ def train(
                 (actor_forward_direction,),
             )
 
+        def h1_action_objective(probe_state, candidate_action):
+            candidate_next_state = env.step(probe_state, candidate_action)
+            active = jp.ones((1,), dtype=jp.bool_)
+            actor_return = discounted_actor_return(
+                rewards=candidate_next_state.reward[None],
+                dones=candidate_next_state.done[None],
+                terminals=candidate_next_state.info["terminal"][None],
+                bootstrap_values=jp.zeros((1,), dtype=jp.float32),
+                active=active,
+                final_value=jp.asarray(0.0, dtype=jp.float32),
+                gamma=gamma,
+                bootstrap_scale=current_actor_bootstrap_scale,
+                semantics=actor_return_semantics,
+            )
+            active_count = jp.maximum(jp.sum(active), 1)
+            anchor_loss = (
+                jp.sum(jp.zeros((1,), dtype=candidate_next_state.reward.dtype))
+                / active_count
+            )
+            objective = -actor_return.total / active_count + anchor_loss
+            return objective + adaptive_contact_penalty(
+                contact_by_step=candidate_next_state.info[
+                    "transition_contact_stiffness"
+                ][None],
+                dual=current_ahac_dual,
+                active_mask=active,
+                threshold=ahac_contact_threshold,
+            )
+
+        def h1_action_population_derivatives(population_trajs):
+            probe_states = jax.tree.map(
+                lambda values: values[:, 0],
+                population_trajs["actor_h1_action_probe_state"],
+            )
+            probe_actions = population_trajs[
+                "actor_h1_action_probe_action"
+            ][:, 0]
+
+            def derivative_pair(probe_state, probe_action):
+                return compute_action_derivative_pair(
+                    lambda candidate: h1_action_objective(
+                        probe_state, candidate
+                    ),
+                    probe_action,
+                    direction=h1_action_direction,
+                    finite_difference_epsilon=(
+                        H1_ACTION_FINITE_DIFFERENCE_EPSILON
+                    ),
+                )
+
+            return jax.vmap(derivative_pair)(probe_states, probe_actions)
+
+        def without_h1_action_materialization(population_trajs):
+            return {
+                name: value
+                for name, value in population_trajs.items()
+                if not name.startswith("actor_h1_action_probe_")
+            }
+
         if gradient_accumulation_steps == 1:
             (losses, (trajs, final_states)), per_env_grads = jax.vmap(
                 actor_grad_fn,
@@ -7230,6 +7640,11 @@ def train(
             else:
                 actor_forward_jvp_primals = jp.zeros_like(losses)
                 actor_forward_jvp_tangents = jp.zeros_like(losses)
+            if actor_h1_action_derivative_probe:
+                h1_action_derivatives = h1_action_population_derivatives(
+                    trajs
+                )
+                trajs = without_h1_action_materialization(trajs)
             if actor_learned_torso_wrench:
                 per_env_grads = jax.tree_util.tree_map(
                     lambda gradient, selected: jp.where(
@@ -7345,6 +7760,30 @@ def train(
                 else:
                     shard_forward_jvp_primals = jp.zeros_like(shard_losses)
                     shard_forward_jvp_tangents = jp.zeros_like(shard_losses)
+                if actor_h1_action_derivative_probe:
+                    shard_h1_action_derivatives = (
+                        h1_action_population_derivatives(shard_trajs)
+                    )
+                    shard_trajs = without_h1_action_materialization(
+                        shard_trajs
+                    )
+                else:
+                    shard_h1_action_derivatives = {
+                        "reverse_primal": jp.zeros_like(shard_losses),
+                        "forward_primal": jp.zeros_like(shard_losses),
+                        "reverse_gradient": jp.zeros(
+                            shard_losses.shape + (env.action_dim,),
+                            dtype=shard_losses.dtype,
+                        ),
+                        "forward_gradient": jp.zeros(
+                            shard_losses.shape + (env.action_dim,),
+                            dtype=shard_losses.dtype,
+                        ),
+                        "forward_directional": jp.zeros_like(shard_losses),
+                        "finite_difference_directional": jp.zeros_like(
+                            shard_losses
+                        ),
+                    }
                 if actor_learned_torso_wrench:
                     shard_per_env_grads = jax.tree_util.tree_map(
                         lambda gradient, selected: jp.where(
@@ -7417,6 +7856,7 @@ def train(
                     },
                     shard_forward_jvp_primals,
                     shard_forward_jvp_tangents,
+                    shard_h1_action_derivatives,
                 )
 
             _, actor_shard_outputs = jax.lax.scan(
@@ -7432,6 +7872,7 @@ def train(
                 shard_grad_stats,
                 shard_forward_jvp_primals,
                 shard_forward_jvp_tangents,
+                shard_h1_action_derivatives,
             ) = actor_shard_outputs
             losses = flatten_population(shard_losses)
             trajs = flatten_population(shard_trajs)
@@ -7441,6 +7882,9 @@ def train(
             )
             actor_forward_jvp_tangents = flatten_population(
                 shard_forward_jvp_tangents
+            )
+            h1_action_derivatives = flatten_population(
+                shard_h1_action_derivatives
             )
             if actor_cagrad:
                 cagrad_reduction = reduce_cagrad_shard_accumulators(
@@ -8471,6 +8915,46 @@ def train(
                         for selected in jax.tree_util.tree_leaves(
                             preview_adapter_mask
                         )
+                    ),
+                }
+            )
+        if actor_h1_action_derivative_probe:
+            metrics.update(
+                {
+                    "actor_h1_action_reverse_primal_by_env": (
+                        h1_action_derivatives["reverse_primal"]
+                    ),
+                    "actor_h1_action_forward_primal_by_env": (
+                        h1_action_derivatives["forward_primal"]
+                    ),
+                    "actor_h1_action_reverse_gradient_by_env": (
+                        h1_action_derivatives["reverse_gradient"]
+                    ),
+                    "actor_h1_action_forward_gradient_by_env": (
+                        h1_action_derivatives["forward_gradient"]
+                    ),
+                    "actor_h1_action_forward_directional_by_env": (
+                        h1_action_derivatives["forward_directional"]
+                    ),
+                    "actor_h1_action_finite_difference_by_env": (
+                        h1_action_derivatives[
+                            "finite_difference_directional"
+                        ]
+                    ),
+                    "actor_h1_action_direction_fingerprint": (
+                        tree_bit_fingerprint(h1_action_direction)
+                    ),
+                    "actor_h1_action_direction_norm": jp.linalg.norm(
+                        h1_action_direction
+                    ),
+                    "actor_h1_action_finite_difference_epsilon": (
+                        jp.asarray(
+                            H1_ACTION_FINITE_DIFFERENCE_EPSILON,
+                            dtype=jp.float64,
+                        )
+                    ),
+                    "actor_h1_action_dimension": jp.asarray(
+                        env.action_dim, dtype=jp.int32
                     ),
                 }
             )
@@ -10207,11 +10691,24 @@ def train(
         ),
         "actor_bootstrap_graph_mode": actor_bootstrap_graph_mode,
         "actor_forward_jvp_probe": actor_forward_jvp_probe,
+        "actor_h1_action_derivative_probe": (
+            actor_h1_action_derivative_probe
+        ),
         "actor_inactive_horizon_gradient_mode": (
             actor_inactive_horizon_gradient_mode
         ),
         "actor_forward_jvp_seed": (
             ACTOR_FORWARD_JVP_SEED if actor_forward_jvp_probe else None
+        ),
+        "actor_h1_action_direction_seed": (
+            H1_ACTION_DIRECTION_SEED
+            if actor_h1_action_derivative_probe
+            else None
+        ),
+        "actor_h1_action_finite_difference_epsilon": (
+            H1_ACTION_FINITE_DIFFERENCE_EPSILON
+            if actor_h1_action_derivative_probe
+            else None
         ),
         "actor_return_semantics": actor_return_semantics,
         "allow_resume_actor_return_semantics_change": (
