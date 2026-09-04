@@ -74,6 +74,7 @@ from src.algorithms.shac.ahac import (
     critic_convergence,
     critic_value_loss,
     duplicate_single_critic_params,
+    evaluate_with_inactive_gradient_excision,
     resolve_ahac_resume_settings,
     select_critic_bootstrap_params,
     select_active_tree,
@@ -2707,6 +2708,26 @@ def validate_actor_derivative_probe_contract(
         raise ValueError("bootstrap graph excision requires zero bootstrap scale and delay")
 
 
+def validate_actor_inactive_horizon_gradient_contract(
+    *,
+    ahac: bool,
+    mode: str,
+    determinism_probe_output: str | None,
+) -> None:
+    """Confine inactive AHAC physics-pullback excision to diagnostics."""
+
+    if mode not in {"connected", "excised"}:
+        raise ValueError(
+            "inactive horizon gradient mode must be connected or excised"
+        )
+    if mode == "connected":
+        return
+    if not ahac:
+        raise ValueError("inactive horizon gradient excision requires AHAC")
+    if determinism_probe_output is None:
+        raise ValueError("inactive horizon gradient excision is probe-only")
+
+
 def resolve_actor_bootstrap_resume_scale(
     resumed_hparams: dict[str, object] | None,
     *,
@@ -3575,6 +3596,7 @@ def train(
     allow_ahac_actor_bootstrap_ablation: bool = False,
     actor_bootstrap_graph_mode: str = "connected",
     actor_forward_jvp_probe: bool = False,
+    actor_inactive_horizon_gradient_mode: str = "connected",
     actor_return_semantics: str = "multi_episode",
     allow_resume_actor_return_semantics_change: bool = False,
     ahac: bool = False,
@@ -3774,6 +3796,9 @@ def train(
         actor_forward_jvp_probe: In an authorized structurally excised probe,
             measure one deterministic dense actor-parameter JVP alongside the
             ordinary per-environment reverse gradients.
+        actor_inactive_horizon_gradient_mode: Keep inactive static-scan MJX
+            pullbacks connected, or structurally excise them in a probe while
+            preserving their forward telemetry.
         actor_bootstrap_delay_steps: Environment steps before the actor uses
             target-critic terminal value estimates.
         actor_return_semantics: Whether a fixed rollout accumulates every reset
@@ -4063,6 +4088,11 @@ def train(
         actor_bootstrap_delay_steps=actor_bootstrap_delay_steps,
         actor_bootstrap_graph_mode=actor_bootstrap_graph_mode,
         actor_forward_jvp_probe=actor_forward_jvp_probe,
+        determinism_probe_output=determinism_probe_output,
+    )
+    validate_actor_inactive_horizon_gradient_contract(
+        ahac=ahac,
+        mode=actor_inactive_horizon_gradient_mode,
         determinism_probe_output=determinism_probe_output,
     )
     if actor_forward_jvp_probe and not actor_frozen_controller_residual:
@@ -6001,7 +6031,16 @@ def train(
                     reference_stride=env.reference_stride,
                     reference_length=env.reference_length,
                 )
-            candidate_unreplayed_state = env.step(state, noisy_action)
+            if actor_inactive_horizon_gradient_mode == "excised":
+                candidate_unreplayed_state = (
+                    evaluate_with_inactive_gradient_excision(
+                        lambda operands: env.step(*operands),
+                        (state, noisy_action),
+                        active=active,
+                    )
+                )
+            else:
+                candidate_unreplayed_state = env.step(state, noisy_action)
             if determinism_probe_output is not None:
                 determinism_mjx_substep_fingerprint = (
                     candidate_unreplayed_state.info[
@@ -10105,6 +10144,9 @@ def train(
         ),
         "actor_bootstrap_graph_mode": actor_bootstrap_graph_mode,
         "actor_forward_jvp_probe": actor_forward_jvp_probe,
+        "actor_inactive_horizon_gradient_mode": (
+            actor_inactive_horizon_gradient_mode
+        ),
         "actor_forward_jvp_seed": (
             ACTOR_FORWARD_JVP_SEED if actor_forward_jvp_probe else None
         ),

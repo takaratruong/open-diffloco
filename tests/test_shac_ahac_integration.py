@@ -204,6 +204,7 @@ def test_train_signature_and_source_wire_all_ahac_contracts() -> None:
         "ahac_contact_metric",
         "ahac_semantics",
         "allow_resume_ahac_change",
+        "actor_inactive_horizon_gradient_mode",
     ):
         assert name in signature.parameters
 
@@ -214,11 +215,48 @@ def test_train_signature_and_source_wire_all_ahac_contracts() -> None:
     assert "active_horizon_mask" in source
     assert "update_horizon_dual" in source
     assert "adaptive_contact_penalty" in source
+    assert "evaluate_with_inactive_gradient_excision" in source
+    assert 'actor_inactive_horizon_gradient_mode == "excised"' in source
     assert 'paper_ahac = ahac and ahac_semantics ==' in source
     assert "bootstrap_critic_params" in source
     assert "critic_convergence" in source
     assert '"ahac_horizon"' in source
     assert '"ahac_contact_stiffness_mean"' in source
+
+
+def test_inactive_horizon_gradient_excision_is_probe_only() -> None:
+    from src.algorithms.shac.algorithm import (
+        validate_actor_inactive_horizon_gradient_contract,
+    )
+
+    validate_actor_inactive_horizon_gradient_contract(
+        ahac=False,
+        mode="connected",
+        determinism_probe_output=None,
+    )
+    validate_actor_inactive_horizon_gradient_contract(
+        ahac=True,
+        mode="excised",
+        determinism_probe_output="probe.json",
+    )
+    with pytest.raises(ValueError, match="connected or excised"):
+        validate_actor_inactive_horizon_gradient_contract(
+            ahac=True,
+            mode="masked",
+            determinism_probe_output="probe.json",
+        )
+    with pytest.raises(ValueError, match="requires AHAC"):
+        validate_actor_inactive_horizon_gradient_contract(
+            ahac=False,
+            mode="excised",
+            determinism_probe_output="probe.json",
+        )
+    with pytest.raises(ValueError, match="probe-only"):
+        validate_actor_inactive_horizon_gradient_contract(
+            ahac=True,
+            mode="excised",
+            determinism_probe_output=None,
+        )
 
 
 def test_single_critic_duplication_preserves_both_ahac_heads_exactly() -> None:

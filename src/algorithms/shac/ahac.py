@@ -50,6 +50,29 @@ def active_horizon_mask(horizon: jax.Array, maximum: int) -> jax.Array:
     return jp.arange(maximum, dtype=jp.int32) < rounded
 
 
+def evaluate_with_inactive_gradient_excision(
+    function, operand, *, active: jax.Array
+):
+    """Evaluate both paths identically while omitting an inactive pullback.
+
+    AHAC uses a static maximum-length scan and a dynamic active horizon.  An
+    inactive physics slot is still evaluated for forward telemetry, but its
+    derivative must not enter the actor graph.  Placing the stopped evaluation
+    inside ``lax.cond`` prevents an unsafe primitive transpose from receiving
+    a zero cotangent on the inactive branch.
+    """
+
+    predicate = jp.asarray(active, dtype=jp.bool_)
+    if predicate.ndim != 0:
+        raise ValueError("active horizon predicate must be scalar")
+    return jax.lax.cond(
+        predicate,
+        function,
+        lambda value: jax.lax.stop_gradient(function(value)),
+        operand,
+    )
+
+
 def masked_mean(values: jax.Array, mask: jax.Array) -> jax.Array:
     """Mean over active leading-axis entries without inactive contamination."""
 

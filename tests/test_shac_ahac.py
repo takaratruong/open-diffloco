@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import jax
 import jax.numpy as jp
 import numpy as np
 
@@ -88,6 +89,48 @@ def test_active_horizon_mask_rounds_and_preserves_exact_bounds() -> None:
         active_horizon_mask(jp.asarray(24.0), 24),
         np.ones((24,), dtype=bool),
     )
+
+
+def test_inactive_horizon_step_excises_an_undefined_zero_cotangent_pullback() -> None:
+    from src.algorithms.shac.ahac import (
+        evaluate_with_inactive_gradient_excision,
+    )
+
+    @jax.custom_vjp
+    def undefined_pullback(value):
+        return jp.square(value)
+
+    def forward(value):
+        return jp.square(value), None
+
+    def backward(_, cotangent):
+        return (jp.full_like(cotangent, jp.nan),)
+
+    undefined_pullback.defvjp(forward, backward)
+
+    inactive_value, inactive_gradient = jax.jit(
+        jax.value_and_grad(
+            lambda value: evaluate_with_inactive_gradient_excision(
+                undefined_pullback,
+                value,
+                active=jp.asarray(False),
+            )
+        )
+    )(jp.asarray(2.0))
+    active_value, active_gradient = jax.jit(
+        jax.value_and_grad(
+            lambda value: evaluate_with_inactive_gradient_excision(
+                undefined_pullback,
+                value,
+                active=jp.asarray(True),
+            )
+        )
+    )(jp.asarray(2.0))
+
+    np.testing.assert_allclose(inactive_value, 4.0)
+    np.testing.assert_allclose(active_value, 4.0)
+    np.testing.assert_allclose(inactive_gradient, 0.0)
+    assert bool(jp.isnan(active_gradient))
 
 
 def test_masked_mean_excludes_inactive_slots() -> None:
