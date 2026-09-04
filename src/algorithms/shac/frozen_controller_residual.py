@@ -52,6 +52,23 @@ def frozen_controller_residual_depth(params: PyTree) -> int:
     return depth
 
 
+def build_frozen_controller_residual_mask(
+    params: FrozenControllerResidualParams,
+) -> FrozenControllerResidualParams:
+    """Select every outer-adapter scalar and no frozen-parent scalar."""
+    if not isinstance(params, FrozenControllerResidualParams):
+        raise ValueError("frozen controller residual parameters are invalid")
+    frozen_controller_residual_depth(params)
+    return FrozenControllerResidualParams(
+        parent=jax.tree.map(
+            lambda value: jp.zeros(value.shape, dtype=bool), params.parent
+        ),
+        adapter=jax.tree.map(
+            lambda value: jp.ones(value.shape, dtype=bool), params.adapter
+        ),
+    )
+
+
 def apply_frozen_controller_residual(
     parent_apply: ParentApply,
     adapter_actor: PreviewResidualAdapter,

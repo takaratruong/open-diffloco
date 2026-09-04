@@ -139,6 +139,7 @@ from src.algorithms.shac.frozen_controller_residual import (
     FrozenControllerResidualOptState,
     FrozenControllerResidualParams,
     apply_frozen_controller_residual,
+    build_frozen_controller_residual_mask,
     frozen_controller_residual_depth,
     migrate_frozen_controller_residual,
     update_frozen_controller_residual,
@@ -9486,11 +9487,12 @@ def train(
                 raise ValueError(
                     "resumed frozen controller residual state is invalid"
                 )
+            preview_adapter_mask = build_frozen_controller_residual_mask(
+                resumed_state.actor_params
+            )
             preview_trainable_parameter_count = sum(
-                int(np.asarray(leaf).size)
-                for leaf in jax.tree.leaves(
-                    resumed_state.actor_params.adapter
-                )
+                int(np.count_nonzero(np.asarray(leaf)))
+                for leaf in jax.tree.leaves(preview_adapter_mask)
             )
         if actor_learned_torso_wrench:
             if isinstance(

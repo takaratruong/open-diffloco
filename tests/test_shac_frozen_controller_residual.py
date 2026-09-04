@@ -210,3 +210,53 @@ def test_optimizer_state_is_registered_pytree() -> None:
     assert isinstance(state, FrozenControllerResidualOptState)
     leaves = jax.tree.leaves(state)
     assert leaves
+
+
+def test_nested_resume_mask_builds_production_shaped_forward_direction() -> None:
+    from src.algorithms.shac.algorithm import build_masked_rademacher_direction
+    from src.algorithms.shac.frozen_controller_residual import (
+        build_frozen_controller_residual_mask,
+    )
+
+    params = FrozenControllerResidualParams(
+        parent=_parent(),
+        adapter={
+            "params": {
+                "Dense_0": {
+                    "kernel": jnp.zeros((328, 256), dtype=jnp.float32),
+                    "bias": jnp.zeros((256,), dtype=jnp.float32),
+                },
+                "Dense_1": {
+                    "kernel": jnp.zeros((256, 29), dtype=jnp.float32),
+                    "bias": jnp.zeros((29,), dtype=jnp.float32),
+                },
+            }
+        },
+    )
+
+    mask = build_frozen_controller_residual_mask(params)
+    direction = build_masked_rademacher_direction(params, mask, seed=20260904)
+
+    assert jax.tree.structure(mask) == jax.tree.structure(params)
+    assert jax.tree.structure(direction) == jax.tree.structure(params)
+    assert not any(bool(jnp.any(leaf)) for leaf in jax.tree.leaves(mask.parent))
+    assert all(bool(jnp.all(leaf)) for leaf in jax.tree.leaves(mask.adapter))
+    assert not any(
+        bool(jnp.any(leaf)) for leaf in jax.tree.leaves(direction.parent)
+    )
+    assert all(
+        bool(jnp.all(leaf != 0.0))
+        for leaf in jax.tree.leaves(direction.adapter)
+    )
+    assert sum(
+        int(np.count_nonzero(np.asarray(leaf)))
+        for leaf in jax.tree.leaves(mask)
+    ) == 91_677
+    assert float(
+        jnp.sqrt(
+            sum(
+                jnp.sum(jnp.square(leaf))
+                for leaf in jax.tree.leaves(direction)
+            )
+        )
+    ) == pytest.approx(1.0, abs=5e-5)
