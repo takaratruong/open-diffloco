@@ -189,6 +189,21 @@ def test_classifier_selects_coupled_when_exact_transitions_use_both_categories()
     assert result["changed_constraint_categories"] == ["contact", "frictionloss"]
 
 
+def test_classifier_keeps_limit_only_tracking_distinct_from_coupled() -> None:
+    efc_type = np.asarray([3, 6], dtype=np.int64)
+    active = active_from_mask(SMOOTH_MASK, 0, width=2)
+
+    result = classify_active_set_discriminator(
+        measurement_valid=True,
+        smooth_agreement=SMOOTH_MASK,
+        active=active,
+        efc_type=efc_type,
+    )
+
+    assert result["outcome"] == "other-active-set-exactly-tracks-ad-regimes"
+    assert result["changed_constraint_categories"] == ["limit"]
+
+
 def test_classifier_reports_nontracking_when_active_changes_extra_or_miss_transition() -> (
     None
 ):

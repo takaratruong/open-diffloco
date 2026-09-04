@@ -366,6 +366,9 @@ def classify_active_set_discriminator(
     elif changed_categories == ["contact"]:
         outcome = "contact-active-set-exactly-tracks-ad-regimes"
         interpretable = True
+    elif len(changed_categories) == 1:
+        outcome = "other-active-set-exactly-tracks-ad-regimes"
+        interpretable = True
     else:
         outcome = "coupled-active-set-exactly-tracks-ad-regimes"
         interpretable = True
