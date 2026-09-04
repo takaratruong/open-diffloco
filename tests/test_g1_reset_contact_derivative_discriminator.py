@@ -136,6 +136,38 @@ def test_classifier_rejects_wrong_case_vector_and_non_boolean_values() -> None:
         )
 
 
+def test_e009_validator_accepts_the_pinned_classification_report() -> None:
+    from experiments.g1_reset_contact_derivative_discriminator.run import (
+        SOURCE_E009_RAW_SHA256,
+        _validate_e009_sources,
+    )
+
+    report = {
+        "protocol": "g1-reset-action-derivative-classification-v1",
+        "outcome": "both-actions-have-smooth-derivative-failures",
+        "raw_npz_sha256": SOURCE_E009_RAW_SHA256,
+        "smooth_reference_state": _report([False] * 10),
+    }
+    audit = {
+        "protocol": "g1-reset-action-derivative-independent-audit-v1",
+        "experiment": "E-20260904-009",
+        "valid": True,
+        "scientifically_interpretable": True,
+        "outcome": "both-actions-have-smooth-derivative-failures",
+        "checks_passed": 23,
+        "checks_total": 23,
+        "smooth_pass_count": 0,
+        "reward_pass_count": 0,
+        "source_contact_exact_count": 10,
+        "policy_evaluation_computed": False,
+        "policy_update_computed": False,
+        "optimizer_update_retained": False,
+        "policy_retained": False,
+    }
+
+    _validate_e009_sources(report, audit)
+
+
 def test_runner_reuses_e009_control_and_runs_only_one_treatment_probe() -> None:
     from experiments.g1_reset_contact_derivative_discriminator import run
 

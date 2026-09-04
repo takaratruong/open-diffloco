@@ -207,7 +207,7 @@ def _validate_e009_sources(
     if mismatches:
         raise ValueError(f"E009 audit contract changed: {mismatches}")
     if (
-        report.get("protocol") != "g1-reset-action-derivative-report-v1"
+        report.get("protocol") != "g1-reset-action-derivative-classification-v1"
         or report.get("outcome") != "both-actions-have-smooth-derivative-failures"
         or report.get("raw_npz_sha256") != SOURCE_E009_RAW_SHA256
         or _case_flags(report.get("smooth_reference_state", {})) != [False] * CASE_COUNT
