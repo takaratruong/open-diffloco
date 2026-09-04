@@ -141,6 +141,18 @@ def first_true(values: np.ndarray) -> int | None:
     return int(indices[0]) if indices.size else None
 
 
+def rows_differ(left: np.ndarray, right: np.ndarray, *, name: str) -> np.ndarray:
+    """Reduce an arbitrary per-row signature to one difference bit per row."""
+    left_values = np.asarray(left)
+    right_values = np.asarray(right)
+    if left_values.shape != right_values.shape or left_values.ndim < 2:
+        raise ValueError(f"{name} traces have incompatible shapes")
+    return np.any(
+        left_values != right_values,
+        axis=tuple(range(1, left_values.ndim)),
+    )
+
+
 def selected_boundary_indices(
     length: int, event_indices: tuple[int | None, ...]
 ) -> list[int]:
@@ -282,10 +294,10 @@ def compare_traces(
         != np.asarray(diffsim["foot_support"], dtype=bool)[:overlap],
         axis=1,
     )
-    contact_diff = np.any(
-        np.asarray(ppo["contact_pairs"], dtype=bool)[:overlap]
-        != np.asarray(diffsim["contact_pairs"], dtype=bool)[:overlap],
-        axis=1,
+    contact_diff = rows_differ(
+        np.asarray(ppo["contact_pairs"], dtype=bool)[:overlap],
+        np.asarray(diffsim["contact_pairs"], dtype=bool)[:overlap],
+        name="contact-pair",
     )
     state_divergence = first_true((qpos_delta > 1e-6) | (qvel_delta > 1e-5))
     target_divergence = first_true(target_delta > 1e-6)
@@ -656,10 +668,10 @@ def plot_comparison(
             color=color,
             label=f"start {phase}",
         )
-        contact_difference = np.any(
-            np.asarray(ppo["contact_pairs"])[:overlap]
-            != np.asarray(diffsim["contact_pairs"])[:overlap],
-            axis=1,
+        contact_difference = rows_differ(
+            np.asarray(ppo["contact_pairs"])[:overlap],
+            np.asarray(diffsim["contact_pairs"])[:overlap],
+            name="contact-pair",
         )
         axes[2, 1].step(
             diff_x[:overlap],

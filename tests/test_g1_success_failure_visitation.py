@@ -22,7 +22,7 @@ def _trace(length: int, *, qpos_offset: float = 0.0, terminal: bool = True):
         "position_target": np.zeros((length, 2)),
         "last_action": np.zeros((length, 2)),
         "foot_support": np.zeros((length, 2), dtype=bool),
-        "contact_pairs": np.zeros((length, 4), dtype=bool),
+        "contact_pairs": np.zeros((length, 3, 3), dtype=bool),
         "constraint_force_root": np.zeros((length, 2)),
         "reward": np.ones(length),
         "done": np.asarray([False] * (length - 1) + [True]),
@@ -52,7 +52,7 @@ def test_compare_traces_localizes_first_state_and_contact_divergence() -> None:
     ppo = _trace(5, terminal=False)
     diffsim = _trace(4)
     ppo["qpos"][1:, 0] = 0.2
-    ppo["contact_pairs"][2:, 1] = True
+    ppo["contact_pairs"][2:, 1, 2] = True
     comparison, selected = compare_traces(ppo, diffsim, phase=10)
     assert comparison["overlap_steps"] == 4
     assert comparison["first_state_divergence_phase"] == 11
