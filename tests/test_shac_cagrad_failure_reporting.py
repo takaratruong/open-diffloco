@@ -9,7 +9,7 @@ import pytest
 def _metrics() -> dict[str, object]:
     gradient_finite = np.ones(500, dtype=bool)
     gradient_finite[250] = False
-    phases = np.arange(500, dtype=np.int32) % 272
+    phases = np.repeat(np.asarray([10, 60, 120, 180, 230]), 100)
     phases[250] = 137
     support_modes = np.zeros(500, dtype=np.int32)
     support_modes[250] = 1
@@ -83,6 +83,13 @@ def test_cagrad_failure_report_localizes_nonfinite_environment_gradients() -> No
         }
     ]
     assert report["population"]["nonfinite_loss_environments"] == []
+    assert len(report["population"]["gradient_finite_by_env"]) == 500
+    assert report["population"]["gradient_finite_by_env"][250] is False
+    assert report["population"]["loss_finite_by_env"] == [True] * 500
+    assert report["population"]["start_phases"][250] == 137
+    assert report["population"]["start_support_modes"][250] == 1
+    assert report["population"]["terminal_modes"][250] == 3
+    assert report["population"]["losses_by_env"][250] == 0.25
     assert report["computed_candidate_state_persisted"] is False
 
 

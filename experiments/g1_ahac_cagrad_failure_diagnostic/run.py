@@ -168,12 +168,92 @@ def validate_failure_artifact(report: Mapping[str, Any]) -> dict[str, Any]:
         nonfinite_loss_envs, list
     ):
         raise ValueError("CAGrad per-environment localization is invalid")
+    gradient_finite_by_env = population.get("gradient_finite_by_env")
+    loss_finite_by_env = population.get("loss_finite_by_env")
+    start_phases = population.get("start_phases")
+    start_support_modes = population.get("start_support_modes")
+    terminal_modes = population.get("terminal_modes")
+    losses_by_env = population.get("losses_by_env")
+    full_vectors = (
+        gradient_finite_by_env,
+        loss_finite_by_env,
+        start_phases,
+        start_support_modes,
+        terminal_modes,
+        losses_by_env,
+    )
+    if any(not isinstance(vector, list) or len(vector) != 512 for vector in full_vectors):
+        raise ValueError("CAGrad full population vectors are missing or incomplete")
+    if (
+        any(type(value) is not bool for value in gradient_finite_by_env)
+        or any(type(value) is not bool for value in loss_finite_by_env)
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value < 271
+            for value in start_phases
+        )
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value <= 3
+            for value in (*start_support_modes, *terminal_modes)
+        )
+        or any(
+            (finite and (not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value))))
+            or (not finite and value is not None)
+            for finite, value in zip(loss_finite_by_env, losses_by_env, strict=True)
+        )
+    ):
+        raise ValueError("CAGrad full population vectors are invalid")
+
+    phase_bin_by_env = [min(phase * 5 // 271, 4) for phase in start_phases]
+    reconstructed_loss_counts = [
+        sum(bin_index == target for bin_index in phase_bin_by_env)
+        for target in range(5)
+    ]
+    reconstructed_gradient_counts = [
+        sum(
+            bin_index == target and finite
+            for bin_index, finite in zip(
+                phase_bin_by_env, gradient_finite_by_env, strict=True
+            )
+        )
+        for target in range(5)
+    ]
+
+    def population_row(index: int) -> dict[str, object]:
+        return {
+            "index": index,
+            "phase": start_phases[index],
+            "start_support_mode": start_support_modes[index],
+            "terminal_mode": terminal_modes[index],
+            "loss": losses_by_env[index],
+            "loss_finite": loss_finite_by_env[index],
+        }
+
+    expected_nonfinite_gradient_envs = [
+        population_row(index)
+        for index, finite in enumerate(gradient_finite_by_env)
+        if not finite
+    ]
+    expected_nonfinite_loss_envs = [
+        population_row(index)
+        for index, finite in enumerate(loss_finite_by_env)
+        if not finite
+    ]
     if (
         population.get("size") != 512
         or population.get("finite_gradient_count") != sum(gradient_counts)
         or population.get("finite_loss_count")
         != 512 - len(nonfinite_loss_envs)
+        or sum(gradient_finite_by_env) != sum(gradient_counts)
+        or sum(loss_finite_by_env) != population.get("finite_loss_count")
+        or reconstructed_loss_counts != loss_counts
+        or reconstructed_gradient_counts != gradient_counts
         or len(nonfinite_gradient_envs) != sum(missing)
+        or nonfinite_gradient_envs != expected_nonfinite_gradient_envs
+        or nonfinite_loss_envs != expected_nonfinite_loss_envs
         or any(
             not isinstance(row, Mapping)
             or isinstance(row.get("index"), bool)
@@ -212,6 +292,8 @@ def validate_failure_artifact(report: Mapping[str, Any]) -> dict[str, Any]:
         "loss_bin_counts": loss_counts,
         "missing_gradient_contributors": missing,
         "missing_gradient_contributor_count": sum(missing),
+        "population_size": 512,
+        "full_population_vectors_valid": True,
         "nonfinite_gradient_environments": nonfinite_gradient_envs,
         "nonfinite_loss_environments": nonfinite_loss_envs,
         "actor_gradient_finite_fraction": float(finite_fraction),

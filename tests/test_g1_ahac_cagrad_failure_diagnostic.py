@@ -9,8 +9,16 @@ def _failure_report() -> dict[str, object]:
 
     gradient_finite = np.ones(512, dtype=bool)
     gradient_finite[101] = False
-    phases = np.arange(512, dtype=np.int32) % 272
-    phases[101] = 60
+    phases = np.concatenate(
+        [
+            np.full(count, phase, dtype=np.int32)
+            for count, phase in zip(
+                (101, 99, 102, 99, 111),
+                (10, 60, 120, 180, 230),
+                strict=True,
+            )
+        ]
+    )
     metrics = {
         "actor_cagrad_bin_counts": np.asarray([101, 98, 102, 99, 111]),
         "actor_cagrad_loss_bin_counts": np.asarray([101, 99, 102, 99, 111]),
@@ -65,6 +73,8 @@ def test_failure_artifact_validation_selects_exact_localization() -> None:
     assert validation["valid"] is True
     assert validation["outcome"] == "nonfinite-per-environment-gradients"
     assert validation["missing_gradient_contributor_count"] == 1
+    assert validation["population_size"] == 512
+    assert validation["full_population_vectors_valid"] is True
     assert validation["computed_optimizer_updates"] == 1
     assert validation["persisted_optimizer_updates"] == 0
     assert validation["policy_retained"] is False
@@ -79,4 +89,16 @@ def test_failure_artifact_validation_rejects_persisted_candidate() -> None:
     report["computed_candidate_state_persisted"] = True
 
     with pytest.raises(ValueError, match="no-retention"):
+        validate_failure_artifact(report)
+
+
+def test_failure_artifact_validation_requires_full_population_vectors() -> None:
+    from experiments.g1_ahac_cagrad_failure_diagnostic.run import (
+        validate_failure_artifact,
+    )
+
+    report = _failure_report()
+    del report["population"]["start_phases"]
+
+    with pytest.raises(ValueError, match="full population vectors"):
         validate_failure_artifact(report)

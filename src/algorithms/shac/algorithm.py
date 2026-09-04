@@ -730,6 +730,12 @@ def build_cagrad_failure_report(
             "size": population_size,
             "finite_gradient_count": int(np.sum(gradient_finite_by_env)),
             "finite_loss_count": int(np.sum(loss_finite_by_env)),
+            "gradient_finite_by_env": gradient_finite_by_env.tolist(),
+            "loss_finite_by_env": loss_finite_by_env.tolist(),
+            "start_phases": start_phases.tolist(),
+            "start_support_modes": start_support_modes.tolist(),
+            "terminal_modes": terminal_modes.tolist(),
+            "losses_by_env": _json_safe_numeric(losses_by_env),
             "nonfinite_gradient_environments": environment_rows(
                 nonfinite_gradient_indices
             ),
