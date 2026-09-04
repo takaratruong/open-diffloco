@@ -420,8 +420,9 @@ def _all_nonselected_outputs_match_baseline(
             return False
         for slot, (_, diffsim_index) in enumerate(PHASE_CASES):
             mask = np.arange(CASE_COUNT) != diffsim_index
-            tiled = np.broadcast_to(expected[mask], values[slot, :, mask].shape)
-            if not np.array_equal(values[slot, :, mask], tiled, equal_nan=True):
+            selected = values[slot][:, mask]
+            tiled = np.broadcast_to(expected[mask], selected.shape)
+            if not np.array_equal(selected, tiled, equal_nan=True):
                 return False
     return True
 

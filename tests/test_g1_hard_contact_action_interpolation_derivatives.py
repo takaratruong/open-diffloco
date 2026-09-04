@@ -10,6 +10,7 @@ from experiments.g1_hard_contact_action_interpolation_derivatives.run import (
     ALPHAS,
     PHASE_CASES,
     PROBE_OUTPUT_NAMES,
+    _all_nonselected_outputs_match_baseline,
     baseline_replay_gate,
     classify_action_interpolation,
     execute_interpolation_sweeps,
@@ -80,6 +81,23 @@ def test_baseline_gate_requires_complete_repeat_and_both_e014_invocations() -> N
     assert not baseline_replay_gate(
         actual_first, actual_second, expected_first, expected_second
     )["valid"]
+
+
+def test_nonselected_output_gate_preserves_alpha_then_case_axis_order() -> None:
+    baseline = probe_output()
+    for values in baseline.values():
+        values[...] = np.arange(values.size, dtype=np.float64).reshape(values.shape)
+    sweep = {
+        f"first_{name}": np.broadcast_to(
+            values, (len(PHASE_CASES), ALPHAS.size, *values.shape)
+        ).copy()
+        for name, values in baseline.items()
+    }
+
+    assert _all_nonselected_outputs_match_baseline(sweep, baseline)
+
+    sweep["first_source_primal"][0, 3, 6, 0] += 1.0
+    assert not _all_nonselected_outputs_match_baseline(sweep, baseline)
 
 
 def test_interpolation_sweeps_reuse_one_callable_and_repeat_complete_outputs() -> None:
