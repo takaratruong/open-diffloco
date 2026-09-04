@@ -113,6 +113,23 @@ def _probe(scale: float, gradient_mask: list[bool]) -> dict[str, object]:
     }
 
 
+def test_population_validator_accepts_an_explicit_output_step() -> None:
+    from experiments.g1_ahac_bootstrap_gradient_discriminator.run import (
+        _validate_population_report,
+    )
+
+    report = _population(0.0, [True] * 512)
+    report["computed_output_step"] = 1_868_288
+
+    summary = _validate_population_report(
+        report,
+        expected_scale=0.0,
+        expected_output_step=1_868_288,
+    )
+
+    assert summary["finite_count"] == 512
+
+
 def test_probe_kwargs_change_only_bootstrap_scale_and_output(tmp_path) -> None:
     from experiments.g1_ahac_bootstrap_gradient_discriminator.run import (
         build_probe_kwargs,

@@ -185,13 +185,17 @@ def _population_row(
 
 
 def _validate_population_report(
-    report: Mapping[str, object], *, expected_scale: float
+    report: Mapping[str, object],
+    *,
+    expected_scale: float,
+    expected_input_step: int = START_STEP,
+    expected_output_step: int = END_STEP,
 ) -> dict[str, object]:
     if (
         report.get("protocol") != "shac-cagrad-population-v1"
         or report.get("report_valid") is not True
-        or report.get("input_step") != START_STEP
-        or report.get("computed_output_step") != END_STEP
+        or report.get("input_step") != expected_input_step
+        or report.get("computed_output_step") != expected_output_step
         or report.get("computed_candidate_state_persisted") is not False
     ):
         raise ValueError("CAGrad population report header is invalid")

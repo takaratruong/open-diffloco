@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import inspect
+import textwrap
 
 
 def test_h1_probe_changes_only_the_registered_localization_fields(
@@ -115,3 +117,23 @@ def test_runner_uses_one_nonretained_train_invocation() -> None:
     assert "subprocess" not in source
     assert "policy_retained" in source
     assert "persisted_optimizer_updates" in source
+
+
+def test_h1_artifact_validation_binds_the_h1_output_step() -> None:
+    from experiments.g1_ahac_h1_action_derivative_discriminator import run
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(run._validate_run_artifacts)))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_validate_population_report"
+    ]
+    assert len(calls) == 1
+    keywords = {keyword.arg: ast.unparse(keyword.value) for keyword in calls[0].keywords}
+    assert keywords == {
+        "expected_scale": "0.0",
+        "expected_input_step": "START_STEP",
+        "expected_output_step": "H1_END_STEP",
+    }

@@ -288,7 +288,12 @@ def _validate_run_artifacts(
     action_report = report.get("actor_h1_action_derivatives")
     if not isinstance(population, Mapping) or not isinstance(action_report, Mapping):
         raise TypeError("H1 action derivative population report is missing")
-    _validate_population_report(population, expected_scale=0.0)
+    _validate_population_report(
+        population,
+        expected_scale=0.0,
+        expected_input_step=START_STEP,
+        expected_output_step=H1_END_STEP,
+    )
     if list(run_directory.rglob("*.pkl")):
         raise ValueError("H1 action derivative probe wrote a checkpoint")
     return {
