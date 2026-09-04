@@ -84,6 +84,12 @@ SOURCE_PPO_GRID_SHA256 = (
 SOURCE_DIFFSIM_GRID_SHA256 = (
     "9f459abcdeb6982cd80839b1f1cf2d1ce3152cf9878bf4c79b1434513af60bd9"
 )
+SOURCE_E006_BACKEND_REPRODUCTION_SHA256 = (
+    "e07b201f4d0b3ca8eabd6b0862ba29fdd0615bb82e40347a55c3d222835b2872"
+)
+SOURCE_E006_AUDIT_SHA256 = (
+    "f375ed244a8b37c9bfcf2c693a84218e0dc7c084b6b656d435f922a2927cfb67"
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -458,6 +464,64 @@ def validate_source_grids(
         raise ValueError("source phase-grid outcomes changed")
 
 
+def classify_frozen_controls(
+    ppo: list[Mapping[str, object]],
+    diffsim: list[Mapping[str, object]],
+) -> dict[str, object]:
+    """Require one successful and one failing control on the active backend.
+
+    The PPO source grid was produced on the same GPU path and therefore retains
+    an exact survival-vector gate.  E002's archived phase grid was explicitly a
+    CPU evaluation; its terminal indices are provenance, not an exact GPU gate.
+    """
+    if len(ppo) != len(PHASES) or len(diffsim) != len(PHASES):
+        raise ValueError("frozen controls require the complete phase grid")
+    ppo_survival = [int(row["steps"]) for row in ppo]
+    diffsim_survival = [int(row["steps"]) for row in diffsim]
+    if ppo_survival != list(PPO_SURVIVAL) or not all(
+        row["completed_suffix"] is True and row["terminal"] is False for row in ppo
+    ):
+        raise ValueError("successful PPO control does not reproduce on this backend")
+    if any(
+        row["completed_suffix"] is True or row["terminal"] is not True
+        for row in diffsim
+    ):
+        raise ValueError("failing DiffSim control does not terminate on every phase")
+    return {
+        "outcome": "paired-success-failure-visitation-captured",
+        "ppo_survival": ppo_survival,
+        "diffsim_survival": diffsim_survival,
+    }
+
+
+def validate_e006_backend_diagnosis(
+    reproduction: Mapping[str, object], audit: Mapping[str, object]
+) -> None:
+    """Require the audited CPU-versus-GPU gate diagnosis from E006."""
+    evaluator = reproduction.get("canonical_evaluator_payload", {})
+    evaluator_summary = (
+        evaluator.get("summary", {}) if isinstance(evaluator, Mapping) else {}
+    )
+    if (
+        reproduction.get("protocol")
+        != "e006-current-gpu-canonical-evaluator-reproduction-v1"
+        or reproduction.get("valid") is not True
+        or reproduction.get("historical_cpu_survival") != list(DIFFSIM_SURVIVAL)
+        or reproduction.get("current_gpu_survival") != [124, 135, 81, 92, 79]
+        or reproduction.get("same_failure_category") is not True
+        or evaluator_summary.get("survival") != [124, 135, 81, 92, 79]
+        or evaluator_summary.get("terminal") != [True] * len(PHASES)
+        or audit.get("protocol") != "e006-frozen-control-reproduction-failure-audit-v1"
+        or audit.get("valid") is not True
+        or audit.get("outcome") != "frozen-control-reproduction-failed"
+        or audit.get("checks_passed") != audit.get("checks_total")
+        or audit.get("backend_reproduction_sha256")
+        != SOURCE_E006_BACKEND_REPRODUCTION_SHA256
+        or audit.get("policy_retained") is not False
+    ):
+        raise ValueError("E006 backend diagnosis is invalid")
+
+
 def repository_preflight(repository: Path, code_commit: str) -> dict[str, object]:
     """Require the exact clean pushed code revision named by registration."""
     head = subprocess.run(
@@ -634,6 +698,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--diffsim-hparams", type=Path, required=True)
     parser.add_argument("--source-ppo-grid", type=Path, required=True)
     parser.add_argument("--source-diffsim-grid", type=Path, required=True)
+    parser.add_argument("--source-e006-backend-reproduction", type=Path, required=True)
+    parser.add_argument("--source-e006-audit", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--solver-profile", choices=("g1-4x5",), required=True)
     parser.add_argument("--code-commit", required=True)
@@ -651,6 +717,10 @@ def main() -> None:
         "diffsim_hparams": args.diffsim_hparams.resolve(),
         "source_ppo_grid": args.source_ppo_grid.resolve(),
         "source_diffsim_grid": args.source_diffsim_grid.resolve(),
+        "source_e006_backend_reproduction": (
+            args.source_e006_backend_reproduction.resolve()
+        ),
+        "source_e006_audit": args.source_e006_audit.resolve(),
     }
     expected_hashes = {
         "reference": REFERENCE_SHA256,
@@ -659,6 +729,8 @@ def main() -> None:
         "diffsim_hparams": DIFFSIM_HPARAMS_SHA256,
         "source_ppo_grid": SOURCE_PPO_GRID_SHA256,
         "source_diffsim_grid": SOURCE_DIFFSIM_GRID_SHA256,
+        "source_e006_backend_reproduction": (SOURCE_E006_BACKEND_REPRODUCTION_SHA256),
+        "source_e006_audit": SOURCE_E006_AUDIT_SHA256,
     }
     for name, path in paths.items():
         if not path.is_file() or sha256_file(path) != expected_hashes[name]:
@@ -672,6 +744,10 @@ def main() -> None:
     source_ppo_grid = read_json(paths["source_ppo_grid"])
     source_diffsim_grid = read_json(paths["source_diffsim_grid"])
     validate_source_grids(source_ppo_grid, source_diffsim_grid)
+    validate_e006_backend_diagnosis(
+        read_json(paths["source_e006_backend_reproduction"]),
+        read_json(paths["source_e006_audit"]),
+    )
     preflight = {
         "protocol": "g1-success-failure-visitation-preflight-v1",
         "valid": True,
@@ -764,17 +840,9 @@ def main() -> None:
             for offset in selected
         )
 
-    observed_ppo = tuple(int(row["steps"]) for row in summaries["ppo"])
-    observed_diffsim = tuple(int(row["steps"]) for row in summaries["diffsim"])
-    if observed_ppo != PPO_SURVIVAL or observed_diffsim != DIFFSIM_SURVIVAL:
-        raise ValueError(
-            "fresh phase grid does not reproduce the frozen controls: "
-            f"PPO {observed_ppo}, DiffSim {observed_diffsim}"
-        )
-    if not all(row["completed_suffix"] for row in summaries["ppo"]) or any(
-        row["completed_suffix"] for row in summaries["diffsim"]
-    ):
-        raise ValueError("fresh completion categories do not reproduce")
+    classification = classify_frozen_controls(summaries["ppo"], summaries["diffsim"])
+    observed_ppo = tuple(classification["ppo_survival"])
+    observed_diffsim = tuple(classification["diffsim_survival"])
 
     trace_path = output_root / "paired_trajectories.npz"
     write_npz(trace_path, flatten_traces(traces))
@@ -794,7 +862,7 @@ def main() -> None:
     summary = {
         "protocol": "g1-success-failure-visitation-comparison-v1",
         "valid": True,
-        "outcome": "paired-success-failure-visitation-captured",
+        "outcome": classification["outcome"],
         "phases": list(PHASES),
         "ppo": summaries["ppo"],
         "diffsim": summaries["diffsim"],
@@ -802,7 +870,9 @@ def main() -> None:
         "selected_h1_boundary_count": len(selected_boundaries),
         "fresh_ppo_survival": list(observed_ppo),
         "fresh_diffsim_survival": list(observed_diffsim),
-        "source_grids_reproduced": True,
+        "ppo_source_grid_reproduced": True,
+        "diffsim_source_cpu_survival": list(DIFFSIM_SURVIVAL),
+        "diffsim_same_backend_failing_control": True,
         "exact_reset_pairing": True,
         "common_corrected_reference": REFERENCE_SHA256,
         "nominal_unassisted": True,
