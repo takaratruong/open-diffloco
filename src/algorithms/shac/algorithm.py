@@ -444,6 +444,16 @@ def run_determinism_probe(compiled_step, state) -> dict[str, object]:
                     )
                 }
             )
+    if "actor_cagrad_valid" in first_metrics:
+        input_step = int(np.asarray(getattr(state, "step", state)))
+        computed_output_step = int(
+            np.asarray(getattr(first_state, "step", first_state))
+        )
+        report["cagrad_population"] = build_cagrad_population_report(
+            first_metrics,
+            input_step=input_step,
+            computed_output_step=computed_output_step,
+        )
     return report
 
 
@@ -545,16 +555,15 @@ def _json_safe_numeric(value):
     return number if math.isfinite(number) else None
 
 
-def build_cagrad_failure_report(
+def build_cagrad_population_report(
     metrics,
     *,
     input_step: int,
     computed_output_step: int,
 ) -> dict[str, object]:
-    """Localize a rejected CAGrad update without retaining its candidate state."""
+    """Serialize one complete CAGrad population without retaining its state."""
 
-    if bool(metrics["actor_cagrad_valid"]):
-        raise ValueError("CAGrad failure report requires an invalid aggregation")
+    actor_cagrad_valid = bool(metrics["actor_cagrad_valid"])
     if input_step < 0 or computed_output_step <= input_step:
         raise ValueError("CAGrad failure report requires increasing steps")
 
@@ -637,22 +646,38 @@ def build_cagrad_failure_report(
     ):
         raise ValueError("CAGrad validity sub-gates are inconsistent")
 
-    if not loss_bins_occupied:
-        failure_class = "empty-loss-phase-bin"
+    if actor_cagrad_valid:
+        if not all(
+            (
+                loss_bins_occupied,
+                losses_finite,
+                loss_valid,
+                gradient_bins_occupied,
+                gradient_norms_finite,
+                counts_match,
+                solver_valid,
+                reduction_valid,
+                gradient_finite_fraction == 1.0,
+            )
+        ):
+            raise ValueError("valid CAGrad aggregation has a failed sub-gate")
+        classification = "cagrad-valid"
+    elif not loss_bins_occupied:
+        classification = "empty-loss-phase-bin"
     elif not losses_finite or not loss_valid:
-        failure_class = "nonfinite-actor-losses"
+        classification = "nonfinite-actor-losses"
     elif not gradient_bins_occupied:
-        failure_class = "empty-gradient-phase-bin"
+        classification = "empty-gradient-phase-bin"
     elif not counts_match or gradient_finite_fraction < 1.0:
-        failure_class = "nonfinite-per-environment-gradients"
+        classification = "nonfinite-per-environment-gradients"
     elif not gradient_norms_finite:
-        failure_class = "nonfinite-bin-gradient-norms"
+        classification = "nonfinite-bin-gradient-norms"
     elif not solver_valid:
-        failure_class = "cagrad-solver-invalid"
+        classification = "cagrad-solver-invalid"
     elif not reduction_valid:
-        failure_class = "cagrad-reduction-inconsistent"
+        classification = "cagrad-reduction-inconsistent"
     else:
-        failure_class = "cagrad-validity-inconsistent"
+        classification = "cagrad-validity-inconsistent"
 
     weights = np.asarray(metrics["actor_cagrad_weights"], dtype=np.float64)
     gram_matrix = np.asarray(
@@ -693,10 +718,10 @@ def build_cagrad_failure_report(
         "ahac_horizon_valid",
     )
     return {
-        "protocol": "shac-cagrad-failure-v1",
+        "protocol": "shac-cagrad-population-v1",
         "report_valid": True,
-        "actor_cagrad_valid": False,
-        "failure_class": failure_class,
+        "actor_cagrad_valid": actor_cagrad_valid,
+        "classification": classification,
         "input_step": int(input_step),
         "computed_output_step": int(computed_output_step),
         "computed_candidate_state_persisted": False,
@@ -770,6 +795,27 @@ def build_cagrad_failure_report(
             if name in metrics
         },
     }
+
+
+def build_cagrad_failure_report(
+    metrics,
+    *,
+    input_step: int,
+    computed_output_step: int,
+) -> dict[str, object]:
+    """Localize a rejected CAGrad update without retaining its candidate state."""
+
+    report = build_cagrad_population_report(
+        metrics,
+        input_step=input_step,
+        computed_output_step=computed_output_step,
+    )
+    if report["actor_cagrad_valid"] is not False:
+        raise ValueError("CAGrad failure report requires an invalid aggregation")
+    failure_class = report.pop("classification")
+    report["protocol"] = "shac-cagrad-failure-v1"
+    report["failure_class"] = failure_class
+    return report
 
 
 def persist_cagrad_failure_report(
@@ -2455,6 +2501,30 @@ def actor_bootstrap_scale_at_step(
     return jp.where(step >= delay_steps, target, jp.zeros_like(target))
 
 
+def validate_ahac_actor_bootstrap_contract(
+    *,
+    ahac: bool,
+    actor_bootstrap_scale: float,
+    actor_bootstrap_delay_steps: int,
+    allow_ablation: bool,
+    determinism_probe_output: str | None,
+) -> None:
+    """Keep non-paper AHAC bootstrap settings inside an explicit probe."""
+
+    if not isinstance(allow_ablation, bool):
+        raise ValueError("allow_ahac_actor_bootstrap_ablation must be boolean")
+    if not ahac:
+        return
+    if actor_bootstrap_scale == 1.0 and actor_bootstrap_delay_steps == 0:
+        return
+    if not allow_ablation:
+        raise ValueError("AHAC requires paper bootstrap scale 1.0 with zero delay")
+    if determinism_probe_output is None:
+        raise ValueError("AHAC actor bootstrap ablation is probe-only")
+    if actor_bootstrap_scale != 0.0 or actor_bootstrap_delay_steps != 0:
+        raise ValueError("AHAC actor bootstrap ablation requires zero scale and delay")
+
+
 def resolve_actor_bootstrap_resume_scale(
     resumed_hparams: dict[str, object] | None,
     *,
@@ -3320,6 +3390,7 @@ def train(
     actor_bootstrap_scale: float = 1.0,
     actor_bootstrap_delay_steps: int = 0,
     allow_resume_actor_bootstrap_scale_change: bool = False,
+    allow_ahac_actor_bootstrap_ablation: bool = False,
     actor_return_semantics: str = "multi_episode",
     allow_resume_actor_return_semantics_change: bool = False,
     ahac: bool = False,
@@ -3512,6 +3583,8 @@ def train(
             it replaces the periodic interval.
         allow_resume_actor_bootstrap_scale_change: Explicitly permit changing
             actor terminal-value scale when resuming a checkpoint.
+        allow_ahac_actor_bootstrap_ablation: Permit scale-zero AHAC only when a
+            determinism probe returns without entering the training loop.
         actor_bootstrap_delay_steps: Environment steps before the actor uses
             target-critic terminal value estimates.
         actor_return_semantics: Whether a fixed rollout accumulates every reset
@@ -3788,10 +3861,13 @@ def train(
     ):
         if isinstance(value, bool) or not math.isfinite(value) or value <= 0.0:
             raise ValueError(f"{name} must be positive and finite")
-    if ahac and (actor_bootstrap_scale != 1.0 or actor_bootstrap_delay_steps != 0):
-        raise ValueError(
-            "AHAC requires actor bootstrap scale 1.0 with zero delay"
-        )
+    validate_ahac_actor_bootstrap_contract(
+        ahac=ahac,
+        actor_bootstrap_scale=actor_bootstrap_scale,
+        actor_bootstrap_delay_steps=actor_bootstrap_delay_steps,
+        allow_ablation=allow_ahac_actor_bootstrap_ablation,
+        determinism_probe_output=determinism_probe_output,
+    )
     if (
         isinstance(termination_margin_weight, bool)
         or not math.isfinite(termination_margin_weight)
@@ -9703,6 +9779,9 @@ def train(
         "actor_bootstrap_delay_steps": actor_bootstrap_delay_steps,
         "allow_resume_actor_bootstrap_scale_change": (
             allow_resume_actor_bootstrap_scale_change
+        ),
+        "allow_ahac_actor_bootstrap_ablation": (
+            allow_ahac_actor_bootstrap_ablation
         ),
         "actor_return_semantics": actor_return_semantics,
         "allow_resume_actor_return_semantics_change": (

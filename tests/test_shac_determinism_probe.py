@@ -148,6 +148,33 @@ def test_probe_reports_the_first_mismatching_boundary():
     assert report["metrics_exact"] is False
 
 
+def test_probe_serializes_the_complete_cagrad_population(monkeypatch):
+    import src.algorithms.shac.algorithm as algorithm
+
+    def build_report(metrics, *, input_step, computed_output_step):
+        assert bool(metrics["actor_cagrad_valid"]) is True
+        return {
+            "protocol": "sentinel-cagrad-population",
+            "input_step": input_step,
+            "computed_output_step": computed_output_step,
+        }
+
+    monkeypatch.setattr(algorithm, "build_cagrad_population_report", build_report)
+
+    def step(state):
+        metrics = _metrics(jnp.asarray(7, dtype=jnp.uint32))
+        metrics["actor_cagrad_valid"] = jnp.asarray(True)
+        return state + 12, metrics
+
+    report = algorithm.run_determinism_probe(step, jnp.asarray(10))
+
+    assert report["cagrad_population"] == {
+        "protocol": "sentinel-cagrad-population",
+        "input_step": 10,
+        "computed_output_step": 22,
+    }
+
+
 def test_probe_reports_first_mjx_substep_components_without_causal_ordering():
     from src.algorithms.shac.algorithm import run_determinism_probe
 

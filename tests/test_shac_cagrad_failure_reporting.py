@@ -126,3 +126,30 @@ def test_cagrad_failure_report_is_strict_create_only_json(tmp_path) -> None:
     assert json.loads(raw) == report
     with pytest.raises(FileExistsError, match="already exists"):
         persist_cagrad_failure_report(tmp_path, report)
+
+
+def test_cagrad_population_report_accepts_a_valid_update() -> None:
+    from src.algorithms.shac.algorithm import build_cagrad_population_report
+
+    metrics = _metrics()
+    metrics.update(
+        actor_cagrad_bin_counts=np.full(5, 100),
+        actor_cagrad_reduction_valid=True,
+        actor_cagrad_counts_match=True,
+        actor_cagrad_valid=True,
+        actor_grad_finite_fraction=1.0,
+        actor_grad_raw_max=2.0,
+        actor_cagrad_gradient_finite_by_env=np.ones(500, dtype=bool),
+    )
+
+    report = build_cagrad_population_report(
+        metrics, input_step=10, computed_output_step=20
+    )
+
+    assert report["protocol"] == "shac-cagrad-population-v1"
+    assert report["report_valid"] is True
+    assert report["actor_cagrad_valid"] is True
+    assert report["classification"] == "cagrad-valid"
+    assert report["population"]["finite_gradient_count"] == 500
+    assert report["population"]["nonfinite_gradient_environments"] == []
+    assert report["phase_bins"]["missing_gradient_contributors"] == [0] * 5
